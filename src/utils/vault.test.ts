@@ -50,8 +50,12 @@ describe("findVault", () => {
   });
 
   test("falls back to global vault from XDG config", () => {
-    const globalDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-global-vault-"));
-    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-global-config-"));
+    const globalDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "napkin-global-vault-"),
+    );
+    const configDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "napkin-global-config-"),
+    );
     const napkinConfigDir = path.join(configDir, "napkin");
     fs.mkdirSync(napkinConfigDir, { recursive: true });
     // Create a vault in globalDir
@@ -82,7 +86,9 @@ describe("findVault", () => {
   });
 
   test("ignores invalid global config", () => {
-    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-bad-config-"));
+    const configDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "napkin-bad-config-"),
+    );
     const napkinConfigDir = path.join(configDir, "napkin");
     fs.mkdirSync(napkinConfigDir, { recursive: true });
     fs.writeFileSync(path.join(napkinConfigDir, "config.json"), "not json");
