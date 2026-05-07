@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { basename, extname, join, relative } from "node:path";
+import { basename, extname, relative } from "node:path";
 import { platform } from "node:process";
+import { walkDir } from "../utils/files.js";
 import type { OutputOptions } from "../utils/output.js";
 import { error, info } from "../utils/output.js";
 
@@ -17,16 +18,21 @@ interface GraphLink {
   target: string;
 }
 
-function walkMd(dir: string, files: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    if (entry.startsWith(".")) continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      walkMd(full, files);
-    } else if (extname(full) === ".md") {
-      files.push(full);
-    }
-  }
+function walkMd(root: string): string[] {
+  const files: string[] = [];
+  walkDir(root, {
+    onEntry: (fullPath, entry, kind) => {
+      if (kind !== "file") return;
+      // Exclude dotfiles (dotdirs are already pruned via shouldEnter).
+      if (entry.name.startsWith(".")) return;
+      if (extname(fullPath) === ".md") files.push(fullPath);
+    },
+    // walkMd is stricter than listFiles: it excludes every dotdir,
+    // matching its pre-consolidation behavior. Pruning at descent
+    // time prevents dotdir descendants (e.g. .drafts/secret.md) from
+    // appearing in the graph.
+    shouldEnter: (_fullPath, entry) => !entry.name.startsWith("."),
+  });
   return files;
 }
 
