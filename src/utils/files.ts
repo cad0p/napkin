@@ -75,12 +75,37 @@ export function safeRealpath(dir: string): string | null {
 }
 
 /**
- * Walk a directory tree. Callback is invoked for every non-skipped entry
- * (both directories and files), with the Dirent and its resolved kind.
+ * Options for {@link walkDir}.
+ */
+export interface WalkDirOptions {
+  /**
+   * Called once per visited file or directory entry (after skip-dir
+   * filtering and symlink resolution). Never invoked with kind=null;
+   * non-regular and broken entries are filtered out by the walker.
+   */
+  onEntry: (fullPath: string, entry: fs.Dirent, kind: "dir" | "file") => void;
+  /**
+   * Optional predicate to prune directories. Called for each directory
+   * entry (including symlinked dirs) AFTER the SKIP_DIRS check. Return
+   * false to skip the directory entirely: it is neither reported via
+   * onEntry nor walked. Not consulted for files.
+   *
+   * Use this to apply stricter pruning than SKIP_DIRS (e.g. walkMd and
+   * listFolders prune all dot-prefixed directories).
+   */
+  shouldEnter?: (fullPath: string, entry: fs.Dirent) => boolean;
+}
+
+/**
+ * Walk a directory tree, invoking onEntry for each file and directory.
  *
- * Skip semantics: directory names in SKIP_DIRS are never entered. Callers
- * applying additional filters (e.g. listFolders skipping dotdirs) do so
- * inside the callback.
+ * Skip semantics:
+ * - Directory names in SKIP_DIRS are never entered or reported.
+ * - If shouldEnter is provided, directories for which it returns false
+ *   are also neither entered nor reported. This lets callers prune
+ *   subtrees (e.g. dotdirs) symmetrically with SKIP_DIRS — filtering
+ *   inside onEntry would only hide the report while still walking the
+ *   subtree.
  *
  * Symlink semantics:
  * - Symlinks to regular files/directories are classified via direntKind
@@ -98,10 +123,7 @@ export function safeRealpath(dir: string): string | null {
  * Fail-closed: if realpathSync fails on a subtree entered via a symlink,
  * that subtree is skipped to avoid potential unbounded recursion.
  */
-export function walkDir(
-  root: string,
-  onEntry: (fullPath: string, entry: fs.Dirent, kind: EntryKind) => void,
-): void {
+export function walkDir(root: string, opts: WalkDirOptions): void {
   const onStack = new Set<string>();
   // Seed with the root's real path so a symlink back to the root is
   // detected even though we don't mark the top-level descent as
@@ -129,9 +151,15 @@ export function walkDir(
         const fullPath = path.join(dir, entry.name);
         const kind = direntKind(fullPath, entry);
         if (kind === null) continue;
-        onEntry(fullPath, entry, kind);
         if (kind === "dir") {
+          // Check shouldEnter BEFORE reporting so that a pruned
+          // directory is neither emitted nor walked, matching the
+          // pre-consolidation semantics of listFolders/walkMd.
+          if (opts.shouldEnter && !opts.shouldEnter(fullPath, entry)) continue;
+          opts.onEntry(fullPath, entry, kind);
           walk(fullPath, viaSymlink || entry.isSymbolicLink());
+        } else {
+          opts.onEntry(fullPath, entry, kind);
         }
       }
     } finally {
@@ -168,22 +196,24 @@ export function listFiles(
   const baseDir = opts?.folder ? path.join(vaultPath, opts.folder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
-  walkDir(baseDir, (fullPath, _entry, kind) => {
-    if (kind !== "file") return;
-    // Skip internal config files at vault root
-    if (
-      path.dirname(fullPath) === vaultPath &&
-      skipFiles.has(path.basename(fullPath))
-    )
-      return;
-    const rel = path.relative(vaultPath, fullPath);
-    if (opts?.ext) {
-      if (path.extname(fullPath).slice(1) === opts.ext) {
+  walkDir(baseDir, {
+    onEntry: (fullPath, _entry, kind) => {
+      if (kind !== "file") return;
+      // Skip internal config files at vault root
+      if (
+        path.dirname(fullPath) === vaultPath &&
+        skipFiles.has(path.basename(fullPath))
+      )
+        return;
+      const rel = path.relative(vaultPath, fullPath);
+      if (opts?.ext) {
+        if (path.extname(fullPath).slice(1) === opts.ext) {
+          results.push(rel);
+        }
+      } else {
         results.push(rel);
       }
-    } else {
-      results.push(rel);
-    }
+    },
   });
   return results.sort();
 }
@@ -200,12 +230,15 @@ export function listFolders(
   const baseDir = parentFolder ? path.join(vaultPath, parentFolder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
-  walkDir(baseDir, (fullPath, entry, kind) => {
-    if (kind !== "dir") return;
-    // Match the pre-fix behavior: listFolders (unlike listFiles) also
-    // excludes hidden dirs that aren't in SKIP_DIRS.
-    if (entry.name.startsWith(".")) return;
-    results.push(path.relative(vaultPath, fullPath));
+  walkDir(baseDir, {
+    onEntry: (fullPath, _entry, kind) => {
+      if (kind !== "dir") return;
+      results.push(path.relative(vaultPath, fullPath));
+    },
+    // Prune dotdirs at descent time so their subtree is not walked
+    // (matches pre-consolidation listFolders behavior). walkDir already
+    // filters SKIP_DIRS; this is the additional dotdir policy.
+    shouldEnter: (_fullPath, entry) => !entry.name.startsWith("."),
   });
   return results.sort();
 }

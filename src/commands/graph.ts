@@ -20,15 +20,18 @@ interface GraphLink {
 
 function walkMd(root: string): string[] {
   const files: string[] = [];
-  walkDir(root, (fullPath, entry, kind) => {
-    // Match historical walkMd behavior: exclude hidden entries (not
-    // just SKIP_DIRS). listFiles allows dotfiles whose names aren't in
-    // SKIP_DIRS; the graph walker is stricter and excludes all dot
-    // entries at every level.
-    if (entry.name.startsWith(".")) return;
-    if (kind === "file" && extname(fullPath) === ".md") {
-      files.push(fullPath);
-    }
+  walkDir(root, {
+    onEntry: (fullPath, entry, kind) => {
+      if (kind !== "file") return;
+      // Exclude dotfiles (dotdirs are already pruned via shouldEnter).
+      if (entry.name.startsWith(".")) return;
+      if (extname(fullPath) === ".md") files.push(fullPath);
+    },
+    // walkMd is stricter than listFiles: it excludes every dotdir,
+    // matching its pre-consolidation behavior. Pruning at descent
+    // time prevents dotdir descendants (e.g. .drafts/secret.md) from
+    // appearing in the graph.
+    shouldEnter: (_fullPath, entry) => !entry.name.startsWith("."),
   });
   return files;
 }

@@ -12,13 +12,15 @@ export interface VaultMetadata {
 
 function getVaultSize(vaultPath: string): number {
   let total = 0;
-  walkDir(vaultPath, (fullPath, _entry, kind) => {
-    if (kind !== "file") return;
-    try {
-      total += fs.statSync(fullPath).size;
-    } catch {
-      // Entry disappeared between readdir and stat — skip.
-    }
+  walkDir(vaultPath, {
+    onEntry: (fullPath, _entry, kind) => {
+      if (kind !== "file") return;
+      try {
+        total += fs.statSync(fullPath).size;
+      } catch {
+        // Entry disappeared between readdir and stat — skip.
+      }
+    },
   });
   return total;
 }

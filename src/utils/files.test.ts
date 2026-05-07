@@ -302,3 +302,83 @@ describe("symlink following", () => {
     }
   });
 });
+
+describe("dotdir pruning", () => {
+  let v: { path: string; vaultPath: string; cleanup: () => void };
+
+  beforeEach(() => {
+    v = createTempVault({
+      "README.md": "# Vault",
+      // Not in SKIP_DIRS — these are stricter-filter candidates.
+      ".cache/notes.md": "# cache notes",
+      ".cache/inner/deeper.md": "# deeper",
+      ".vscode/tasks.md": "# tasks",
+      "ok/fine.md": "# fine",
+    });
+  });
+
+  afterEach(() => {
+    v.cleanup();
+  });
+
+  test("listFolders prunes dotdir subtrees entirely", () => {
+    const folders = listFolders(v.vaultPath);
+    // Neither the dotdirs themselves nor any of their descendants.
+    expect(folders).toContain("ok");
+    expect(folders.some((f) => f.startsWith("."))).toBe(false);
+    expect(folders.some((f) => f.includes(".cache"))).toBe(false);
+    expect(folders.some((f) => f.includes(".vscode"))).toBe(false);
+  });
+
+  test("listFiles still lists dotdir contents (permissive by design)", () => {
+    // listFiles's behavior pre-dates this PR: it only skips SKIP_DIRS,
+    // not arbitrary dotdirs. Locked in so a future consolidation
+    // doesn't accidentally shift it.
+    const files = listFiles(v.vaultPath, { ext: "md" });
+    expect(files).toContain("README.md");
+    expect(files).toContain("ok/fine.md");
+    expect(files).toContain(".cache/notes.md");
+    expect(files).toContain(".cache/inner/deeper.md");
+    expect(files).toContain(".vscode/tasks.md");
+  });
+});
+
+describe("unreadable directories", () => {
+  let v: { path: string; vaultPath: string; cleanup: () => void };
+  let unreadableDir: string;
+
+  beforeEach(() => {
+    v = createTempVault({
+      "keep.md": "# keep",
+      "locked/note.md": "# note",
+    });
+    unreadableDir = path.join(v.vaultPath, "locked");
+    // Drop read+exec perms so readdirSync throws. Skipped if running
+    // as root (root bypasses DAC permissions).
+    fs.chmodSync(unreadableDir, 0o000);
+  });
+
+  afterEach(() => {
+    // Restore perms so cleanup can remove the tree.
+    try {
+      fs.chmodSync(unreadableDir, 0o755);
+    } catch {
+      // ignore
+    }
+    v.cleanup();
+  });
+
+  test("listFiles silently skips an unreadable subdirectory", () => {
+    // process.geteuid is node-only; bun provides it via node:process.
+    // Skip the assertion when running as root because chmod 0 is a
+    // no-op for UID 0.
+    if (typeof process.geteuid === "function" && process.geteuid() === 0) {
+      return;
+    }
+    const files = listFiles(v.vaultPath, { ext: "md" });
+    expect(files).toContain("keep.md");
+    // locked/ was reported as a dir (via Dirent) but its contents
+    // couldn't be read — walker should return cleanly without throwing.
+    expect(files).not.toContain("locked/note.md");
+  });
+});
