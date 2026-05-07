@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { listFiles, listFolders } from "../utils/files.js";
+import { listFiles, listFolders, walkDir } from "../utils/files.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 export interface VaultMetadata {
@@ -13,42 +12,14 @@ export interface VaultMetadata {
 
 function getVaultSize(vaultPath: string): number {
   let total = 0;
-  const visited = new Set<string>();
-  function walk(dir: string) {
+  walkDir(vaultPath, (fullPath, _entry, kind) => {
+    if (kind !== "file") return;
     try {
-      const real = fs.realpathSync(dir);
-      if (visited.has(real)) return;
-      visited.add(real);
+      total += fs.statSync(fullPath).size;
     } catch {
-      return;
+      // Entry disappeared between readdir and stat — skip.
     }
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (
-        entry.name === ".git" ||
-        entry.name === ".obsidian" ||
-        entry.name === ".napkin"
-      )
-        continue;
-      const full = path.join(dir, entry.name);
-      // Resolve symlinks via statSync so symlinked dirs/files are counted.
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(full);
-      } catch {
-        // Broken symlink or inaccessible — skip.
-        continue;
-      }
-      if (stat.isDirectory()) walk(full);
-      else if (stat.isFile()) total += stat.size;
-    }
-  }
-  walk(vaultPath);
+  });
   return total;
 }
 

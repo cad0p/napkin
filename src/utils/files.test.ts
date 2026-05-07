@@ -249,9 +249,48 @@ describe("symlink following", () => {
     fs.symlinkSync(linkedVault.vaultPath, path.join(subdir, "loop"));
 
     const files = listFiles(linkedVault.vaultPath, { ext: "md" });
-    expect(files).toContain("a/inside.md");
-    // Cycle is entered at most once — walker terminates and returns.
-    expect(files.length).toBeGreaterThan(0);
+    // Cycle is detected before re-entry: the vault is not walked a
+    // second time via the `loop` symlink, so the result is the same
+    // as if `loop` didn't exist.
+    expect(new Set(files)).toEqual(
+      new Set([
+        "README.md",
+        "a/inside.md",
+        "linked-dir/subdir/nested.md",
+        "linked-dir/top-level.md",
+        "linked-file.md",
+      ]),
+    );
+  });
+
+  test("listFolders detects a symlink cycle back to an ancestor", () => {
+    const subdir = path.join(linkedVault.vaultPath, "a");
+    fs.mkdirSync(subdir, { recursive: true });
+    fs.symlinkSync(linkedVault.vaultPath, path.join(subdir, "loop"));
+
+    // Should return cleanly (not hang or overflow). `loop` itself
+    // appears once as a visible folder, but its contents are not
+    // re-walked.
+    const folders = listFolders(linkedVault.vaultPath);
+    expect(folders).toContain("a");
+    expect(folders).toContain("linked-dir");
+    // No entry should re-enter the vault via the loop prefix.
+    for (const f of folders) {
+      expect(f.startsWith("a/loop/a/")).toBe(false);
+    }
+  });
+
+  test("sibling symlinks pointing at the same target are both walked", () => {
+    // Two distinct symlink names, same underlying tmpRoot. Each
+    // sibling should contribute its own prefixed entries.
+    fs.symlinkSync(tmpRoot, path.join(linkedVault.vaultPath, "mirror-a"));
+    fs.symlinkSync(tmpRoot, path.join(linkedVault.vaultPath, "mirror-b"));
+
+    const files = listFiles(linkedVault.vaultPath, { ext: "md" });
+    expect(files).toContain("mirror-a/top-level.md");
+    expect(files).toContain("mirror-a/subdir/nested.md");
+    expect(files).toContain("mirror-b/top-level.md");
+    expect(files).toContain("mirror-b/subdir/nested.md");
   });
 
   test("symlink named like a skipDir entry is still skipped", () => {

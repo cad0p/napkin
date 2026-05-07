@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { basename, extname, join, relative } from "node:path";
+import { basename, extname, relative } from "node:path";
 import { platform } from "node:process";
+import { walkDir } from "../utils/files.js";
 import type { OutputOptions } from "../utils/output.js";
 import { error, info } from "../utils/output.js";
 
@@ -17,41 +18,18 @@ interface GraphLink {
   target: string;
 }
 
-function walkMd(
-  dir: string,
-  files: string[] = [],
-  visited: Set<string> = new Set(),
-): string[] {
-  try {
-    const real = realpathSync(dir);
-    if (visited.has(real)) return files;
-    visited.add(real);
-  } catch {
-    return files;
-  }
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return files;
-  }
-  for (const entry of entries) {
-    if (entry.startsWith(".")) continue;
-    const full = join(dir, entry);
-    let stat: ReturnType<typeof statSync>;
-    try {
-      // statSync follows symlinks, so both native dirs and symlinked dirs are walked.
-      stat = statSync(full);
-    } catch {
-      // Broken symlink or inaccessible entry — skip.
-      continue;
+function walkMd(root: string): string[] {
+  const files: string[] = [];
+  walkDir(root, (fullPath, entry, kind) => {
+    // Match historical walkMd behavior: exclude hidden entries (not
+    // just SKIP_DIRS). listFiles allows dotfiles whose names aren't in
+    // SKIP_DIRS; the graph walker is stricter and excludes all dot
+    // entries at every level.
+    if (entry.name.startsWith(".")) return;
+    if (kind === "file" && extname(fullPath) === ".md") {
+      files.push(fullPath);
     }
-    if (stat.isDirectory()) {
-      walkMd(full, files, visited);
-    } else if (extname(full) === ".md") {
-      files.push(full);
-    }
-  }
+  });
   return files;
 }
 

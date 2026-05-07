@@ -16,26 +16,45 @@ export interface ListFilesOptions {
 }
 
 /**
- * Classify a Dirent that may be a symlink.
- * - Regular dir/file: returns the native kind.
- * - Symbolic link: follows via statSync and reports the target kind.
- * - Broken symlink or other special types (sockets, FIFOs, etc.): returns null.
+ * Directory names that walkers skip unconditionally (internal Obsidian/napkin
+ * state, VCS metadata, and package managers).
  *
- * Using this lets callers treat symlinks to directories/files as first-class
+ * Shared by listFiles, listFolders, walkMd (graph), and getVaultSize so all
+ * four walkers agree on what to exclude. This matters especially when a vault
+ * contains symlinks into external trees (e.g. Brazil workspace packages) whose
+ * node_modules/ would otherwise balloon results.
+ */
+export const SKIP_DIRS: ReadonlySet<string> = new Set([
+  ".obsidian",
+  ".git",
+  ".trash",
+  ".nanny",
+  ".napkin",
+  "node_modules",
+]);
+
+/** What a Dirent resolves to, following symlinks to their target. */
+export type EntryKind = "dir" | "file" | null;
+
+/**
+ * Classify a Dirent. For symlinks, follows to the target and reports the
+ * target kind. Returns null for broken symlinks, unreadable targets, and
+ * non-regular entries (sockets, FIFOs, devices).
+ *
+ * Using this lets walkers treat symlinks to directories/files as first-class
  * entries while still gracefully skipping unreadable targets.
  */
-function classifyEntry(
-  fullPath: string,
-  entry: fs.Dirent,
-): { isDir: boolean; isFile: boolean } | null {
-  if (entry.isDirectory()) return { isDir: true, isFile: false };
-  if (entry.isFile()) return { isDir: false, isFile: true };
+export function direntKind(fullPath: string, entry: fs.Dirent): EntryKind {
+  if (entry.isDirectory()) return "dir";
+  if (entry.isFile()) return "file";
   if (entry.isSymbolicLink()) {
     try {
       const stat = fs.statSync(fullPath); // follows symlinks
-      return { isDir: stat.isDirectory(), isFile: stat.isFile() };
+      if (stat.isDirectory()) return "dir";
+      if (stat.isFile()) return "file";
+      return null; // socket / FIFO / device
     } catch {
-      // Broken symlink or target inaccessible — silently skip.
+      // Broken symlink or target inaccessible.
       return null;
     }
   }
@@ -43,10 +62,11 @@ function classifyEntry(
 }
 
 /**
- * Resolve a directory's real path for cycle detection. Returns null if the
- * path can't be resolved (e.g. permission error on a traversed symlink).
+ * Resolve a directory's real path for cycle detection. Returns null on
+ * failure (permission errors, broken intermediate path, etc.) so callers
+ * can fail closed rather than risk an unbounded walk.
  */
-function safeRealpath(dir: string): string | null {
+export function safeRealpath(dir: string): string | null {
   try {
     return fs.realpathSync(dir);
   } catch {
@@ -55,123 +75,138 @@ function safeRealpath(dir: string): string | null {
 }
 
 /**
- * Recursively list files in a vault, skipping .obsidian, .git, .trash, node_modules.
+ * Walk a directory tree. Callback is invoked for every non-skipped entry
+ * (both directories and files), with the Dirent and its resolved kind.
  *
- * Symlinks to files and directories are followed; symlink cycles are detected
- * via real-path tracking and a cycle is entered at most once.
+ * Skip semantics: directory names in SKIP_DIRS are never entered. Callers
+ * applying additional filters (e.g. listFolders skipping dotdirs) do so
+ * inside the callback.
+ *
+ * Symlink semantics:
+ * - Symlinks to regular files/directories are classified via direntKind
+ *   and reported with kind "dir" or "file".
+ * - A symlink that resolves to a directory is walked recursively.
+ * - Broken symlinks, sockets, FIFOs, and devices are silently skipped.
+ *
+ * Cycle detection: uses an on-stack set of realpaths for the current
+ * recursion path. A symlink that resolves to an ancestor in the descent
+ * is skipped exactly once; two sibling symlinks to the same target are
+ * both walked. realpathSync is only invoked when crossing a symlink
+ * boundary (or at the root), so symlink-free vaults pay no extra cost
+ * versus the pre-fix baseline.
+ *
+ * Fail-closed: if realpathSync fails on a subtree entered via a symlink,
+ * that subtree is skipped to avoid potential unbounded recursion.
+ */
+export function walkDir(
+  root: string,
+  onEntry: (fullPath: string, entry: fs.Dirent, kind: EntryKind) => void,
+): void {
+  const onStack = new Set<string>();
+  // Seed with the root's real path so a symlink back to the root is
+  // detected even though we don't mark the top-level descent as
+  // "via symlink".
+  const rootReal = safeRealpath(root);
+  if (rootReal !== null) onStack.add(rootReal);
+
+  function walk(dir: string, viaSymlink: boolean): void {
+    let stackKey: string | null = null;
+    if (viaSymlink) {
+      stackKey = safeRealpath(dir);
+      if (stackKey === null) return; // inaccessible symlinked subtree
+      if (onStack.has(stackKey)) return; // cycle
+      onStack.add(stackKey);
+    }
+    try {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        const fullPath = path.join(dir, entry.name);
+        const kind = direntKind(fullPath, entry);
+        if (kind === null) continue;
+        onEntry(fullPath, entry, kind);
+        if (kind === "dir") {
+          walk(fullPath, viaSymlink || entry.isSymbolicLink());
+        }
+      }
+    } finally {
+      if (stackKey !== null) onStack.delete(stackKey);
+    }
+  }
+
+  walk(root, false);
+}
+
+/**
+ * Recursively list files in a vault.
+ *
+ * - Skips the directories in SKIP_DIRS (".obsidian", ".git", etc.).
+ * - Follows symlinks to files and directories. Note that symlinked content
+ *   may physically live outside vaultPath; callers that feed results to
+ *   downstream consumers (e.g. LLM prompts via the SDK) should be aware
+ *   that `readFile` of a returned path may access external data.
+ * - Detects symlink cycles via realpath tracking on the current recursion
+ *   path, so a symlink pointing back to an ancestor is entered at most
+ *   once. Sibling symlinks to the same target are both walked (each
+ *   contributes its own prefixed entries).
+ * - Broken symlinks, sockets, FIFOs, and unreadable entries are silently
+ *   skipped.
  */
 export function listFiles(
   vaultPath: string,
   opts?: ListFilesOptions,
 ): string[] {
   const results: string[] = [];
-  const skipDirs = new Set([
-    ".obsidian",
-    ".git",
-    ".trash",
-    ".nanny",
-    ".napkin",
-    "node_modules",
-  ]);
   // Internal napkin files that shouldn't appear in vault content listings
   const skipFiles = new Set(["config.json", "search-cache.json"]);
 
   const baseDir = opts?.folder ? path.join(vaultPath, opts.folder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
-  const visited = new Set<string>();
-
-  function walk(dir: string) {
-    const real = safeRealpath(dir);
-    if (real !== null) {
-      if (visited.has(real)) return;
-      visited.add(real);
-    }
-
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
+  walkDir(baseDir, (fullPath, _entry, kind) => {
+    if (kind !== "file") return;
+    // Skip internal config files at vault root
+    if (
+      path.dirname(fullPath) === vaultPath &&
+      skipFiles.has(path.basename(fullPath))
+    )
       return;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith(".") && skipDirs.has(entry.name)) continue;
-      const fullPath = path.join(dir, entry.name);
-      const kind = classifyEntry(fullPath, entry);
-      if (!kind) continue;
-      if (kind.isDir) {
-        if (!skipDirs.has(entry.name)) walk(fullPath);
-      } else if (kind.isFile) {
-        // Skip internal config files at vault root
-        if (dir === vaultPath && skipFiles.has(entry.name)) continue;
-        const rel = path.relative(vaultPath, fullPath);
-        if (opts?.ext) {
-          if (path.extname(entry.name).slice(1) === opts.ext) {
-            results.push(rel);
-          }
-        } else {
-          results.push(rel);
-        }
+    const rel = path.relative(vaultPath, fullPath);
+    if (opts?.ext) {
+      if (path.extname(fullPath).slice(1) === opts.ext) {
+        results.push(rel);
       }
+    } else {
+      results.push(rel);
     }
-  }
-
-  walk(baseDir);
+  });
   return results.sort();
 }
 
 /**
- * List folders in a vault, skipping hidden/system dirs.
- *
- * Symlinks to directories are followed; symlink cycles are detected via
- * real-path tracking.
+ * List folders in a vault. Same symlink semantics as listFiles.
  */
 export function listFolders(
   vaultPath: string,
   parentFolder?: string,
 ): string[] {
   const results: string[] = [];
-  const skipDirs = new Set([
-    ".obsidian",
-    ".git",
-    ".trash",
-    ".nanny",
-    ".napkin",
-    "node_modules",
-  ]);
 
   const baseDir = parentFolder ? path.join(vaultPath, parentFolder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
-  const visited = new Set<string>();
-
-  function walk(dir: string) {
-    const real = safeRealpath(dir);
-    if (real !== null) {
-      if (visited.has(real)) return;
-      visited.add(real);
-    }
-
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (skipDirs.has(entry.name)) continue;
-      if (entry.name.startsWith(".")) continue;
-      const fullPath = path.join(dir, entry.name);
-      const kind = classifyEntry(fullPath, entry);
-      if (!kind) continue;
-      if (kind.isDir) {
-        results.push(path.relative(vaultPath, fullPath));
-        walk(fullPath);
-      }
-    }
-  }
-
-  walk(baseDir);
+  walkDir(baseDir, (fullPath, entry, kind) => {
+    if (kind !== "dir") return;
+    // Match the pre-fix behavior: listFolders (unlike listFiles) also
+    // excludes hidden dirs that aren't in SKIP_DIRS.
+    if (entry.name.startsWith(".")) return;
+    results.push(path.relative(vaultPath, fullPath));
+  });
   return results.sort();
 }
 
