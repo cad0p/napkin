@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { basename, extname, join, relative } from "node:path";
 import { platform } from "node:process";
@@ -17,12 +17,37 @@ interface GraphLink {
   target: string;
 }
 
-function walkMd(dir: string, files: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
+function walkMd(
+  dir: string,
+  files: string[] = [],
+  visited: Set<string> = new Set(),
+): string[] {
+  try {
+    const real = realpathSync(dir);
+    if (visited.has(real)) return files;
+    visited.add(real);
+  } catch {
+    return files;
+  }
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return files;
+  }
+  for (const entry of entries) {
     if (entry.startsWith(".")) continue;
     const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      walkMd(full, files);
+    let stat: ReturnType<typeof statSync>;
+    try {
+      // statSync follows symlinks, so both native dirs and symlinked dirs are walked.
+      stat = statSync(full);
+    } catch {
+      // Broken symlink or inaccessible entry — skip.
+      continue;
+    }
+    if (stat.isDirectory()) {
+      walkMd(full, files, visited);
     } else if (extname(full) === ".md") {
       files.push(full);
     }

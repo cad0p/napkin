@@ -16,7 +16,49 @@ export interface ListFilesOptions {
 }
 
 /**
+ * Classify a Dirent that may be a symlink.
+ * - Regular dir/file: returns the native kind.
+ * - Symbolic link: follows via statSync and reports the target kind.
+ * - Broken symlink or other special types (sockets, FIFOs, etc.): returns null.
+ *
+ * Using this lets callers treat symlinks to directories/files as first-class
+ * entries while still gracefully skipping unreadable targets.
+ */
+function classifyEntry(
+  fullPath: string,
+  entry: fs.Dirent,
+): { isDir: boolean; isFile: boolean } | null {
+  if (entry.isDirectory()) return { isDir: true, isFile: false };
+  if (entry.isFile()) return { isDir: false, isFile: true };
+  if (entry.isSymbolicLink()) {
+    try {
+      const stat = fs.statSync(fullPath); // follows symlinks
+      return { isDir: stat.isDirectory(), isFile: stat.isFile() };
+    } catch {
+      // Broken symlink or target inaccessible — silently skip.
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve a directory's real path for cycle detection. Returns null if the
+ * path can't be resolved (e.g. permission error on a traversed symlink).
+ */
+function safeRealpath(dir: string): string | null {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Recursively list files in a vault, skipping .obsidian, .git, .trash, node_modules.
+ *
+ * Symlinks to files and directories are followed; symlink cycles are detected
+ * via real-path tracking and a cycle is entered at most once.
  */
 export function listFiles(
   vaultPath: string,
@@ -37,14 +79,29 @@ export function listFiles(
   const baseDir = opts?.folder ? path.join(vaultPath, opts.folder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
+  const visited = new Set<string>();
+
   function walk(dir: string) {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const real = safeRealpath(dir);
+    if (real !== null) {
+      if (visited.has(real)) return;
+      visited.add(real);
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (entry.name.startsWith(".") && skipDirs.has(entry.name)) continue;
       const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
+      const kind = classifyEntry(fullPath, entry);
+      if (!kind) continue;
+      if (kind.isDir) {
         if (!skipDirs.has(entry.name)) walk(fullPath);
-      } else if (entry.isFile()) {
+      } else if (kind.isFile) {
         // Skip internal config files at vault root
         if (dir === vaultPath && skipFiles.has(entry.name)) continue;
         const rel = path.relative(vaultPath, fullPath);
@@ -65,6 +122,9 @@ export function listFiles(
 
 /**
  * List folders in a vault, skipping hidden/system dirs.
+ *
+ * Symlinks to directories are followed; symlink cycles are detected via
+ * real-path tracking.
  */
 export function listFolders(
   vaultPath: string,
@@ -83,13 +143,28 @@ export function listFolders(
   const baseDir = parentFolder ? path.join(vaultPath, parentFolder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
+  const visited = new Set<string>();
+
   function walk(dir: string) {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const real = safeRealpath(dir);
+    if (real !== null) {
+      if (visited.has(real)) return;
+      visited.add(real);
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (skipDirs.has(entry.name)) continue;
       if (entry.name.startsWith(".")) continue;
       const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
+      const kind = classifyEntry(fullPath, entry);
+      if (!kind) continue;
+      if (kind.isDir) {
         results.push(path.relative(vaultPath, fullPath));
         walk(fullPath);
       }

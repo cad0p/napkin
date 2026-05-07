@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   getFileInfo,
   listFiles,
@@ -172,5 +175,91 @@ describe("getFileInfo", () => {
     expect(info.size).toBeGreaterThan(0);
     expect(info.created).toBeGreaterThan(0);
     expect(info.modified).toBeGreaterThan(0);
+  });
+});
+
+describe("symlink following", () => {
+  let tmpRoot: string;
+  let linkedVault: { path: string; vaultPath: string; cleanup: () => void };
+
+  beforeEach(() => {
+    // External directory outside the vault that we'll symlink into it.
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-symlink-src-"));
+    fs.mkdirSync(path.join(tmpRoot, "subdir"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRoot, "top-level.md"),
+      "# Top-level\nLinked file content.",
+    );
+    fs.writeFileSync(
+      path.join(tmpRoot, "subdir", "nested.md"),
+      "# Nested\nDeep content.",
+    );
+
+    linkedVault = createTempVault({
+      "README.md": "# Vault with symlinks",
+    });
+    // Symlinked directory: wikis/linked-dir -> tmpRoot
+    fs.symlinkSync(tmpRoot, path.join(linkedVault.vaultPath, "linked-dir"));
+    // Symlinked file: linked-file.md -> tmpRoot/top-level.md
+    fs.symlinkSync(
+      path.join(tmpRoot, "top-level.md"),
+      path.join(linkedVault.vaultPath, "linked-file.md"),
+    );
+  });
+
+  afterEach(() => {
+    linkedVault.cleanup();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  test("listFiles follows a symlinked directory into its files", () => {
+    const files = listFiles(linkedVault.vaultPath, { ext: "md" });
+    expect(files).toContain("linked-dir/top-level.md");
+    expect(files).toContain("linked-dir/subdir/nested.md");
+  });
+
+  test("listFiles includes a symlinked file", () => {
+    const files = listFiles(linkedVault.vaultPath, { ext: "md" });
+    expect(files).toContain("linked-file.md");
+  });
+
+  test("listFolders surfaces a symlinked directory", () => {
+    const folders = listFolders(linkedVault.vaultPath);
+    expect(folders).toContain("linked-dir");
+    expect(folders).toContain("linked-dir/subdir");
+  });
+
+  test("listFiles silently skips a broken symlink", () => {
+    fs.symlinkSync(
+      path.join(tmpRoot, "does-not-exist.md"),
+      path.join(linkedVault.vaultPath, "broken.md"),
+    );
+    const files = listFiles(linkedVault.vaultPath, { ext: "md" });
+    // Real + symlinked-target files are present; broken link is skipped.
+    expect(files).toContain("README.md");
+    expect(files).toContain("linked-file.md");
+    expect(files).not.toContain("broken.md");
+  });
+
+  test("listFiles handles symlink cycles without infinite loop", () => {
+    // a/ contains link 'loop' that points back to the vault root.
+    const subdir = path.join(linkedVault.vaultPath, "a");
+    fs.mkdirSync(subdir, { recursive: true });
+    fs.writeFileSync(path.join(subdir, "inside.md"), "# inside");
+    fs.symlinkSync(linkedVault.vaultPath, path.join(subdir, "loop"));
+
+    const files = listFiles(linkedVault.vaultPath, { ext: "md" });
+    expect(files).toContain("a/inside.md");
+    // Cycle is entered at most once — walker terminates and returns.
+    expect(files.length).toBeGreaterThan(0);
+  });
+
+  test("symlink named like a skipDir entry is still skipped", () => {
+    // A symlink named 'node_modules' should be excluded just like a real one.
+    fs.symlinkSync(tmpRoot, path.join(linkedVault.vaultPath, "node_modules"));
+    const files = listFiles(linkedVault.vaultPath);
+    for (const f of files) {
+      expect(f.startsWith("node_modules/")).toBe(false);
+    }
   });
 });

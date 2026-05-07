@@ -13,8 +13,21 @@ export interface VaultMetadata {
 
 function getVaultSize(vaultPath: string): number {
   let total = 0;
+  const visited = new Set<string>();
   function walk(dir: string) {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    try {
+      const real = fs.realpathSync(dir);
+      if (visited.has(real)) return;
+      visited.add(real);
+    } catch {
+      return;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (
         entry.name === ".git" ||
@@ -23,8 +36,16 @@ function getVaultSize(vaultPath: string): number {
       )
         continue;
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else total += fs.statSync(full).size;
+      // Resolve symlinks via statSync so symlinked dirs/files are counted.
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(full);
+      } catch {
+        // Broken symlink or inaccessible — skip.
+        continue;
+      }
+      if (stat.isDirectory()) walk(full);
+      else if (stat.isFile()) total += stat.size;
     }
   }
   walk(vaultPath);
