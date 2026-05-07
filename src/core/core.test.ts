@@ -12,16 +12,11 @@ import {
   readFile,
   renameFile,
 } from "./crud.js";
-import { ensureDaily, getDailyPath, readDaily } from "./daily.js";
+import { ensureDaily, readDaily } from "./daily.js";
 import { getFileInfoResolved, getFolderInfo } from "./files.js";
 import { initVault } from "./init.js";
 import { getOutline } from "./outline.js";
-import {
-  collectProperties,
-  readProperty,
-  removeProperty,
-  setProperty,
-} from "./properties.js";
+import { readProperty, removeProperty, setProperty } from "./properties.js";
 import { showTask, updateTask } from "./tasks.js";
 import { getWordCount } from "./wordcount.js";
 
