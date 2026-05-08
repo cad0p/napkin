@@ -5,7 +5,11 @@
 Every great idea started on a napkin.
 
 ```bash
-npm install -g napkin-ai
+# pnpm
+pnpm add -g @cad0p/napkin
+
+# npm
+npm install -g @cad0p/napkin
 ```
 
 ---
