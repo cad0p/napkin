@@ -5,7 +5,11 @@
 Every great idea started on a napkin.
 
 ```bash
-npm install -g napkin-ai
+# pnpm
+pnpm add -g @cad0p/napkin
+
+# npm
+npm install -g @cad0p/napkin
 ```
 
 ---
@@ -320,10 +324,10 @@ Core modules never call `console.log`, `process.exit`, or import output utilitie
 
 ## Pi Integration
 
-For [pi](https://github.com/badlogic/pi) users, install [pi-napkin](https://github.com/Michaelliv/pi-napkin) — vault context injection, `kb_search`/`kb_read` tools, and automatic distillation.
+For [pi](https://github.com/badlogic/pi) users, install [pi-napkin](https://github.com/cad0p/pi-napkin) — vault context injection, `kb_search`/`kb_read` tools, and automatic distillation.
 
 ```bash
-pi install git:github.com/Michaelliv/pi-napkin
+pi install git:github.com/cad0p/pi-napkin
 ```
 
 ---
