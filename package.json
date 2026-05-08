@@ -1,6 +1,10 @@
 {
-  "name": "napkin-ai",
+  "name": "@cad0p/napkin-ai",
   "version": "0.8.1",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "description": "🧻 Knowledge system for agents. Local-first, file-based, progressively disclosed.",
   "type": "module",
   "main": "dist/index.js",
@@ -29,11 +33,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Michaelliv/napkin.git"
+    "url": "git+https://github.com/cad0p/napkin.git"
   },
-  "homepage": "https://github.com/Michaelliv/napkin#readme",
+  "homepage": "https://github.com/cad0p/napkin#readme",
   "bugs": {
-    "url": "https://github.com/Michaelliv/napkin/issues"
+    "url": "https://github.com/cad0p/napkin/issues"
   },
   "keywords": [
     "obsidian",
