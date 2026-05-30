@@ -30,6 +30,20 @@ export interface NapkinConfig {
   };
 }
 
+/**
+ * Thrown when a config file exists but contains malformed JSON.
+ */
+export class MalformedConfigError extends Error {
+  readonly configPath: string;
+  readonly parseError: string;
+  constructor(configPath: string, parseError: string) {
+    super(`${configPath} is not valid JSON: ${parseError}`);
+    this.name = "MalformedConfigError";
+    this.configPath = configPath;
+    this.parseError = parseError;
+  }
+}
+
 export const DEFAULT_CONFIG: NapkinConfig = {
   overview: {
     depth: 3,
@@ -53,17 +67,57 @@ export const DEFAULT_CONFIG: NapkinConfig = {
 
 /**
  * Load napkin config from config.json in the .napkin/ directory.
+ * If config.local.json exists, it is deep-merged on top (local overrides).
  * Missing fields fall back to defaults.
+ *
+ * Throws {@link MalformedConfigError} if a config file exists but contains
+ * malformed JSON. This allows callers to surface actionable error messages
+ * to the user.
+ *
+ * config.local.json is gitignored and intended for per-machine overrides
+ * (e.g. different model providers available on different machines).
  */
 export function loadConfig(napkinDir: string): NapkinConfig {
   const configPath = path.join(napkinDir, "config.json");
-  if (!fs.existsSync(configPath)) return { ...DEFAULT_CONFIG };
-  try {
-    const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    return deepMerge(DEFAULT_CONFIG, raw);
-  } catch {
+  const localConfigPath = path.join(napkinDir, "config.local.json");
+
+  if (!fs.existsSync(configPath) && !fs.existsSync(localConfigPath)) {
     return { ...DEFAULT_CONFIG };
   }
+
+  let config: NapkinConfig = { ...DEFAULT_CONFIG };
+
+  // Load base config if it exists
+  if (fs.existsSync(configPath)) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    } catch (err) {
+      throw new MalformedConfigError(
+        configPath,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    config = deepMerge(DEFAULT_CONFIG, raw as Record<string, unknown>);
+  }
+
+  // Load and merge local override if it exists (local takes precedence)
+  if (fs.existsSync(localConfigPath)) {
+    let localRaw: unknown;
+    try {
+      localRaw = JSON.parse(
+        fs.readFileSync(localConfigPath, "utf-8"),
+      );
+    } catch (err) {
+      throw new MalformedConfigError(
+        localConfigPath,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    config = deepMerge(config, localRaw as Record<string, unknown>);
+  }
+
+  return config;
 }
 
 /**

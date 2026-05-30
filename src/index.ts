@@ -23,6 +23,8 @@ export type { TaskShowResult, TaskWithFile } from "./core/tasks.js";
 export type { VaultMetadata } from "./core/vault.js";
 export type { WordCount } from "./core/wordcount.js";
 export { Napkin } from "./sdk.js";
+export { MalformedConfigError } from "./utils/config.js";
+export type { NapkinConfig } from "./utils/config.js";
 export type { VaultTemplate } from "./templates/types.js";
 export type { Heading } from "./utils/markdown.js";
 export type { VaultInfo } from "./utils/vault.js";

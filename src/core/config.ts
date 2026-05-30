@@ -1,6 +1,6 @@
-import { loadConfig, updateConfig } from "../utils/config.js";
+import { loadConfig, MalformedConfigError, updateConfig } from "../utils/config.js";
 
-export { loadConfig };
+export { loadConfig, MalformedConfigError };
 
 export function getConfigValue(configPath: string, key: string): unknown {
   const config = loadConfig(configPath);
