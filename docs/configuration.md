@@ -24,7 +24,7 @@ napkin config set --key search.limit --value 50
 | Key | Default | Description |
 |-----|---------|-------------|
 | `search.limit` | `30` | Max results returned |
-| `search.snippetLines` | `0` | Context lines around matches. 0 = match-only |
+| `search.contextLines` | `5` | Context lines around matches. 0 = match-only |
 
 ### daily
 
