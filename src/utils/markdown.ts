@@ -4,6 +4,61 @@ export interface Heading {
   line: number;
 }
 
+/**
+ * Extract a specific section from markdown content by heading.
+ * Performs byte-for-byte exact match on the heading text (excluding the # prefix).
+ * Stops exactly at the next heading of the same or higher level.
+ * Throws an error if the heading is not found, listing up to 5 available headings.
+ */
+export function extractSection(content: string, heading: string): string {
+  const lines = content.split("\n");
+  let startLine = -1;
+  let headingLevel = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^(#{1,6})\s+(.+)$/);
+    if (match) {
+      const level = match[1].length;
+      const text = match[2];
+      if (text === heading) {
+        startLine = i;
+        headingLevel = level;
+        break;
+      }
+    }
+  }
+
+  if (startLine === -1) {
+    const headings = extractHeadings(content);
+    if (headings.length === 0) {
+      throw new Error(
+        `Heading "${heading}" not found. The file contains no headings.`,
+      );
+    }
+    const available = headings
+      .slice(0, 5)
+      .map((h) => `${"#".repeat(h.level)} ${h.text}`)
+      .join("\n");
+    throw new Error(
+      `Heading "${heading}" not found. Available headings:\n${available}${headings.length > 5 ? "\n..." : ""}`,
+    );
+  }
+
+  let endLine = lines.length;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const match = lines[i].match(/^(#{1,6})\s+/);
+    if (match) {
+      const level = match[1].length;
+      if (level <= headingLevel) {
+        endLine = i;
+        break;
+      }
+    }
+  }
+
+  return lines.slice(startLine, endLine).join("\n");
+}
+
 export interface Task {
   line: number;
   status: string;
