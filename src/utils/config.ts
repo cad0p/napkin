@@ -16,7 +16,7 @@ export interface NapkinConfig {
   };
   search: {
     limit: number;
-    snippetLines: number;
+    contextLines: number;
   };
   daily: {
     folder: string;
@@ -37,7 +37,7 @@ export const DEFAULT_CONFIG: NapkinConfig = {
   },
   search: {
     limit: 30,
-    snippetLines: 0,
+    contextLines: 5,
   },
   daily: {
     folder: "daily",

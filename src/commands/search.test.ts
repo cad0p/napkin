@@ -126,22 +126,44 @@ describe("search", () => {
     expect(results[0].modified).toMatch(/ago$/);
   });
 
-  test("--snippet-lines adds context around matches", async () => {
+  test("--context-lines adds context around matches", async () => {
     const data = await captureJson(() =>
       search({
         json: true,
         vault: v.path,
         query: "TODO",
-        snippetLines: "1",
+        contextLines: "1",
       }),
     );
     const results = data.results as {
       snippets: { line: number; text: string }[];
     }[];
-    const alpha = results.find((r: any) => r.file === "Projects/alpha.md");
+    const alpha = results.find((r) => r.file === "Projects/alpha.md");
     expect(alpha).toBeDefined();
     // With context=1, should include lines around the match
     expect(alpha?.snippets.length).toBeGreaterThan(1);
+  });
+
+  test("--context-lines merges overlapping ranges", async () => {
+    const vault = createTempVault({
+      "test.md": "Line 1\nLine 2 match\nLine 3 match\nLine 4\nLine 5",
+    });
+    const data = await captureJson(() =>
+      search({
+        json: true,
+        vault: vault.path,
+        query: "match",
+        contextLines: "1",
+      }),
+    );
+    const results = data.results as {
+      snippets: { line: number; text: string }[];
+    }[];
+    expect(results.length).toBe(1);
+    // Overlapping matches should be merged into a single continuous snippet
+    expect(results[0].snippets.length).toBe(4); // Lines 1-4
+    expect(results[0].snippets.map((s) => s.line)).toEqual([1, 2, 3, 4]);
+    vault.cleanup();
   });
 
   test("empty query returns no results", async () => {

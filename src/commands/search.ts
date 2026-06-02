@@ -14,7 +14,7 @@ interface SearchOpts extends OutputOptions {
   path?: string;
   limit?: string;
   total?: boolean;
-  snippetLines?: string;
+  contextLines?: string;
   snippets?: boolean;
   score?: boolean;
 }
@@ -29,8 +29,8 @@ export async function search(opts: SearchOpts) {
   const top = n.search(opts.query, {
     path: opts.path,
     limit: opts.limit ? Number.parseInt(opts.limit, 10) : undefined,
-    snippetLines: opts.snippetLines
-      ? Number.parseInt(opts.snippetLines, 10)
+    contextLines: opts.contextLines
+      ? Number.parseInt(opts.contextLines, 10)
       : undefined,
     snippets: opts.snippets,
   });

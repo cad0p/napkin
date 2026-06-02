@@ -21,7 +21,7 @@ export interface SearchResult {
 export interface SearchOptions {
   path?: string;
   limit?: number;
-  snippetLines?: number;
+  contextLines?: number;
   snippets?: boolean;
 }
 
@@ -68,7 +68,7 @@ function buildBacklinkCounts(vaultPath: string): Map<string, number> {
     for (const target of links.wikilinks) {
       const resolved = resolveFileLoose(vaultPath, target);
       if (resolved) {
-        counts.set(resolved, (counts.get(resolved) || 0) + 1);
+        counts.set(resolved.path, (counts.get(resolved.path) || 0) + 1);
       }
     }
   }
@@ -100,7 +100,10 @@ function extractSnippets(
     const start = Math.max(0, lineIdx - contextLines);
     const end = Math.min(lines.length - 1, lineIdx + contextLines);
     if (ranges.length > 0 && start <= ranges[ranges.length - 1][1] + 1) {
-      ranges[ranges.length - 1][1] = end;
+      ranges[ranges.length - 1][1] = Math.max(
+        ranges[ranges.length - 1][1],
+        end,
+      );
     } else {
       ranges.push([start, end]);
     }
@@ -176,7 +179,7 @@ export function searchVault(
   }
 
   const results = index.search(query);
-  const contextLines = opts?.snippetLines ?? config.search.snippetLines;
+  const contextLines = opts?.contextLines ?? config.search.contextLines;
   const limit = opts?.limit ?? config.search.limit;
 
   const maxMtime = Math.max(...docs.map((d) => d.mtime));
