@@ -25,7 +25,7 @@ export function getFileInfoResolved(
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
-  return getFileInfo(vaultPath, resolved);
+  return getFileInfo(vaultPath, resolved.path);
 }
 
 export function getFileList(

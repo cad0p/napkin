@@ -11,6 +11,6 @@ export function getOutline(vaultPath: string, fileRef: string): Heading[] {
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const content = fs.readFileSync(path.join(vaultPath, resolved), "utf-8");
+  const content = fs.readFileSync(path.join(vaultPath, resolved.path), "utf-8");
   return extractHeadings(content);
 }

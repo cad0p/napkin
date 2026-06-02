@@ -25,8 +25,8 @@ export function buildLinkIndex(vaultPath: string): VaultLinks {
     for (const target of links.wikilinks) {
       const resolved = resolveFile(vaultPath, target);
       if (resolved) {
-        if (!incoming.has(resolved)) incoming.set(resolved, []);
-        incoming.get(resolved)?.push(file);
+        if (!incoming.has(resolved.path)) incoming.set(resolved.path, []);
+        incoming.get(resolved.path)?.push(file);
       } else {
         if (!unresolved.has(target)) unresolved.set(target, []);
         unresolved.get(target)?.push(file);
@@ -43,7 +43,7 @@ export function getBacklinks(vaultPath: string, fileRef: string): string[] {
     throw new Error(`File not found: ${fileRef}`);
   }
   const { incoming } = buildLinkIndex(vaultPath);
-  return incoming.get(resolved) || [];
+  return incoming.get(resolved.path) || [];
 }
 
 export function getOutgoingLinks(vaultPath: string, fileRef: string): string[] {
@@ -51,7 +51,7 @@ export function getOutgoingLinks(vaultPath: string, fileRef: string): string[] {
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
-  const content = fs.readFileSync(path.join(vaultPath, resolved), "utf-8");
+  const content = fs.readFileSync(path.join(vaultPath, resolved.path), "utf-8");
   const { outgoing } = extractLinks(content);
   return outgoing;
 }

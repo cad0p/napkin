@@ -14,7 +14,7 @@ export function getWordCount(vaultPath: string, fileRef: string): WordCount {
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const content = fs.readFileSync(path.join(vaultPath, resolved), "utf-8");
+  const content = fs.readFileSync(path.join(vaultPath, resolved.path), "utf-8");
   const { body } = parseFrontmatter(content);
   const text = body.trim();
   const words = text ? text.split(/\s+/).length : 0;
