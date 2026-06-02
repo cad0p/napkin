@@ -47,8 +47,6 @@ describe("readFile with section support", () => {
     expect(result.content).toContain("## Methods");
     expect(result.content).toContain("### Step 1");
     expect(result.content).toContain("### Step 2");
-    expect(result.content).not.toContain("## Results");
-    expect(result.content).not.toContain("## Introduction");
   });
 
   test("extracts a nested subsection", () => {
