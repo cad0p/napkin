@@ -11,7 +11,12 @@ import {
 
 export async function read(
   fileRef: string | undefined,
-  opts: OutputOptions & { vault?: string },
+  opts: OutputOptions & {
+    vault?: string;
+    section?: string;
+    page?: string;
+    pageSize?: string;
+  },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
   if (!fileRef) {
@@ -19,13 +24,26 @@ export async function read(
     process.exit(EXIT_USER_ERROR);
   }
 
-  let result: { path: string; content: string };
+  let result: {
+    path: string;
+    content: string;
+    totalPages?: number;
+    currentPage?: number;
+  };
   try {
-    result = n.read(fileRef);
+    result = n.read(fileRef, {
+      section: opts.section,
+      page: opts.page ? Number.parseInt(opts.page, 10) : undefined,
+      pageSize: opts.pageSize ? Number.parseInt(opts.pageSize, 10) : undefined,
+    });
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
       fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef));
+      process.exit(EXIT_NOT_FOUND);
+    }
+    if (msg.startsWith('Heading "')) {
+      error(msg);
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;

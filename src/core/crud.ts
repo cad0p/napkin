@@ -3,11 +3,20 @@ import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
 import { listFiles, resolveFile } from "../utils/files.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
+import { extractSection } from "../utils/markdown.js";
 import type { VaultInfo } from "../utils/vault.js";
+
+export interface ReadOptions {
+  section?: string;
+  page?: number;
+  pageSize?: number;
+}
 
 export interface ReadResult {
   path: string;
   content: string;
+  totalPages?: number;
+  currentPage?: number;
 }
 
 export interface CreateOptions {
@@ -34,13 +43,44 @@ export interface DeleteResult {
   permanent: boolean;
 }
 
-export function readFile(vaultPath: string, fileRef: string): ReadResult {
+export function readFile(
+  vaultPath: string,
+  fileRef: string,
+  opts?: ReadOptions,
+): ReadResult {
   const resolved = resolveFile(vaultPath, fileRef);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
-  const content = fs.readFileSync(path.join(vaultPath, resolved), "utf-8");
-  return { path: resolved, content };
+
+  let content = fs.readFileSync(path.join(vaultPath, resolved.path), "utf-8");
+
+  if (opts?.section) {
+    content = extractSection(content, opts.section);
+  }
+
+  const pageSize = opts?.pageSize ?? 50000;
+  if (content.length <= pageSize) {
+    return { path: resolved.path, content };
+  }
+
+  const totalPages = Math.ceil(content.length / pageSize);
+  const page = opts?.page ?? 1;
+  const start = (page - 1) * pageSize;
+  const end = Math.min(start + pageSize, content.length);
+  const chunk = content.slice(start, end);
+
+  const suffix =
+    page < totalPages
+      ? `\n\n[Page ${page} of ${totalPages}. Use --page ${page + 1} to continue.]`
+      : "";
+
+  return {
+    path: resolved.path,
+    content: chunk + suffix,
+    totalPages,
+    currentPage: page,
+  };
 }
 
 export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
@@ -68,7 +108,10 @@ export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
       resolveFile(v.contentPath, opts.template) ||
       resolveFile(v.contentPath, `${config.templates.folder}/${opts.template}`);
     if (templateRef) {
-      content = fs.readFileSync(path.join(v.contentPath, templateRef), "utf-8");
+      content = fs.readFileSync(
+        path.join(v.contentPath, templateRef.path),
+        "utf-8",
+      );
     } else {
       const tmplFiles = listFiles(v.contentPath, {
         folder: config.templates.folder,
@@ -97,12 +140,12 @@ export function appendFile(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
   const existing = fs.readFileSync(fullPath, "utf-8");
   const separator = inline ? "" : "\n";
   fs.writeFileSync(fullPath, existing + separator + content);
 
-  return resolved;
+  return resolved.path;
 }
 
 export function prependFile(
@@ -116,7 +159,7 @@ export function prependFile(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
   const existing = fs.readFileSync(fullPath, "utf-8");
   const separator = inline ? "" : "\n";
 
@@ -128,7 +171,7 @@ export function prependFile(
     fs.writeFileSync(fullPath, content + separator + existing);
   }
 
-  return resolved;
+  return resolved.path;
 }
 
 export function moveFile(
@@ -143,15 +186,15 @@ export function moveFile(
 
   let destPath = destination;
   if (!destPath.endsWith(".md")) {
-    destPath = path.join(destPath, path.basename(resolved));
+    destPath = path.join(destPath, path.basename(resolved.path));
   }
 
-  const srcFull = path.join(vaultPath, resolved);
+  const srcFull = path.join(vaultPath, resolved.path);
   const destFull = path.join(vaultPath, destPath);
   fs.mkdirSync(path.dirname(destFull), { recursive: true });
   fs.renameSync(srcFull, destFull);
 
-  return { from: resolved, to: destPath };
+  return { from: resolved.path, to: destPath };
 }
 
 export function renameFile(
@@ -165,12 +208,12 @@ export function renameFile(
   }
 
   const name = newName.endsWith(".md") ? newName : `${newName}.md`;
-  const destPath = path.join(path.dirname(resolved), name);
-  const srcFull = path.join(vaultPath, resolved);
+  const destPath = path.join(path.dirname(resolved.path), name);
+  const srcFull = path.join(vaultPath, resolved.path);
   const destFull = path.join(vaultPath, destPath);
   fs.renameSync(srcFull, destFull);
 
-  return { from: resolved, to: destPath };
+  return { from: resolved.path, to: destPath };
 }
 
 export function deleteFile(
@@ -183,16 +226,16 @@ export function deleteFile(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
 
   if (permanent) {
     fs.unlinkSync(fullPath);
   } else {
     const trashDir = path.join(vaultPath, ".trash");
     fs.mkdirSync(trashDir, { recursive: true });
-    const trashPath = path.join(trashDir, path.basename(resolved));
+    const trashPath = path.join(trashDir, path.basename(resolved.path));
     fs.renameSync(fullPath, trashPath);
   }
 
-  return { path: resolved, deleted: true, permanent: !!permanent };
+  return { path: resolved.path, deleted: true, permanent: !!permanent };
 }

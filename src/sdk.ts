@@ -34,6 +34,7 @@ import {
   type MoveResult,
   moveFile,
   prependFile,
+  type ReadOptions,
   type ReadResult,
   readFile,
   renameFile,
@@ -132,8 +133,8 @@ export class Napkin {
 
   // ── CRUD ────────────────────────────────────────────────────────
 
-  read(file: string): ReadResult {
-    return readFile(this.vault.contentPath, file);
+  read(file: string, opts?: ReadOptions): ReadResult {
+    return readFile(this.vault.contentPath, file, opts);
   }
 
   create(opts: CreateOptions): CreateResult {

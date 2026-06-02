@@ -187,8 +187,11 @@ program
 program
   .command("read <file>")
   .description("Read a file")
-  .action(async (fileRef, _opts, cmd) => {
-    const root = cmd.optsWithGlobals();
+  .option("--section <heading>", "Extract a specific section by heading")
+  .option("--page <n>", "Page number for paginated output")
+  .option("--page-size <n>", "Page size in characters (default: 50000)")
+  .action(async (fileRef, opts, cmd) => {
+    const root = { ...cmd.optsWithGlobals(), ...opts };
     await read(fileRef, root);
   });
 
