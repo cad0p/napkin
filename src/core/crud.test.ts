@@ -110,4 +110,21 @@ describe("readFile with section support", () => {
     });
     expect(lastPage.content).not.toContain("Use --page");
   });
+
+  test("extracts section via wikilink heading", () => {
+    const result = readFile(v.vaultPath, "[[sectioned#Methods]]");
+    expect(result.content).toContain("## Methods");
+    expect(result.content).toContain("### Step 1");
+    expect(result.content).toContain("### Step 2");
+    expect(result.content).not.toContain("## Results");
+    expect(result.content).not.toContain("## Introduction");
+  });
+
+  test("--section flag takes precedence over wikilink heading", () => {
+    const result = readFile(v.vaultPath, "[[sectioned#Methods]]", {
+      section: "Introduction",
+    });
+    expect(result.content).toContain("## Introduction");
+    expect(result.content).not.toContain("## Methods");
+  });
 });

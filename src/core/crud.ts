@@ -55,8 +55,9 @@ export function readFile(
 
   let content = fs.readFileSync(path.join(vaultPath, resolved.path), "utf-8");
 
-  if (opts?.section) {
-    content = extractSection(content, opts.section);
+  const section = opts?.section ?? resolved.heading;
+  if (section) {
+    content = extractSection(content, section);
   }
 
   const pageSize = opts?.pageSize ?? 50000;
