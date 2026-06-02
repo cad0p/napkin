@@ -202,7 +202,7 @@ program
   .option("--path <folder>", "Limit to folder")
   .option("--limit <n>", "Max results (default: 30)")
   .option("--total", "Return match count")
-  .option("--snippet-lines <n>", "Context lines around matches (default: 0)")
+  .option("--context-lines <n>", "Context lines around matches (default: 5)")
   .option("--no-snippets", "Return files only, no snippets")
   .option("--score", "Include relevance score in output")
   .action(async (queryWords, opts, cmd) => {
