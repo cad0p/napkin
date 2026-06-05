@@ -1,4 +1,4 @@
-import type { PaginatedSearchResults, SearchResult } from "../core/search.js";
+import type { SearchResult } from "../core/search.js";
 import { Napkin } from "../sdk.js";
 import { EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import {

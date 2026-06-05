@@ -304,10 +304,20 @@ describe("search", () => {
     }
 
     const page1 = await captureJson(() =>
-      search({ json: true, vault: v.path, query: "unique-token-zzz", page: "1" }),
+      search({
+        json: true,
+        vault: v.path,
+        query: "unique-token-zzz",
+        page: "1",
+      }),
     );
     const page2 = await captureJson(() =>
-      search({ json: true, vault: v.path, query: "unique-token-zzz", page: "2" }),
+      search({
+        json: true,
+        vault: v.path,
+        query: "unique-token-zzz",
+        page: "2",
+      }),
     );
 
     const p1Results = page1.results as { file: string }[];
@@ -392,7 +402,10 @@ describe("search", () => {
 
     // page 2 should throw since all 5 results fit on page 1
     expect(() =>
-      searchVaultPaginated(v.vaultPath, v.vaultPath, "unique-limit-token", { limit: 5, page: 2 }),
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "unique-limit-token", {
+        limit: 5,
+        page: 2,
+      }),
     ).toThrow(/exceeds total pages/);
   });
 });

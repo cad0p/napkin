@@ -133,10 +133,7 @@ export class Napkin {
     );
   }
 
-  searchPaginated(
-    query: string,
-    opts?: SearchOptions,
-  ): PaginatedSearchResults {
+  searchPaginated(query: string, opts?: SearchOptions): PaginatedSearchResults {
     return searchVaultPaginated(
       this.vault.contentPath,
       this.vault.configPath,
