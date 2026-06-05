@@ -9,9 +9,10 @@ import type { VaultInfo } from "../utils/vault.js";
 /**
  * Default page size for `readFile` pagination, in bytes.
  *
- * 50KB is large enough to hold a typical section or a moderate file in a single
- * page, while keeping the per-call token cost bounded for AI agents. Empirically,
- * a 50KB page is ~12,500 tokens — well within a single tool-result budget.
+ * 50KB is large enough to hold a typical section or a moderate file in a
+ * single page, while keeping the per-call token cost bounded for AI agents.
+ * Empirically, 50KB is ~12,500 tokens — well within typical AI tool-result
+ * budgets (e.g., Pi's native edit tool accepts ~200KB of context).
  */
 const DEFAULT_READ_PAGE_SIZE_BYTES = 50000;
 
