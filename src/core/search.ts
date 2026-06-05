@@ -225,9 +225,9 @@ export function searchVaultPaginated(
   opts?: SearchOptions,
 ): PaginatedSearchResults {
   const config = loadConfig(configPath);
-  const resultsPerPage = opts?.limit ? undefined : config.search.resultsPerPage;
+  const resultsPerPage = config.search.resultsPerPage;
   const totalResults = searchVault(contentPath, configPath, query, opts);
-  const pageSize = resultsPerPage ?? totalResults.length;
+  const pageSize = resultsPerPage;
   const totalPages = Math.max(1, Math.ceil(totalResults.length / pageSize));
   const page = opts?.page ?? 1;
 
