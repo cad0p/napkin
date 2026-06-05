@@ -23,6 +23,14 @@ export interface SearchOptions {
   limit?: number;
   contextLines?: number;
   snippets?: boolean;
+  page?: number;
+}
+
+export interface PaginatedSearchResults {
+  results: SearchResult[];
+  totalPages: number;
+  currentPage: number;
+  totalResults: number;
 }
 
 interface DocRecord {
@@ -208,4 +216,35 @@ export function searchVault(
 
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit);
+}
+
+export function searchVaultPaginated(
+  contentPath: string,
+  configPath: string,
+  query: string,
+  opts?: SearchOptions,
+): PaginatedSearchResults {
+  const config = loadConfig(configPath);
+  const resultsPerPage = opts?.limit ? undefined : config.search.resultsPerPage;
+  const totalResults = searchVault(contentPath, configPath, query, opts);
+  const pageSize = resultsPerPage ?? totalResults.length;
+  const totalPages = Math.max(1, Math.ceil(totalResults.length / pageSize));
+  const page = opts?.page ?? 1;
+
+  if (page < 1 || page > totalPages) {
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    return {
+      results: totalResults.slice((safePage - 1) * pageSize, safePage * pageSize),
+      totalPages,
+      currentPage: safePage,
+      totalResults: totalResults.length,
+    };
+  }
+
+  return {
+    results: totalResults.slice((page - 1) * pageSize, page * pageSize),
+    totalPages,
+    currentPage: page,
+    totalResults: totalResults.length,
+  };
 }

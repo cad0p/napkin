@@ -23,8 +23,9 @@ napkin config set --key search.limit --value 50
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `search.limit` | `30` | Max results returned |
+| `search.limit` | `30` | Max results returned (total pool available across all pages) |
 | `search.contextLines` | `5` | Context lines around matches. 0 = match-only |
+| `search.resultsPerPage` | `10` | Max results returned per page. Use `--page N` to paginate. |
 
 ### daily
 

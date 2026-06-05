@@ -78,9 +78,11 @@ import {
   setProperty,
 } from "./core/properties.js";
 import {
+  type PaginatedSearchResults,
   type SearchOptions,
   type SearchResult,
   searchVault,
+  searchVaultPaginated,
 } from "./core/search.js";
 import { collectTags, getTagInfo, type TagInfo } from "./core/tags.js";
 import {
@@ -124,6 +126,18 @@ export class Napkin {
 
   search(query: string, opts?: SearchOptions): SearchResult[] {
     return searchVault(
+      this.vault.contentPath,
+      this.vault.configPath,
+      query,
+      opts,
+    );
+  }
+
+  searchPaginated(
+    query: string,
+    opts?: SearchOptions,
+  ): PaginatedSearchResults {
+    return searchVaultPaginated(
       this.vault.contentPath,
       this.vault.configPath,
       query,

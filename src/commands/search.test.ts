@@ -292,4 +292,36 @@ describe("search", () => {
     expect(results.length).toBe(1);
     expect(results[0].file).toBe("Projects/alpha.md");
   });
+
+  test("paginates results with --page", async () => {
+    // Create enough files to exceed resultsPerPage (default 10)
+    for (let i = 0; i < 15; i++) {
+      fs.writeFileSync(
+        path.join(v.vaultPath, `extra-${i}.md`),
+        `# Extra ${i}\n\nunique-token-zzz content for pagination test\n`,
+      );
+    }
+
+    const page1 = await captureJson(() =>
+      search({ json: true, vault: v.path, query: "unique-token-zzz", page: "1" }),
+    );
+    const page2 = await captureJson(() =>
+      search({ json: true, vault: v.path, query: "unique-token-zzz", page: "2" }),
+    );
+
+    const p1Results = page1.results as { file: string }[];
+    const p2Results = page2.results as { file: string }[];
+    const p1Files = p1Results.map((r) => r.file);
+    const p2Files = p2Results.map((r) => r.file);
+
+    expect(p1Results.length).toBeLessThanOrEqual(10);
+    expect(page1.totalPages).toBe(2);
+    expect(page1.currentPage).toBe(1);
+    expect(p2Results.length).toBeGreaterThan(0);
+    expect(page2.currentPage).toBe(2);
+    // No overlap between pages
+    for (const f of p2Files) {
+      expect(p1Files).not.toContain(f);
+    }
+  });
 });

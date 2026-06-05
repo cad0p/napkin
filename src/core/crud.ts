@@ -6,6 +6,15 @@ import { parseFrontmatter } from "../utils/frontmatter.js";
 import { extractSection } from "../utils/markdown.js";
 import type { VaultInfo } from "../utils/vault.js";
 
+/**
+ * Default page size for `readFile` pagination, in bytes.
+ *
+ * 50KB is large enough to hold a typical section or a moderate file in a single
+ * page, while keeping the per-call token cost bounded for AI agents. Empirically,
+ * a 50KB page is ~12,500 tokens — well within a single tool-result budget.
+ */
+const DEFAULT_READ_PAGE_SIZE_BYTES = 50000;
+
 export interface ReadOptions {
   section?: string;
   page?: number;
@@ -60,7 +69,7 @@ export function readFile(
     content = extractSection(content, section);
   }
 
-  const pageSize = opts?.pageSize ?? 50000;
+  const pageSize = opts?.pageSize ?? DEFAULT_READ_PAGE_SIZE_BYTES;
   if (content.length <= pageSize) {
     return { path: resolved.path, content };
   }
