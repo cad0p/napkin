@@ -201,6 +201,7 @@ program
   .option("--query <text>", "Search query")
   .option("--path <folder>", "Limit to folder")
   .option("--limit <n>", "Max results (default: 30)")
+  .option("--page <n>", "Page number (1-based, uses resultsPerPage from config)")
   .option("--total", "Return match count")
   .option("--context-lines <n>", "Context lines around matches (default: 5)")
   .option("--no-snippets", "Return files only, no snippets")
