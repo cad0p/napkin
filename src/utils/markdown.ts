@@ -4,6 +4,28 @@ export interface Heading {
   line: number;
 }
 
+export class HeadingNotFoundError extends Error {
+  heading: string;
+  headings: Heading[];
+
+  constructor(heading: string, headings: Heading[]) {
+    if (headings.length === 0) {
+      super(`Heading "${heading}" not found. The file contains no headings.`);
+    } else {
+      const available = headings
+        .slice(0, 5)
+        .map((h) => `${"#".repeat(h.level)} ${h.text}`)
+        .join("\n");
+      super(
+        `Heading "${heading}" not found. Available headings:\n${available}${headings.length > 5 ? "\n..." : ""}`,
+      );
+    }
+    this.name = "HeadingNotFoundError";
+    this.heading = heading;
+    this.headings = headings;
+  }
+}
+
 /**
  * Extract a specific section from markdown content by heading.
  * Performs byte-for-byte exact match on the heading text (excluding the # prefix).
@@ -30,18 +52,7 @@ export function extractSection(content: string, heading: string): string {
 
   if (startLine === -1) {
     const headings = extractHeadings(content);
-    if (headings.length === 0) {
-      throw new Error(
-        `Heading "${heading}" not found. The file contains no headings.`,
-      );
-    }
-    const available = headings
-      .slice(0, 5)
-      .map((h) => `${"#".repeat(h.level)} ${h.text}`)
-      .join("\n");
-    throw new Error(
-      `Heading "${heading}" not found. Available headings:\n${available}${headings.length > 5 ? "\n..." : ""}`,
-    );
+    throw new HeadingNotFoundError(heading, headings);
   }
 
   let endLine = lines.length;

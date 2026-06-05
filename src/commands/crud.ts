@@ -1,6 +1,7 @@
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
+import { HeadingNotFoundError } from "../utils/markdown.js";
 import {
   error,
   fileNotFound,
@@ -42,8 +43,8 @@ export async function read(
       fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef));
       process.exit(EXIT_NOT_FOUND);
     }
-    if (msg.startsWith('Heading "')) {
-      error(msg);
+    if (e instanceof HeadingNotFoundError) {
+      error(e.message);
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;

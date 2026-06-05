@@ -5,6 +5,7 @@ import {
   extractSection,
   extractTags,
   extractTasks,
+  HeadingNotFoundError,
 } from "./markdown.js";
 
 describe("extractHeadings", () => {
@@ -154,5 +155,32 @@ describe("extractSection", () => {
     const content = "## Heading##\nBody\n";
     const section = extractSection(content, "Heading##");
     expect(section).toBe("## Heading##\nBody\n");
+  });
+});
+
+describe("HeadingNotFoundError", () => {
+  test("is an instance of HeadingNotFoundError and Error", () => {
+    const content = "# Title\n\n## Section A\n";
+    try {
+      extractSection(content, "Not Found");
+      throw new Error("expected to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(HeadingNotFoundError);
+      expect(e).toBeInstanceOf(Error);
+      expect((e as HeadingNotFoundError).heading).toBe("Not Found");
+      expect((e as HeadingNotFoundError).headings).toHaveLength(2);
+    }
+  });
+
+  test("has empty headings list when file has no headings", () => {
+    const content = "Just plain text.";
+    try {
+      extractSection(content, "Anything");
+      throw new Error("expected to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(HeadingNotFoundError);
+      expect((e as HeadingNotFoundError).headings).toHaveLength(0);
+      expect((e as Error).message).toContain("no headings");
+    }
   });
 });
