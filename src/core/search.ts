@@ -231,14 +231,11 @@ export function searchVaultPaginated(
   const totalPages = Math.max(1, Math.ceil(totalResults.length / pageSize));
   const page = opts?.page ?? 1;
 
-  if (page < 1 || page > totalPages) {
-    const safePage = Math.min(Math.max(1, page), totalPages);
-    return {
-      results: totalResults.slice((safePage - 1) * pageSize, safePage * pageSize),
-      totalPages,
-      currentPage: safePage,
-      totalResults: totalResults.length,
-    };
+  if (page < 1) {
+    throw new Error("Page must be >= 1");
+  }
+  if (page > totalPages) {
+    throw new Error(`Page ${page} exceeds total pages (${totalPages})`);
   }
 
   return {

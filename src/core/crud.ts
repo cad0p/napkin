@@ -76,6 +76,14 @@ export function readFile(
 
   const totalPages = Math.ceil(content.length / pageSize);
   const page = opts?.page ?? 1;
+
+  if (page < 1) {
+    throw new Error("Page must be >= 1");
+  }
+  if (page > totalPages) {
+    throw new Error(`Page ${page} exceeds total pages (${totalPages})`);
+  }
+
   const start = (page - 1) * pageSize;
   const end = Math.min(start + pageSize, content.length);
   const chunk = content.slice(start, end);

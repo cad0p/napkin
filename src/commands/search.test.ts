@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { searchVaultPaginated } from "../core/search.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import { search } from "./search.js";
 
@@ -323,5 +324,75 @@ describe("search", () => {
     for (const f of p2Files) {
       expect(p1Files).not.toContain(f);
     }
+  });
+
+  test("page=0 throws an error", () => {
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: 0 }),
+    ).toThrow("Page must be >= 1");
+  });
+
+  test("page=-1 throws an error", () => {
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: -1 }),
+    ).toThrow("Page must be >= 1");
+  });
+
+  test("page exceeding totalPages throws an error", () => {
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: 999 }),
+    ).toThrow(/exceeds total pages/);
+  });
+
+  test("single result returns correctly", () => {
+    const data = searchVaultPaginated(
+      v.vaultPath,
+      v.vaultPath,
+      "unique-token-single-result-test",
+    );
+    // No files contain this token, so 0 results
+    expect(data.results.length).toBe(0);
+    expect(data.totalPages).toBe(1);
+    expect(data.currentPage).toBe(1);
+    expect(data.totalResults).toBe(0);
+  });
+
+  test("no results returns empty with totalPages 1", () => {
+    const data = searchVaultPaginated(
+      v.vaultPath,
+      v.vaultPath,
+      "xyznonexistent999",
+    );
+    expect(data.results.length).toBe(0);
+    expect(data.totalPages).toBe(1);
+    expect(data.currentPage).toBe(1);
+    expect(data.totalResults).toBe(0);
+  });
+
+  test("limit and page work together", () => {
+    for (let i = 0; i < 15; i++) {
+      fs.writeFileSync(
+        path.join(v.vaultPath, `limit-test-${i}.md`),
+        `# Limit Test ${i}\n\nunique-limit-token content for pagination test\n`,
+      );
+    }
+
+    // limit=5 caps total results to 5; with resultsPerPage=10, all fit on 1 page
+    const page1 = searchVaultPaginated(
+      v.vaultPath,
+      v.vaultPath,
+      "unique-limit-token",
+      { limit: 5, page: 1 },
+    );
+
+    expect(page1.totalResults).toBe(5);
+    expect(page1.results.length).toBe(5);
+    expect(page1.totalPages).toBe(1);
+    expect(page1.currentPage).toBe(1);
+
+    // page 2 should throw since all 5 results fit on page 1
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "unique-limit-token", { limit: 5, page: 2 }),
+    ).toThrow(/exceeds total pages/);
   });
 });
