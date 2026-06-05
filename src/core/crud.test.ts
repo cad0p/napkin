@@ -125,4 +125,27 @@ describe("readFile with section support", () => {
     expect(result.content).toContain("## Introduction");
     expect(result.content).not.toContain("## Methods");
   });
+
+  test("rejects page 0", () => {
+    expect(() =>
+      readFile(v.vaultPath, "sectioned.md", { pageSize: 50, page: 0 }),
+    ).toThrow("Invalid page: 0. Valid range:");
+  });
+
+  test("rejects negative page", () => {
+    expect(() =>
+      readFile(v.vaultPath, "sectioned.md", { pageSize: 50, page: -1 }),
+    ).toThrow("Invalid page: -1. Valid range:");
+  });
+
+  test("rejects page exceeding total pages", () => {
+    const result = readFile(v.vaultPath, "sectioned.md", { pageSize: 50 });
+    const overflowPage = (result.totalPages ?? 1) + 1;
+    expect(() =>
+      readFile(v.vaultPath, "sectioned.md", {
+        pageSize: 50,
+        page: overflowPage,
+      }),
+    ).toThrow(`Invalid page: ${overflowPage}. Valid range:`);
+  });
 });

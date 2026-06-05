@@ -78,11 +78,8 @@ export function readFile(
   const totalPages = Math.ceil(content.length / pageSize);
   const page = opts?.page ?? 1;
 
-  if (page < 1) {
-    throw new Error("Page must be >= 1");
-  }
-  if (page > totalPages) {
-    throw new Error(`Page ${page} exceeds total pages (${totalPages})`);
+  if (page < 1 || page > totalPages) {
+    throw new Error(`Invalid page: ${page}. Valid range: 1-${totalPages}`);
   }
 
   const start = (page - 1) * pageSize;
