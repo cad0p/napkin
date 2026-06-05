@@ -19,7 +19,7 @@ export function extractSection(content: string, heading: string): string {
     const match = lines[i].match(/^(#{1,6})\s+(.+)$/);
     if (match) {
       const level = match[1].length;
-      const text = match[2];
+      const text = match[2].replace(/(\s)#+\s*$/, "$1").trimEnd();
       if (text === heading) {
         startLine = i;
         headingLevel = level;
@@ -82,7 +82,7 @@ export function extractHeadings(content: string): Heading[] {
     if (match) {
       headings.push({
         level: match[1].length,
-        text: match[2].trim(),
+        text: match[2].replace(/(\s)#+\s*$/, "$1").trimEnd(),
         line: i + 1,
       });
     }

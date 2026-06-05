@@ -137,4 +137,22 @@ describe("extractSection", () => {
       'Heading "Not Found" not found. The file contains no headings.',
     );
   });
+
+  test("strips trailing # preceded by a space", () => {
+    const content = "## Heading ##\nSome text.\n";
+    const section = extractSection(content, "Heading");
+    expect(section).toBe("## Heading ##\nSome text.\n");
+  });
+
+  test("strips trailing # with extra spaces", () => {
+    const content = "## Heading 2 ##\nBody\n";
+    const section = extractSection(content, "Heading 2");
+    expect(section).toBe("## Heading 2 ##\nBody\n");
+  });
+
+  test("keeps trailing # without preceding space", () => {
+    const content = "## Heading##\nBody\n";
+    const section = extractSection(content, "Heading##");
+    expect(section).toBe("## Heading##\nBody\n");
+  });
 });
