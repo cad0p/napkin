@@ -1,6 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+/**
+ * Default number of search results per page.
+ *
+ * Balances token budget (10 results × ~80 tokens/snippet ≈ 800 tokens per
+ * page) with enough context for AI agents to make follow-up decisions.
+ */
+export const DEFAULT_SEARCH_RESULTS_PER_PAGE = 10;
+
 export interface VaultLayout {
   /** Content root relative to .napkin/ dir (e.g. ".." for sibling layout) */
   root: string;
@@ -39,7 +47,7 @@ export const DEFAULT_CONFIG: NapkinConfig = {
   search: {
     limit: 30,
     contextLines: 5,
-    resultsPerPage: 10,
+    resultsPerPage: DEFAULT_SEARCH_RESULTS_PER_PAGE,
   },
   daily: {
     folder: "daily",
