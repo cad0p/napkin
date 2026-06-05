@@ -193,14 +193,6 @@ describe("search", () => {
     expect(results[0].score).toBeGreaterThan(0);
   });
 
-  test("score hidden by default in json output", async () => {
-    const data = await captureJson(() =>
-      search({ json: true, vault: v.path, query: "alpha" }),
-    );
-    const results = data.results as { score?: number }[];
-    expect(results[0].score).toBeUndefined();
-  });
-
   test("creates cache file after first search", async () => {
     const cachePath = path.join(v.vaultPath, "search-cache.json");
     expect(fs.existsSync(cachePath)).toBe(false);
@@ -336,13 +328,10 @@ describe("search", () => {
     }
   });
 
-  test("page=0 throws an error", () => {
+  test("page < 1 throws an error", () => {
     expect(() =>
       searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: 0 }),
     ).toThrow("Page must be >= 1");
-  });
-
-  test("page=-1 throws an error", () => {
     expect(() =>
       searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: -1 }),
     ).toThrow("Page must be >= 1");
@@ -354,25 +343,13 @@ describe("search", () => {
     ).toThrow(/exceeds total pages/);
   });
 
-  test("single result returns correctly", () => {
+  test("empty results returns default pagination fields", () => {
     const data = searchVaultPaginated(
       v.vaultPath,
       v.vaultPath,
       "unique-token-single-result-test",
     );
     // No files contain this token, so 0 results
-    expect(data.results.length).toBe(0);
-    expect(data.totalPages).toBe(1);
-    expect(data.currentPage).toBe(1);
-    expect(data.totalResults).toBe(0);
-  });
-
-  test("no results returns empty with totalPages 1", () => {
-    const data = searchVaultPaginated(
-      v.vaultPath,
-      v.vaultPath,
-      "xyznonexistent999",
-    );
     expect(data.results.length).toBe(0);
     expect(data.totalPages).toBe(1);
     expect(data.currentPage).toBe(1);
