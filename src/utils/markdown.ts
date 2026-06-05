@@ -33,6 +33,8 @@ export class HeadingNotFoundError extends Error {
  * Throws an error if the heading is not found, listing up to 5 available headings.
  */
 export function extractSection(content: string, heading: string): string {
+  // Strip leading # characters so --section "## Heading" matches heading text "Heading"
+  heading = heading.replace(/^#+\s*/, "");
   const lines = content.split("\n");
   let startLine = -1;
   let headingLevel = 0;

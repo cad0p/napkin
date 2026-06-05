@@ -156,6 +156,12 @@ describe("extractSection", () => {
     const section = extractSection(content, "Heading##");
     expect(section).toBe("## Heading##\nBody\n");
   });
+
+  test("accepts ## prefix in heading parameter", () => {
+    const content = "## Watchdog Recovery\nSome text.\n";
+    const section = extractSection(content, "## Watchdog Recovery");
+    expect(section).toBe("## Watchdog Recovery\nSome text.\n");
+  });
 });
 
 describe("HeadingNotFoundError", () => {

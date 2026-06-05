@@ -115,6 +115,13 @@ describe("parseFileRef", () => {
       heading: "Subheading",
     });
   });
+
+  test("parses no-brackets file#heading reference", () => {
+    expect(parseFileRef("cr-auto-action#Watchdog Recovery")).toEqual({
+      path: "cr-auto-action",
+      heading: "Watchdog Recovery",
+    });
+  });
 });
 
 describe("resolveFile", () => {
