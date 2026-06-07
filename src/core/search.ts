@@ -10,6 +10,13 @@ import {
   saveSearchCache,
 } from "../utils/search-cache.js";
 
+/**
+ * Maximum snippet lines returned per file. Prevents broad queries from
+ * producing unbounded output when many matches exist in a single file.
+ * Matches beyond this limit are still findable via `napkin read`.
+ */
+const MAX_SNIPPET_LINES_PER_FILE = 25;
+
 export interface SearchResult {
   file: string;
   score: number;
@@ -88,6 +95,7 @@ function extractSnippets(
   content: string,
   query: string,
   contextLines: number,
+  maxSnippetLines?: number,
 ): { line: number; text: string }[] {
   const terms = query
     .toLowerCase()
@@ -123,6 +131,9 @@ function extractSnippets(
       const line = lines[i];
       if (line.trim() === "") continue;
       snippets.push({ line: i + 1, text: line });
+      if (maxSnippetLines && snippets.length >= maxSnippetLines) {
+        return snippets;
+      }
     }
   }
 
@@ -210,7 +221,12 @@ export function searchVault(
       snippets:
         opts?.snippets === false
           ? []
-          : extractSnippets(doc.content, query, contextLines),
+          : extractSnippets(
+              doc.content,
+              query,
+              contextLines,
+              MAX_SNIPPET_LINES_PER_FILE,
+            ),
     };
   });
 
