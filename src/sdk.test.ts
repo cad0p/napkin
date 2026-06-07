@@ -378,19 +378,20 @@ describe("static", () => {
     }
   });
 
-  test("constructor resolves to a vault with a .napkin/ directory", () => {
-    const os = require("node:os");
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-sdk-"));
+  test("constructor does not auto-create vault (finds nearest ancestor)", () => {
+    const vault = createTempVault();
     try {
-      const n = new Napkin(tmpDir);
-      // findVault walks up to find an existing .napkin/; if none exists,
-      // it falls back to creating a bare vault. Either way the resolved
-      // vault path must have a .napkin/ sibling.
-      expect(
-        fs.existsSync(path.join(n.vault.contentPath, ".napkin")),
-      ).toBe(true);
+      // Create a deeply nested dir inside the vault parent so findVault
+      // must walk up to find .napkin/ rather than creating a new one.
+      const nested = path.join(vault.path, "a", "b", "c");
+      fs.mkdirSync(nested, { recursive: true });
+
+      const n = new Napkin(nested);
+      // Should resolve to the existing vault, not create a new one at nested.
+      expect(n.vault.contentPath).toBe(vault.vaultPath);
+      expect(n.vault.contentPath).not.toBe(nested);
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      vault.cleanup();
     }
   });
 });
