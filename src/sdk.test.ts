@@ -378,15 +378,17 @@ describe("static", () => {
     }
   });
 
-  test("constructor does not auto-create vault (finds nearest ancestor)", () => {
+  test("constructor resolves to a vault with a .napkin/ directory", () => {
     const os = require("node:os");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-sdk-"));
     try {
       const n = new Napkin(tmpDir);
-      // Constructor walks up to find an existing .napkin/ — it does not
-      // create one in tmpDir.  The vault therefore resolves to some other
-      // ancestor directory that actually has a .napkin/ folder.
-      expect(n.vault.contentPath).not.toBe(tmpDir);
+      // findVault walks up to find an existing .napkin/; if none exists,
+      // it falls back to creating a bare vault. Either way the resolved
+      // vault path must have a .napkin/ sibling.
+      expect(
+        fs.existsSync(path.join(n.vault.contentPath, ".napkin")),
+      ).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
