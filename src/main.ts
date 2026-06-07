@@ -91,7 +91,10 @@ Examples:
   $ napkin init --template coding    Create a vault with coding structure
   $ napkin overview                  See what's in the vault
   $ napkin search "auth"             Find content about auth
+  $ napkin search "auth" --page 2   Next page of search results
   $ napkin read "Architecture"       Read a specific file
+  $ napkin read file.md --section "## Heading"  Read a section
+  $ napkin read '[[file#Heading]]'   Read via wikilink syntax
 
 Workflow: init → overview → search → read
 
@@ -103,8 +106,8 @@ Getting started:
   graph                Interactive vault graph visualization
 
 Reading:
-  read <file>          Read a file
-  search <query>       Search vault (BM25 + backlinks + recency)
+  read <file>          Read a file (--section, --page)
+  search <query>       Search vault (BM25 + backlinks + recency) (--page, --context-lines)
 
 Writing:
   create <name>        Create a new file (--template, --content)
@@ -136,7 +139,7 @@ Options:
 
 All commands support --json for structured output.
 More help: napkin <command> --help
-Docs: https://github.com/Michaelliv/napkin`);
+Docs: https://github.com/cad0p/napkin`);
 }
 
 // ── Getting started ─────────────────────────────────────────────────
