@@ -137,12 +137,7 @@ describe("positional args", () => {
   });
 
   test("file outline <file>", async () => {
-    const { stdout, exitCode } = await run([
-      "file",
-      "outline",
-      "README",
-      "--json",
-    ]);
+    const { stdout, exitCode } = await run(["outline", "README", "--json"]);
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.headings.length).toBeGreaterThan(0);

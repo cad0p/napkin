@@ -95,6 +95,7 @@ Examples:
   $ napkin read "Architecture"       Read a specific file
   $ napkin read file.md --section "## Heading"  Read a section
   $ napkin read '[[file#Heading]]'   Read via wikilink syntax
+  $ napkin outline file.md           Show document structure
 
 Workflow: init → overview → search → read
 
@@ -107,6 +108,7 @@ Getting started:
 
 Reading:
   read <file>          Read a file (--section, --page)
+  outline <file>       Show headings for a file (--format, --total)
   search <query>       Search vault (BM25 + backlinks + recency) (--page, --context-lines)
 
 Writing:
@@ -118,7 +120,7 @@ Writing:
   delete <file>        Delete a file
 
 Subcommands:
-  file                 Files, folders, outline, wordcount
+  file                 Files, folders, wordcount
   daily                Daily notes (today, read, append, prepend)
   tag                  Tags and aliases
   property             Frontmatter properties (list, set, remove, read)
@@ -196,6 +198,18 @@ program
   .action(async (fileRef, opts, cmd) => {
     const root = { ...cmd.optsWithGlobals(), ...opts };
     await read(fileRef, root);
+  });
+
+program
+  .command("outline [file]")
+  .description("Show headings for a file")
+  .option("--file <name>", "File name (alternative to positional)")
+  .option("--format <type>", "Output format: tree, md, json")
+  .option("--total", "Return heading count")
+  .action(async (file, opts, cmd) => {
+    const root = { ...cmd.optsWithGlobals(), ...opts };
+    root.file = root.file || file;
+    await outline(root);
   });
 
 program
@@ -343,18 +357,6 @@ fileCmd
   .action(async (opts, cmd) => {
     const root = { ...cmd.optsWithGlobals(), ...opts };
     await folders(root);
-  });
-
-fileCmd
-  .command("outline [file]")
-  .description("Show headings for a file")
-  .option("--file <name>", "File name (alternative to positional)")
-  .option("--format <type>", "Output format: tree, md, json")
-  .option("--total", "Return heading count")
-  .action(async (file, opts, cmd) => {
-    const root = { ...cmd.optsWithGlobals(), ...opts };
-    root.file = root.file || file;
-    await outline(root);
   });
 
 fileCmd
