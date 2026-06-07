@@ -2,6 +2,7 @@ import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
 import {
+  dim,
   error,
   fileNotFound,
   type OutputOptions,
@@ -53,7 +54,7 @@ export async function outline(
         // tree format
         for (const h of headings) {
           const indent = "  ".repeat(h.level - 1);
-          console.log(`${indent}${h.text}`);
+          console.log(`${indent}${dim(`${h.line}:`)} ${h.text}`);
         }
       }
     },
