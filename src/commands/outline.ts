@@ -54,7 +54,7 @@ export async function outline(
         // tree format
         for (const h of headings) {
           const indent = "  ".repeat(h.level - 1);
-          console.log(`${indent}${dim(`${h.line}:`)} ${h.text}`);
+          console.log(`${dim(`${h.line}:`)} ${indent}${h.text}`);
         }
       }
     },
