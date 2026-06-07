@@ -125,6 +125,7 @@ function extractSnippets(
     }
   }
 
+  const matchedLineCount = matchedLines.size;
   const snippets: { line: number; text: string }[] = [];
   for (const [start, end] of ranges) {
     for (let i = start; i <= end; i++) {
@@ -132,6 +133,18 @@ function extractSnippets(
       if (line.trim() === "") continue;
       snippets.push({ line: i + 1, text: line });
       if (maxSnippetLines && snippets.length >= maxSnippetLines) {
+        // Count remaining matches beyond the cap
+        const shownMatches = new Set<number>();
+        for (const s of snippets) {
+          if (matchedLines.has(s.line - 1)) shownMatches.add(s.line - 1);
+        }
+        const remaining = matchedLineCount - shownMatches.size;
+        if (remaining > 0) {
+          snippets.push({
+            line: 0,
+            text: `... ${remaining} more match${remaining === 1 ? "" : "es"} in this file`,
+          });
+        }
         return snippets;
       }
     }
