@@ -106,19 +106,11 @@ export async function search(opts: SearchOpts) {
     snippets: opts.snippets,
   };
 
-  const page = opts.page ? Number.parseInt(opts.page, 10) : undefined;
-  const hasPage = page !== undefined;
-
-  if (hasPage) {
-    const paginated = n.searchPaginated(opts.query, { ...searchOpts, page });
-    renderSearchResults(paginated.results, opts, {
-      totalPages: paginated.totalPages,
-      currentPage: paginated.currentPage,
-      totalResults: paginated.totalResults,
-    });
-    return;
-  }
-
-  const top = n.search(opts.query, searchOpts);
-  renderSearchResults(top, opts);
+  const page = opts.page ? Number.parseInt(opts.page, 10) : 1;
+  const paginated = n.searchPaginated(opts.query, { ...searchOpts, page });
+  renderSearchResults(paginated.results, opts, {
+    totalPages: paginated.totalPages,
+    currentPage: paginated.currentPage,
+    totalResults: paginated.totalResults,
+  });
 }
