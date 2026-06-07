@@ -16,7 +16,7 @@ export function collectProperties(
   const files = fileFilter
     ? (() => {
         const r = resolveFile(vaultPath, fileFilter);
-        return r ? [r] : [];
+        return r ? [r.path] : [];
       })()
     : listFiles(vaultPath, { ext: "md" });
 
@@ -42,7 +42,7 @@ export function setProperty(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
   const content = fs.readFileSync(fullPath, "utf-8");
 
   let parsedValue: unknown = value;
@@ -54,7 +54,7 @@ export function setProperty(
   const updated = setProp(content, name, parsedValue);
   fs.writeFileSync(fullPath, updated);
 
-  return { path: resolved, property: name, value: parsedValue };
+  return { path: resolved.path, property: name, value: parsedValue };
 }
 
 export function removeProperty(
@@ -67,12 +67,12 @@ export function removeProperty(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
   const content = fs.readFileSync(fullPath, "utf-8");
   const updated = removeProp(content, name);
   fs.writeFileSync(fullPath, updated);
 
-  return { path: resolved, removed: name };
+  return { path: resolved.path, removed: name };
 }
 
 export function readProperty(
@@ -85,7 +85,7 @@ export function readProperty(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
   const content = fs.readFileSync(fullPath, "utf-8");
   const { properties: props } = parseFrontmatter(content);
 

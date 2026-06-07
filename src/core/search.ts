@@ -10,6 +10,13 @@ import {
   saveSearchCache,
 } from "../utils/search-cache.js";
 
+/**
+ * Maximum snippet lines returned per file. Prevents broad queries from
+ * producing unbounded output when many matches exist in a single file.
+ * Matches beyond this limit are still findable via `napkin read`.
+ */
+const MAX_SNIPPET_LINES_PER_FILE = 25;
+
 export interface SearchResult {
   file: string;
   score: number;
@@ -21,8 +28,16 @@ export interface SearchResult {
 export interface SearchOptions {
   path?: string;
   limit?: number;
-  snippetLines?: number;
+  contextLines?: number;
   snippets?: boolean;
+  page?: number;
+}
+
+export interface PaginatedSearchResults {
+  results: SearchResult[];
+  totalPages: number;
+  currentPage: number;
+  totalResults: number;
 }
 
 interface DocRecord {
@@ -68,7 +83,7 @@ function buildBacklinkCounts(vaultPath: string): Map<string, number> {
     for (const target of links.wikilinks) {
       const resolved = resolveFileLoose(vaultPath, target);
       if (resolved) {
-        counts.set(resolved, (counts.get(resolved) || 0) + 1);
+        counts.set(resolved.path, (counts.get(resolved.path) || 0) + 1);
       }
     }
   }
@@ -80,6 +95,7 @@ function extractSnippets(
   content: string,
   query: string,
   contextLines: number,
+  maxSnippetLines?: number,
 ): { line: number; text: string }[] {
   const terms = query
     .toLowerCase()
@@ -100,18 +116,37 @@ function extractSnippets(
     const start = Math.max(0, lineIdx - contextLines);
     const end = Math.min(lines.length - 1, lineIdx + contextLines);
     if (ranges.length > 0 && start <= ranges[ranges.length - 1][1] + 1) {
-      ranges[ranges.length - 1][1] = end;
+      ranges[ranges.length - 1][1] = Math.max(
+        ranges[ranges.length - 1][1],
+        end,
+      );
     } else {
       ranges.push([start, end]);
     }
   }
 
+  const matchedLineCount = matchedLines.size;
   const snippets: { line: number; text: string }[] = [];
   for (const [start, end] of ranges) {
     for (let i = start; i <= end; i++) {
       const line = lines[i];
       if (line.trim() === "") continue;
       snippets.push({ line: i + 1, text: line });
+      if (maxSnippetLines && snippets.length >= maxSnippetLines) {
+        // Count remaining matches beyond the cap
+        const shownMatches = new Set<number>();
+        for (const s of snippets) {
+          if (matchedLines.has(s.line - 1)) shownMatches.add(s.line - 1);
+        }
+        const remaining = matchedLineCount - shownMatches.size;
+        if (remaining > 0) {
+          snippets.push({
+            line: 0,
+            text: `... ${remaining} more match${remaining === 1 ? "" : "es"} in this file`,
+          });
+        }
+        return snippets;
+      }
     }
   }
 
@@ -176,7 +211,7 @@ export function searchVault(
   }
 
   const results = index.search(query);
-  const contextLines = opts?.snippetLines ?? config.search.snippetLines;
+  const contextLines = opts?.contextLines ?? config.search.contextLines;
   const limit = opts?.limit ?? config.search.limit;
 
   const maxMtime = Math.max(...docs.map((d) => d.mtime));
@@ -199,10 +234,43 @@ export function searchVault(
       snippets:
         opts?.snippets === false
           ? []
-          : extractSnippets(doc.content, query, contextLines),
+          : extractSnippets(
+              doc.content,
+              query,
+              contextLines,
+              MAX_SNIPPET_LINES_PER_FILE,
+            ),
     };
   });
 
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit);
+}
+
+export function searchVaultPaginated(
+  contentPath: string,
+  configPath: string,
+  query: string,
+  opts?: SearchOptions,
+): PaginatedSearchResults {
+  const config = loadConfig(configPath);
+  const resultsPerPage = config.search.resultsPerPage;
+  const totalResults = searchVault(contentPath, configPath, query, opts);
+  const pageSize = resultsPerPage;
+  const totalPages = Math.max(1, Math.ceil(totalResults.length / pageSize));
+  const page = opts?.page ?? 1;
+
+  if (page < 1) {
+    throw new Error("Page must be >= 1");
+  }
+  if (page > totalPages) {
+    throw new Error(`Page ${page} exceeds total pages (${totalPages})`);
+  }
+
+  return {
+    results: totalResults.slice((page - 1) * pageSize, page * pageSize),
+    totalPages,
+    currentPage: page,
+    totalResults: totalResults.length,
+  };
 }

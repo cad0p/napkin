@@ -103,7 +103,7 @@ function createBareVault(projectDir: string): VaultInfo {
       JSON.stringify(
         {
           overview: { depth: 3, keywords: 8 },
-          search: { limit: 30, snippetLines: 0 },
+          search: { limit: 30, contextLines: 5 },
           daily: { folder: "daily", format: "YYYY-MM-DD" },
           vault: { root: "..", obsidian: "../.obsidian" },
         },

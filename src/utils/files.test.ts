@@ -6,6 +6,7 @@ import {
   getFileInfo,
   listFiles,
   listFolders,
+  parseFileRef,
   readFile,
   resolveFile,
 } from "./files.js";
@@ -78,25 +79,78 @@ describe("listFolders", () => {
   });
 });
 
+describe("parseFileRef", () => {
+  test("parses plain file", () => {
+    expect(parseFileRef("file")).toEqual({ path: "file" });
+  });
+
+  test("parses wikilink without heading", () => {
+    expect(parseFileRef("[[file]]")).toEqual({ path: "file" });
+  });
+
+  test("parses wikilink with heading", () => {
+    expect(parseFileRef("[[file#Heading]]")).toEqual({
+      path: "file",
+      heading: "Heading",
+    });
+  });
+
+  test("parses wikilink with heading and alias", () => {
+    expect(parseFileRef("[[file#Heading|alias]]")).toEqual({
+      path: "file",
+      heading: "Heading",
+    });
+  });
+
+  test("parses wikilink with spaces and heading", () => {
+    expect(parseFileRef("[[file with spaces#Heading]]")).toEqual({
+      path: "file with spaces",
+      heading: "Heading",
+    });
+  });
+
+  test("parses wikilink with multiple hashes in heading", () => {
+    expect(parseFileRef("[[file#Heading#Subheading]]")).toEqual({
+      path: "file#Heading",
+      heading: "Subheading",
+    });
+  });
+
+  test("parses no-brackets file#heading reference", () => {
+    expect(parseFileRef("cr-auto-action#Watchdog Recovery")).toEqual({
+      path: "cr-auto-action",
+      heading: "Watchdog Recovery",
+    });
+  });
+});
+
 describe("resolveFile", () => {
   test("resolves by exact path", () => {
     const result = resolveFile(vault.vaultPath, "README.md");
-    expect(result).toBe("README.md");
+    expect(result).toEqual({ path: "README.md" });
   });
 
   test("resolves by wikilink name", () => {
     const result = resolveFile(vault.vaultPath, "Active Projects");
-    expect(result).toBe("Projects/Active Projects.md");
+    expect(result).toEqual({ path: "Projects/Active Projects.md" });
   });
 
   test("resolves case-insensitively", () => {
     const result = resolveFile(vault.vaultPath, "active projects");
-    expect(result).toBe("Projects/Active Projects.md");
+    expect(result).toEqual({ path: "Projects/Active Projects.md" });
   });
 
   test("returns null for missing file", () => {
     const result = resolveFile(vault.vaultPath, "nonexistent-file");
     expect(result).toBeNull();
+  });
+
+  test("resolves wikilink with heading", () => {
+    const result = resolveFile(vault.vaultPath, "[[Active Projects#Heading]]");
+    expect(result).toEqual({
+      path: "Projects/Active Projects.md",
+      heading: "Heading",
+    });
   });
 });
 

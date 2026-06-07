@@ -44,7 +44,10 @@ export function readTemplate(
     );
   }
 
-  let content = fs.readFileSync(path.join(v.contentPath, resolved), "utf-8");
+  let content = fs.readFileSync(
+    path.join(v.contentPath, resolved.path),
+    "utf-8",
+  );
 
   if (opts?.resolve) {
     content = resolveVariables(content, opts.title);
@@ -76,16 +79,16 @@ export function insertTemplate(
     throw new Error(`File not found: ${fileRef}`);
   }
 
-  const title = path.basename(targetResolved, ".md");
+  const title = path.basename(targetResolved.path, ".md");
   let templateContent = fs.readFileSync(
-    path.join(v.contentPath, templateResolved),
+    path.join(v.contentPath, templateResolved.path),
     "utf-8",
   );
   templateContent = resolveVariables(templateContent, title);
 
-  const targetPath = path.join(v.contentPath, targetResolved);
+  const targetPath = path.join(v.contentPath, targetResolved.path);
   const existing = fs.readFileSync(targetPath, "utf-8");
   fs.writeFileSync(targetPath, existing + templateContent);
 
-  return { file: targetResolved, template: templateName, inserted: true };
+  return { file: targetResolved.path, template: templateName, inserted: true };
 }

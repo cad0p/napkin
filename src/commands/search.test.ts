@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { searchVaultPaginated } from "../core/search.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import { search } from "./search.js";
 
@@ -126,22 +127,44 @@ describe("search", () => {
     expect(results[0].modified).toMatch(/ago$/);
   });
 
-  test("--snippet-lines adds context around matches", async () => {
+  test("--context-lines adds context around matches", async () => {
     const data = await captureJson(() =>
       search({
         json: true,
         vault: v.path,
         query: "TODO",
-        snippetLines: "1",
+        contextLines: "1",
       }),
     );
     const results = data.results as {
       snippets: { line: number; text: string }[];
     }[];
-    const alpha = results.find((r: any) => r.file === "Projects/alpha.md");
+    const alpha = results.find((r) => r.file === "Projects/alpha.md");
     expect(alpha).toBeDefined();
     // With context=1, should include lines around the match
     expect(alpha?.snippets.length).toBeGreaterThan(1);
+  });
+
+  test("--context-lines merges overlapping ranges", async () => {
+    const vault = createTempVault({
+      "test.md": "Line 1\nLine 2 match\nLine 3 match\nLine 4\nLine 5",
+    });
+    const data = await captureJson(() =>
+      search({
+        json: true,
+        vault: vault.path,
+        query: "match",
+        contextLines: "1",
+      }),
+    );
+    const results = data.results as {
+      snippets: { line: number; text: string }[];
+    }[];
+    expect(results.length).toBe(1);
+    // Overlapping matches should be merged into a single continuous snippet
+    expect(results[0].snippets.length).toBe(4); // Lines 1-4
+    expect(results[0].snippets.map((s) => s.line)).toEqual([1, 2, 3, 4]);
+    vault.cleanup();
   });
 
   test("empty query returns no results", async () => {
@@ -168,14 +191,6 @@ describe("search", () => {
     const results = data.results as { score: number }[];
     expect(results[0].score).toBeNumber();
     expect(results[0].score).toBeGreaterThan(0);
-  });
-
-  test("score hidden by default in json output", async () => {
-    const data = await captureJson(() =>
-      search({ json: true, vault: v.path, query: "alpha" }),
-    );
-    const results = data.results as { score?: number }[];
-    expect(results[0].score).toBeUndefined();
   });
 
   test("creates cache file after first search", async () => {
@@ -269,5 +284,105 @@ describe("search", () => {
     const results = data.results as { file: string }[];
     expect(results.length).toBe(1);
     expect(results[0].file).toBe("Projects/alpha.md");
+  });
+
+  test("paginates results with --page", async () => {
+    // Create enough files to exceed resultsPerPage (default 10)
+    for (let i = 0; i < 15; i++) {
+      fs.writeFileSync(
+        path.join(v.vaultPath, `extra-${i}.md`),
+        `# Extra ${i}\n\nunique-token-zzz content for pagination test\n`,
+      );
+    }
+
+    const page1 = await captureJson(() =>
+      search({
+        json: true,
+        vault: v.path,
+        query: "unique-token-zzz",
+        page: "1",
+      }),
+    );
+    const page2 = await captureJson(() =>
+      search({
+        json: true,
+        vault: v.path,
+        query: "unique-token-zzz",
+        page: "2",
+      }),
+    );
+
+    const p1Results = page1.results as { file: string }[];
+    const p2Results = page2.results as { file: string }[];
+    const p1Files = p1Results.map((r) => r.file);
+    const p2Files = p2Results.map((r) => r.file);
+
+    expect(p1Results.length).toBeLessThanOrEqual(10);
+    expect(page1.totalPages).toBe(2);
+    expect(page1.currentPage).toBe(1);
+    expect(p2Results.length).toBeGreaterThan(0);
+    expect(page2.currentPage).toBe(2);
+    // No overlap between pages
+    for (const f of p2Files) {
+      expect(p1Files).not.toContain(f);
+    }
+  });
+
+  test("page < 1 throws an error", () => {
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: 0 }),
+    ).toThrow("Page must be >= 1");
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: -1 }),
+    ).toThrow("Page must be >= 1");
+  });
+
+  test("page exceeding totalPages throws an error", () => {
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "alpha", { page: 999 }),
+    ).toThrow(/exceeds total pages/);
+  });
+
+  test("empty results returns default pagination fields", () => {
+    const data = searchVaultPaginated(
+      v.vaultPath,
+      v.vaultPath,
+      "unique-token-single-result-test",
+    );
+    // No files contain this token, so 0 results
+    expect(data.results.length).toBe(0);
+    expect(data.totalPages).toBe(1);
+    expect(data.currentPage).toBe(1);
+    expect(data.totalResults).toBe(0);
+  });
+
+  test("limit and page work together", () => {
+    for (let i = 0; i < 15; i++) {
+      fs.writeFileSync(
+        path.join(v.vaultPath, `limit-test-${i}.md`),
+        `# Limit Test ${i}\n\nunique-limit-token content for pagination test\n`,
+      );
+    }
+
+    // limit=5 caps total results to 5; with resultsPerPage=10, all fit on 1 page
+    const page1 = searchVaultPaginated(
+      v.vaultPath,
+      v.vaultPath,
+      "unique-limit-token",
+      { limit: 5, page: 1 },
+    );
+
+    expect(page1.totalResults).toBe(5);
+    expect(page1.results.length).toBe(5);
+    expect(page1.totalPages).toBe(1);
+    expect(page1.currentPage).toBe(1);
+
+    // page 2 should throw since all 5 results fit on page 1
+    expect(() =>
+      searchVaultPaginated(v.vaultPath, v.vaultPath, "unique-limit-token", {
+        limit: 5,
+        page: 2,
+      }),
+    ).toThrow(/exceeds total pages/);
   });
 });

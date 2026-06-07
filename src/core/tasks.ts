@@ -28,7 +28,7 @@ export function collectTasks(
     files = fs.existsSync(path.join(vault.contentPath, dp)) ? [dp] : [];
   } else if (opts.file) {
     const r = resolveFile(vault.contentPath, opts.file);
-    files = r ? [r] : [];
+    files = r ? [r.path] : [];
   } else {
     files = listFiles(vault.contentPath, { ext: "md" });
   }
@@ -76,7 +76,7 @@ export function resolveTaskLocation(
     if (!resolved) {
       throw new Error(`File not found: ${parts[0]}`);
     }
-    return { filePath: resolved, lineNum: Number.parseInt(parts[1], 10) };
+    return { filePath: resolved.path, lineNum: Number.parseInt(parts[1], 10) };
   }
 
   if (opts.daily) {
@@ -94,7 +94,7 @@ export function resolveTaskLocation(
   if (!resolved) {
     throw new Error(`File not found: ${opts.file}`);
   }
-  return { filePath: resolved, lineNum: Number.parseInt(opts.line, 10) };
+  return { filePath: resolved.path, lineNum: Number.parseInt(opts.line, 10) };
 }
 
 function parseTask(

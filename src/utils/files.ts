@@ -10,6 +10,40 @@ export interface FileInfo {
   modified: number;
 }
 
+export interface FileRef {
+  path: string;
+  heading?: string;
+}
+
+/**
+ * Parse an Obsidian wikilink-style file reference.
+ * Exact parsing order:
+ * 1) Strip `[[` and `]]`
+ * 2) Split by `|` and discard the alias portion
+ * 3) Split the remaining string by the **last** `#` to safely separate the file path from the heading.
+ */
+export function parseFileRef(fileRef: string): FileRef {
+  let ref = fileRef;
+  if (ref.startsWith("[[") && ref.endsWith("]]")) {
+    ref = ref.slice(2, -2);
+  }
+
+  const pipeIndex = ref.indexOf("|");
+  if (pipeIndex !== -1) {
+    ref = ref.slice(0, pipeIndex);
+  }
+
+  const hashIndex = ref.lastIndexOf("#");
+  if (hashIndex !== -1) {
+    return {
+      path: ref.slice(0, hashIndex),
+      heading: ref.slice(hashIndex + 1),
+    };
+  }
+
+  return { path: ref };
+}
+
 export interface ListFilesOptions {
   folder?: string;
   ext?: string;
@@ -266,14 +300,18 @@ function findMatches(vaultPath: string, fileRef: string): string[] {
  * Resolve a file reference (wikilink-style name or exact path) to a relative path in the vault.
  * Throws on ambiguous matches so the user can disambiguate.
  */
-export function resolveFile(vaultPath: string, fileRef: string): string | null {
-  const matches = findMatches(vaultPath, fileRef);
+export function resolveFile(
+  vaultPath: string,
+  fileRef: string,
+): FileRef | null {
+  const parsed = parseFileRef(fileRef);
+  const matches = findMatches(vaultPath, parsed.path);
   if (matches.length > 1) {
     throw new Error(
       `Ambiguous file reference "${fileRef}" matches ${matches.length} files: ${matches.join(", ")}. Use the full path to disambiguate.`,
     );
   }
-  return matches[0] ?? null;
+  return matches[0] ? { path: matches[0], heading: parsed.heading } : null;
 }
 
 /**
@@ -283,12 +321,13 @@ export function resolveFile(vaultPath: string, fileRef: string): string | null {
 export function resolveFileLoose(
   vaultPath: string,
   fileRef: string,
-): string | null {
-  const matches = findMatches(vaultPath, fileRef);
+): FileRef | null {
+  const parsed = parseFileRef(fileRef);
+  const matches = findMatches(vaultPath, parsed.path);
   if (matches.length > 1) {
     matches.sort((a, b) => a.split("/").length - b.split("/").length);
   }
-  return matches[0] ?? null;
+  return matches[0] ? { path: matches[0], heading: parsed.heading } : null;
 }
 
 /**
@@ -332,9 +371,9 @@ export function readFile(
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
-  const fullPath = path.join(vaultPath, resolved);
+  const fullPath = path.join(vaultPath, resolved.path);
   const content = fs.readFileSync(fullPath, "utf-8");
-  return { path: resolved, content };
+  return { path: resolved.path, content };
 }
 
 /**

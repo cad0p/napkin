@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   extractHeadings,
   extractLinks,
+  extractSection,
   extractTags,
   extractTasks,
+  HeadingNotFoundError,
 } from "./markdown.js";
 
 describe("extractHeadings", () => {
@@ -91,5 +93,100 @@ describe("extractLinks", () => {
     const links = extractLinks("No links");
     expect(links.wikilinks).toEqual([]);
     expect(links.outgoing).toEqual([]);
+  });
+});
+
+describe("extractSection", () => {
+  test("extracts exact heading match", () => {
+    const content = "# Title\n\n## Section\nSome text\n\n## Other";
+    const section = extractSection(content, "Section");
+    expect(section).toBe("## Section\nSome text\n");
+  });
+
+  test("extracts section with nested headings", () => {
+    const content =
+      "# Title\n\n## Section\nSome text\n\n### Subsection\nMore text\n\n## Other";
+    const section = extractSection(content, "Section");
+    expect(section).toBe(
+      "## Section\nSome text\n\n### Subsection\nMore text\n",
+    );
+  });
+
+  test("extracts section to end of file if no next heading", () => {
+    const content = "# Title\n\n## Section\nSome text\n\nMore text";
+    const section = extractSection(content, "Section");
+    expect(section).toBe("## Section\nSome text\n\nMore text");
+  });
+
+  test("matches byte-for-byte including markdown formatting", () => {
+    const content = "# Title\n\n## **Bold Section**\nText";
+    const section = extractSection(content, "**Bold Section**");
+    expect(section).toBe("## **Bold Section**\nText");
+  });
+
+  test("throws error with available headings if not found", () => {
+    const content =
+      "# Title\n\n## Section A\n\n## Section B\n\n## Section C\n\n## Section D\n\n## Section E\n\n## Section F";
+    expect(() => extractSection(content, "Not Found")).toThrow(
+      'Heading "Not Found" not found. Available headings:\n# Title\n## Section A\n## Section B\n## Section C\n## Section D\n...',
+    );
+  });
+
+  test("throws specific error if file has no headings", () => {
+    const content = "Just some plain text without any headings.";
+    expect(() => extractSection(content, "Not Found")).toThrow(
+      'Heading "Not Found" not found. The file contains no headings.',
+    );
+  });
+
+  test("strips trailing # preceded by a space", () => {
+    const content = "## Heading ##\nSome text.\n";
+    const section = extractSection(content, "Heading");
+    expect(section).toBe("## Heading ##\nSome text.\n");
+  });
+
+  test("strips trailing # with extra spaces", () => {
+    const content = "## Heading 2 ##\nBody\n";
+    const section = extractSection(content, "Heading 2");
+    expect(section).toBe("## Heading 2 ##\nBody\n");
+  });
+
+  test("keeps trailing # without preceding space", () => {
+    const content = "## Heading##\nBody\n";
+    const section = extractSection(content, "Heading##");
+    expect(section).toBe("## Heading##\nBody\n");
+  });
+
+  test("accepts ## prefix in heading parameter", () => {
+    const content = "## Watchdog Recovery\nSome text.\n";
+    const section = extractSection(content, "## Watchdog Recovery");
+    expect(section).toBe("## Watchdog Recovery\nSome text.\n");
+  });
+});
+
+describe("HeadingNotFoundError", () => {
+  test("is an instance of HeadingNotFoundError and Error", () => {
+    const content = "# Title\n\n## Section A\n";
+    try {
+      extractSection(content, "Not Found");
+      throw new Error("expected to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(HeadingNotFoundError);
+      expect(e).toBeInstanceOf(Error);
+      expect((e as HeadingNotFoundError).heading).toBe("Not Found");
+      expect((e as HeadingNotFoundError).headings).toHaveLength(2);
+    }
+  });
+
+  test("has empty headings list when file has no headings", () => {
+    const content = "Just plain text.";
+    try {
+      extractSection(content, "Anything");
+      throw new Error("expected to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(HeadingNotFoundError);
+      expect((e as HeadingNotFoundError).headings).toHaveLength(0);
+      expect((e as Error).message).toContain("no headings");
+    }
   });
 });
