@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - Run TypeScript sources directly, drop committed dist
+- Progressive disclosure API refinements (search pagination & section read) ([#10](https://github.com/cad0p/napkin/pull/10))
 
 ### 📚 Documentation
 
