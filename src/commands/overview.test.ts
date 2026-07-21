@@ -75,12 +75,16 @@ describe("overview", () => {
     const warnings: string[] = [];
     const captured: unknown[] = [];
     const origLog = console.log;
+    const origError = console.error;
 
     try {
-      console.log = (...args: unknown[]) => {
+      // Warnings go to stderr so they never corrupt --json output on stdout.
+      console.error = (...args: unknown[]) => {
         const msg = args.map(String).join(" ");
         if (msg.includes("⚠")) warnings.push(msg);
-        else captured.push(...args);
+      };
+      console.log = (...args: unknown[]) => {
+        captured.push(...args);
       };
       await overview({
         vault: vault.path,
@@ -90,6 +94,7 @@ describe("overview", () => {
       });
     } finally {
       console.log = origLog;
+      console.error = origError;
     }
 
     const result = JSON.parse(captured[0] as string) as {
