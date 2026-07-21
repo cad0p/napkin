@@ -10,14 +10,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        # pnpm version is pinned via the `packageManager` field in
+        # package.json (pnpm@11.15.0). action-setup reads that field
+        # automatically, so a pnpm release regression can't break CI
+        # without an explicit bump in this repo.
+      - uses: actions/setup-node@v6
         with:
-          bun-version: latest
-      - run: bun install
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: npx @biomejs/biome check src/
+        run: ./node_modules/.bin/biome check src/
       - name: Type check
-        run: npx tsc --noEmit
+        run: ./node_modules/.bin/tsc --noEmit
       - name: Run tests
-        run: bun test
+        run: ./node_modules/.bin/vitest run

@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   getFileInfo,
   listFiles,
@@ -47,7 +47,7 @@ describe("listFiles", () => {
     const files = listFiles(vault.vaultPath, { ext: "md" });
     expect(files.length).toBe(7);
     for (const f of files) {
-      expect(f).toEndWith(".md");
+      expect(f.endsWith(".md")).toBe(true);
     }
   });
 
