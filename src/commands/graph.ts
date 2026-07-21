@@ -1,3 +1,4 @@
+import { exec } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { basename, extname, relative } from "node:path";
@@ -444,7 +445,6 @@ async function openInBrowser(html: string): Promise<void> {
       info(`Graph running at ${url} — press Ctrl+C to stop`);
 
       // Open browser
-      const { exec } = require("node:child_process");
       const cmd =
         platform === "win32"
           ? `start ${url}`

@@ -57,6 +57,7 @@ import {
   templateRead,
   templates,
 } from "./commands/templates.js";
+import { update } from "./commands/update.js";
 import { vault } from "./commands/vault.js";
 import { wordcount } from "./commands/wordcount.js";
 
@@ -96,6 +97,7 @@ Examples:
   $ napkin read file.md --section "## Heading"  Read a section
   $ napkin read '[[file#Heading]]'   Read via wikilink syntax
   $ napkin outline file.md           Show document structure
+  $ napkin update                    Update the napkin CLI
 
 Workflow: init → overview → search → read
 
@@ -105,6 +107,7 @@ Getting started:
   vault                Show vault info (path, file count, size)
   config               Vault configuration (show, get, set)
   graph                Interactive vault graph visualization
+  update               Update the napkin CLI via pnpm (or npm fallback)
 
 Reading:
   read <file>          Read a file (--section, --page)
@@ -166,6 +169,7 @@ program
   .description("Vault map with keywords (Level 1 progressive disclosure)")
   .option("--depth <n>", "Max folder depth")
   .option("--keywords <n>", "Max keywords per folder")
+  .option("--no-collapse", "Do not roll up homogeneous sibling folders")
   .action(async (opts, cmd) => {
     const root = { ...cmd.optsWithGlobals(), ...opts };
     await overview(root);
@@ -185,6 +189,14 @@ program
   .action(async (_opts, cmd) => {
     const root = cmd.optsWithGlobals();
     await vault(root);
+  });
+
+program
+  .command("update")
+  .description("Update the napkin CLI")
+  .action(async (_opts, cmd) => {
+    const root = cmd.optsWithGlobals();
+    await update(root);
   });
 
 // ── Reading ─────────────────────────────────────────────────────────

@@ -21,6 +21,8 @@ export interface NapkinConfig {
   overview: {
     depth: number;
     keywords: number;
+    /** Roll up numerous, lexically homogeneous sibling folders into one row. */
+    collapse: boolean;
   };
   search: {
     limit: number;
@@ -43,6 +45,7 @@ export const DEFAULT_CONFIG: NapkinConfig = {
   overview: {
     depth: 3,
     keywords: 8,
+    collapse: true,
   },
   search: {
     limit: 30,
