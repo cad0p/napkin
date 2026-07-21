@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { searchVaultPaginated } from "../core/search.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import { search } from "./search.js";
@@ -63,7 +63,7 @@ describe("search", () => {
     const alpha = results.find((r) => r.file === "Projects/alpha.md");
     expect(alpha).toBeDefined();
     expect(alpha?.snippets.length).toBeGreaterThan(0);
-    expect(alpha?.snippets.some((s) => s.text.includes("TODO"))).toBeTrue();
+    expect(alpha?.snippets.some((s) => s.text.includes("TODO"))).toBe(true);
   });
 
   test("no-snippets returns files only", async () => {
@@ -227,7 +227,7 @@ describe("search", () => {
       }),
     );
     const results = data.results as { score: number }[];
-    expect(results[0].score).toBeNumber();
+    expect(typeof results[0].score).toBe("number");
     expect(results[0].score).toBeGreaterThan(0);
   });
 

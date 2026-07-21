@@ -335,10 +335,10 @@ pi install git:github.com/cad0p/pi-napkin
 ## Development
 
 ```bash
-bun install
-bun run dev -- vault --json
-bun test
-bun run check
+pnpm install
+pnpm dev -- vault --json
+pnpm test
+pnpm check
 ```
 
 ## License

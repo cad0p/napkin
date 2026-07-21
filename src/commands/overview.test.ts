@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { createTempVault } from "../utils/test-helpers.js";
 import { overview } from "./overview.js";
 
@@ -38,7 +38,7 @@ describe("overview", () => {
     const result = (await runOverviewJson(vault.path)) as {
       overview: Array<{ path: string; notes: number; tags: string[] }>;
     };
-    expect(result.overview).toBeArray();
+    expect(Array.isArray(result.overview)).toBe(true);
     expect(result.overview.length).toBeGreaterThanOrEqual(3);
 
     const projectsFolder = result.overview.find((f) => f.path === "projects");

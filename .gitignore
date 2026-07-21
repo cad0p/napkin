@@ -1,7 +1,3 @@
-# Compiled binaries
-obsidian-cli
-obsidian-cli-*
-
 # Logs
 *.log
 
@@ -11,12 +7,11 @@ node_modules/
 # TypeScript
 *.tsbuildinfo
 
-# Build output
+# Build output (not shipped; package uses bin/napkin.js + jiti on src/)
 dist
 
-# Bun
-bun.lockb
-bun.lock
+# pnpm
+# pnpm-lock.yaml IS committed for reproducibility.
 
 # Benchmark data and results (download on demand)
 bench/data/

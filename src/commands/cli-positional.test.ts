@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTempVault } from "../utils/test-helpers.js";
 
 let v: { path: string; vaultPath: string; cleanup: () => void };
@@ -16,29 +17,38 @@ afterEach(() => {
   v.cleanup();
 });
 
-async function run(
+function run(
   args: string[],
   stdin?: string,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(
-    ["bun", "run", path.resolve("src/main.ts"), "--vault", v.path, ...args],
+): { stdout: string; stderr: string; exitCode: number } {
+  // Spawn the CLI as a real subprocess (node --import tsx) so these
+  // tests exercise the same argv parsing and stdio path as a real
+  // `napkin` invocation. spawnSync keeps the helper synchronous and
+  // simple; none of these tests need streaming. cwd is the repo root
+  // (not the vault) so node resolves the tsx loader from node_modules;
+  // vault discovery goes through --vault, not cwd.
+  const result = spawnSync(
+    "node",
+    [
+      "--import",
+      "tsx",
+      path.resolve("src/main.ts"),
+      "--vault",
+      v.path,
+      ...args,
+    ],
     {
-      cwd: v.path,
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: stdin ? "pipe" : undefined,
+      cwd: path.resolve("."),
+      encoding: "utf-8",
+      input: stdin,
+      stdio: [stdin ? "pipe" : "ignore", "pipe", "pipe"],
     },
   );
-  if (stdin && proc.stdin) {
-    proc.stdin.write(stdin);
-    proc.stdin.end();
-  }
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { stdout, stderr, exitCode };
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    exitCode: result.status ?? 1,
+  };
 }
 
 function readFile(rel: string): string {
@@ -47,39 +57,31 @@ function readFile(rel: string): string {
 
 describe("positional args", () => {
   test("create <name>", async () => {
-    const { exitCode } = await run(["create", "Test Note", "--json"]);
+    const { exitCode } = run(["create", "Test Note", "--json"]);
     expect(exitCode).toBe(0);
     expect(fs.existsSync(path.join(v.vaultPath, "Test Note.md"))).toBe(true);
   });
 
   test("create <name> [content]", async () => {
-    const { exitCode } = await run([
-      "create",
-      "Test Note",
-      "hello world",
-      "--json",
-    ]);
+    const { exitCode } = run(["create", "Test Note", "hello world", "--json"]);
     expect(exitCode).toBe(0);
     expect(readFile("Test Note.md")).toBe("hello world");
   });
 
   test("append <file> [content]", async () => {
-    const { exitCode } = await run(["append", "README", "new line", "--json"]);
+    const { exitCode } = run(["append", "README", "new line", "--json"]);
     expect(exitCode).toBe(0);
     expect(readFile("README.md")).toContain("Welcome\nnew line");
   });
 
   test("append <file> with stdin", async () => {
-    const { exitCode } = await run(
-      ["append", "README", "--json"],
-      "from stdin",
-    );
+    const { exitCode } = run(["append", "README", "--json"], "from stdin");
     expect(exitCode).toBe(0);
     expect(readFile("README.md")).toContain("Welcome\nfrom stdin");
   });
 
   test("append positional content takes precedence over stdin", async () => {
-    const { exitCode } = await run(
+    const { exitCode } = run(
       ["append", "README", "positional", "--json"],
       "from stdin",
     );
@@ -89,7 +91,7 @@ describe("positional args", () => {
   });
 
   test("prepend <file> [content]", async () => {
-    const { exitCode } = await run(["prepend", "README", "top line", "--json"]);
+    const { exitCode } = run(["prepend", "README", "top line", "--json"]);
     expect(exitCode).toBe(0);
     const content = readFile("README.md");
     expect(content.indexOf("top line")).toBeLessThan(
@@ -98,10 +100,7 @@ describe("positional args", () => {
   });
 
   test("prepend <file> with stdin", async () => {
-    const { exitCode } = await run(
-      ["prepend", "README", "--json"],
-      "from stdin",
-    );
+    const { exitCode } = run(["prepend", "README", "--json"], "from stdin");
     expect(exitCode).toBe(0);
     const content = readFile("README.md");
     expect(content.indexOf("from stdin")).toBeLessThan(
@@ -110,7 +109,7 @@ describe("positional args", () => {
   });
 
   test("move <file> <to>", async () => {
-    const { exitCode } = await run(["move", "README", "Projects", "--json"]);
+    const { exitCode } = run(["move", "README", "Projects", "--json"]);
     expect(exitCode).toBe(0);
     expect(fs.existsSync(path.join(v.vaultPath, "README.md"))).toBe(false);
     expect(fs.existsSync(path.join(v.vaultPath, "Projects/README.md"))).toBe(
@@ -119,37 +118,27 @@ describe("positional args", () => {
   });
 
   test("rename <file> <name>", async () => {
-    const { exitCode } = await run(["rename", "README", "INDEX", "--json"]);
+    const { exitCode } = run(["rename", "README", "INDEX", "--json"]);
     expect(exitCode).toBe(0);
     expect(fs.existsSync(path.join(v.vaultPath, "README.md"))).toBe(false);
     expect(fs.existsSync(path.join(v.vaultPath, "INDEX.md"))).toBe(true);
   });
 
   test("delete <file>", async () => {
-    const { exitCode } = await run([
-      "delete",
-      "README",
-      "--permanent",
-      "--json",
-    ]);
+    const { exitCode } = run(["delete", "README", "--permanent", "--json"]);
     expect(exitCode).toBe(0);
     expect(fs.existsSync(path.join(v.vaultPath, "README.md"))).toBe(false);
   });
 
   test("file outline <file>", async () => {
-    const { stdout, exitCode } = await run(["outline", "README", "--json"]);
+    const { stdout, exitCode } = run(["outline", "README", "--json"]);
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.headings.length).toBeGreaterThan(0);
   });
 
   test("file wordcount <file>", async () => {
-    const { stdout, exitCode } = await run([
-      "file",
-      "wordcount",
-      "README",
-      "--json",
-    ]);
+    const { stdout, exitCode } = run(["file", "wordcount", "README", "--json"]);
     expect(exitCode).toBe(0);
     const data = JSON.parse(stdout);
     expect(data.words).toBeGreaterThan(0);
@@ -157,26 +146,21 @@ describe("positional args", () => {
 
   test("daily append [content]", async () => {
     // Create today's daily note first
-    await run(["daily", "today", "--json"]);
-    const { exitCode } = await run([
-      "daily",
-      "append",
-      "daily entry",
-      "--json",
-    ]);
+    run(["daily", "today", "--json"]);
+    const { exitCode } = run(["daily", "append", "daily entry", "--json"]);
     expect(exitCode).toBe(0);
   });
 
   test("daily prepend [content]", async () => {
-    await run(["daily", "today", "--json"]);
-    const { exitCode } = await run(["daily", "prepend", "top entry", "--json"]);
+    run(["daily", "today", "--json"]);
+    const { exitCode } = run(["daily", "prepend", "top entry", "--json"]);
     expect(exitCode).toBe(0);
   });
 });
 
 describe("flag backward compat", () => {
   test("append --file --content still works", async () => {
-    const { exitCode } = await run([
+    const { exitCode } = run([
       "append",
       "--file",
       "README",
@@ -189,7 +173,7 @@ describe("flag backward compat", () => {
   });
 
   test("create --name --content still works", async () => {
-    const { exitCode } = await run([
+    const { exitCode } = run([
       "create",
       "--name",
       "Flag Note",
