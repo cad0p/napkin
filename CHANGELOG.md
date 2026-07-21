@@ -18,4 +18,8 @@ All notable changes to this project will be documented in this file.
 - *(readme)* Install from the @cad0p scope, show both pnpm and npm
 - *(readme)* Point pi-napkin reference at cad0p fork
 
+### ⚙️ Miscellaneous Tasks
+
+- Migrate from bun to pnpm + vitest, drop dead build scripts ([#15](https://github.com/cad0p/napkin/pull/15))
+
 
