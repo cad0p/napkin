@@ -6,12 +6,11 @@ import { listFiles } from "../utils/files.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
   diffFileMtimes,
+  type FileStatSig,
   loadSearchCache,
+  type SearchCacheData,
   saveSearchCache,
   statAllFiles,
-  type FileMtimeEntry,
-  type FileStatSig,
-  type SearchCacheData,
 } from "../utils/search-cache.js";
 
 /**
@@ -111,16 +110,20 @@ interface BuildResult {
   basenameIndex: MiniSearch;
 }
 
-function readDoc(
-  vaultPath: string,
-  file: string,
-): DocRecord {
+function readDoc(vaultPath: string, file: string): DocRecord {
   const fullPath = path.join(vaultPath, file);
   const content = fs.readFileSync(fullPath, "utf-8");
   const stat = fs.statSync(fullPath);
   const basename = path.basename(file, ".md");
   const { wikilinks } = extractLinks(content);
-  return { file, basename, content, mtime: stat.mtimeMs, size: stat.size, outgoingLinks: wikilinks };
+  return {
+    file,
+    basename,
+    content,
+    mtime: stat.mtimeMs,
+    size: stat.size,
+    outgoingLinks: wikilinks,
+  };
 }
 
 /**
@@ -300,16 +303,19 @@ function contentScan(
     const lo = doc.content.toLowerCase();
     let total = 0;
     for (const term of lowerTerms) {
-      let i = 0;
+      const i = 0;
       let count = 0;
       const len = term.length;
       // Fast path: single-char terms use split (faster than indexOf loop)
       if (len <= 1) {
         count = lo.split(term).length - 1;
       } else {
-        while ((i = lo.indexOf(term, i)) !== -1) {
+        let idx = i;
+        for (;;) {
+          idx = lo.indexOf(term, idx);
+          if (idx === -1) break;
           count++;
-          i += len;
+          idx += len;
         }
       }
       total += count;
@@ -346,11 +352,13 @@ function resolveVaultIndex(
 
   const cached = memoryCache.get(memKey);
   if (cached) {
-    return applyIncrementalDiff(contentPath, cached, folder) ?? {
-      basenameIndex: cached.basenameIndex,
-      docs: cached.docs,
-      backlinkCounts: cached.backlinkCounts,
-    };
+    return (
+      applyIncrementalDiff(contentPath, cached, folder) ?? {
+        basenameIndex: cached.basenameIndex,
+        docs: cached.docs,
+        backlinkCounts: cached.backlinkCounts,
+      }
+    );
   }
 
   const diskCache = loadSearchCache(configPath);
@@ -359,11 +367,13 @@ function resolveVaultIndex(
     const loaded = loadFromDiskCache(diskCache);
     if (loaded) {
       memoryCache.set(memKey, loaded);
-      return applyIncrementalDiff(contentPath, loaded, folder) ?? {
-        basenameIndex: loaded.basenameIndex,
-        docs: loaded.docs,
-        backlinkCounts: loaded.backlinkCounts,
-      };
+      return (
+        applyIncrementalDiff(contentPath, loaded, folder) ?? {
+          basenameIndex: loaded.basenameIndex,
+          docs: loaded.docs,
+          backlinkCounts: loaded.backlinkCounts,
+        }
+      );
     }
   }
 
@@ -385,15 +395,17 @@ function resolveVaultIndex(
   };
 }
 
-function loadFromDiskCache(
-  cache: SearchCacheData,
-): CachedVaultIndex | null {
+function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
   try {
     const basenameIndex = MiniSearch.loadJSON(cache.index, {
       fields: ["basename"],
       storeFields: ["file"],
       idField: "file",
-      searchOptions: { boost: { basename: BASENAME_BOOST }, fuzzy: 0.2, prefix: true },
+      searchOptions: {
+        boost: { basename: BASENAME_BOOST },
+        fuzzy: 0.2,
+        prefix: true,
+      },
     });
     const docs = new Map<string, DocRecord>();
     for (const d of cache.docs) {
@@ -408,7 +420,13 @@ function loadFromDiskCache(
     }
     const backlinkCounts = new Map(Object.entries(cache.backlinkCounts));
     const fileMtimes = new Map(Object.entries(cache.fileMtimes));
-    return { basenameIndex, docs, backlinkCounts, fileMtimes, folder: cache.folder };
+    return {
+      basenameIndex,
+      docs,
+      backlinkCounts,
+      fileMtimes,
+      folder: cache.folder,
+    };
   } catch {
     return null;
   }
@@ -429,10 +447,7 @@ function applyIncrementalDiff(
   folder?: string,
 ): ResolvedIndex | null {
   const current = statAllFiles(vaultPath, folder);
-  const diff = diffFileMtimes(
-    Object.fromEntries(cache.fileMtimes),
-    current,
-  );
+  const diff = diffFileMtimes(Object.fromEntries(cache.fileMtimes), current);
   if (diff.unchanged) {
     return null;
   }
@@ -463,7 +478,8 @@ function applyIncrementalDiff(
     } else {
       basenameMap.set(key, [doc.file]);
     }
-    if (cache.basenameIndex.has(doc.file)) cache.basenameIndex.discard(doc.file);
+    if (cache.basenameIndex.has(doc.file))
+      cache.basenameIndex.discard(doc.file);
     cache.basenameIndex.add(doc);
     cache.docs.set(doc.file, doc);
     cache.fileMtimes.set(doc.file, { mtime: doc.mtime, size: doc.size });
@@ -555,7 +571,10 @@ export function searchVault(
   }
 
   // Content substring scan (in-memory, ~130ms for 26MB).
-  const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
   const contentTf = contentScan(docs, terms);
 
   // Merge basename + content hits.
@@ -576,7 +595,10 @@ export function searchVault(
     const links = backlinkCounts.get(file) || 0;
     scored.push({
       file,
-      composite: bm25 * BASENAME_BOOST + tf * CONTENT_TF_WEIGHT + links * BACKLINK_WEIGHT,
+      composite:
+        bm25 * BASENAME_BOOST +
+        tf * CONTENT_TF_WEIGHT +
+        links * BACKLINK_WEIGHT,
       links,
       _mtime: doc.mtime,
     });
@@ -600,7 +622,8 @@ export function searchVault(
   const withSnippets: SearchResult[] = topN.map((s) => {
     const doc = docs.get(s.file);
     // Warm-path docs have empty content (deferred read). Read on demand.
-    const content = doc?.content || fs.readFileSync(path.join(contentPath, s.file), "utf-8");
+    const content =
+      doc?.content || fs.readFileSync(path.join(contentPath, s.file), "utf-8");
     return {
       file: s.file,
       score: Math.round(s.composite * 10) / 10,
