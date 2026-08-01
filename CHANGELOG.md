@@ -46,6 +46,10 @@ vaults within seconds — the previous implementation could take minutes.
 
 <!-- USER-EDITABLE SECTION END -->
 
+### 🐛 Bug Fixes
+
+- *(search)* Biome lint — drop unused import, organize imports, avoid assign-in-expression in contentScan ([#21](https://github.com/cad0p/napkin/pull/21))
+
 ### ⚡ Performance
 
 - *(search)* Approach G — basename-only MiniSearch + substring content scan; incremental mtime+size diff; fused backlinks; memory cache ([#19](https://github.com/cad0p/napkin/pull/19))
