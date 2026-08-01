@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   computeFingerprint,
+  diffFileMtimes,
   loadSearchCache,
   saveSearchCache,
 } from "./search-cache.js";
@@ -54,49 +55,106 @@ describe("computeFingerprint", () => {
   });
 });
 
+describe("diffFileMtimes", () => {
+  test("detects change when mtime differs", () => {
+    const cached = { "a.md": { mtime: 1000, size: 10 } };
+    const diff = diffFileMtimes(cached, [
+      { file: "a.md", mtime: 2000, size: 10 },
+    ]);
+    expect(diff.unchanged).toBe(false);
+    expect(diff.toAdd).toEqual([{ file: "a.md", mtime: 2000, size: 10 }]);
+  });
+
+  test("detects change when size differs but mtime is identical (same-tick edit)", () => {
+    // Regression test: some filesystems report identical mtimeMs for rapid
+    // successive writes. An mtime-only diff would miss the edit and serve a
+    // stale index. Comparing size catches the common same-tick case where the
+    // byte length changed.
+    const cached = { "a.md": { mtime: 1000, size: 10 } };
+    const diff = diffFileMtimes(cached, [
+      { file: "a.md", mtime: 1000, size: 15 },
+    ]);
+    expect(diff.unchanged).toBe(false);
+    expect(diff.toAdd).toHaveLength(1);
+  });
+
+  test("unchanged when mtime AND size both match", () => {
+    const cached = { "a.md": { mtime: 1000, size: 10 } };
+    const diff = diffFileMtimes(cached, [
+      { file: "a.md", mtime: 1000, size: 10 },
+    ]);
+    expect(diff.unchanged).toBe(true);
+    expect(diff.toAdd).toHaveLength(0);
+    expect(diff.toRemove).toHaveLength(0);
+  });
+
+  test("detects added and removed files", () => {
+    const cached = {
+      "old.md": { mtime: 1000, size: 10 },
+      "kept.md": { mtime: 1000, size: 5 },
+    };
+    const diff = diffFileMtimes(cached, [
+      { file: "kept.md", mtime: 1000, size: 5 },
+      { file: "new.md", mtime: 3000, size: 7 },
+    ]);
+    expect(diff.toAdd.map((e) => e.file)).toEqual(["new.md"]);
+    expect(diff.toRemove).toEqual(["old.md"]);
+  });
+});
+
 describe("saveSearchCache / loadSearchCache", () => {
   test("round-trips cache data", () => {
-    const fingerprint = computeFingerprint(vault.vaultPath);
     const data = {
-      fingerprint,
+      folder: null,
+      fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
       index: '{"serialized":"index"}',
-      docs: [{ id: 0, file: "README.md", basename: "README", mtime: 1000 }],
+      docs: [{ file: "README.md", basename: "README", mtime: 1000, size: 42 }],
       backlinkCounts: { "README.md": 2 },
+      outgoingLinks: { "README.md": [] },
     };
 
     saveSearchCache(vault.vaultPath, data);
-    const loaded = loadSearchCache(vault.vaultPath, fingerprint);
+    const loaded = loadSearchCache(vault.vaultPath);
 
     expect(loaded).not.toBeNull();
     expect(loaded?.index).toBe(data.index);
     expect(loaded?.docs).toEqual(data.docs);
     expect(loaded?.backlinkCounts).toEqual(data.backlinkCounts);
+    expect(loaded?.fileMtimes).toEqual(data.fileMtimes);
+    expect(loaded?.folder).toBeNull();
   });
 
   test("returns null when no cache exists", () => {
-    const loaded = loadSearchCache(vault.vaultPath, "any-fingerprint");
+    const loaded = loadSearchCache(vault.vaultPath);
     expect(loaded).toBeNull();
   });
 
-  test("returns null when fingerprint doesn't match", () => {
+  test("returns null when cache shape is invalid (missing fileMtimes)", () => {
+    // Old-format cache (with `fingerprint` instead of `fileMtimes`) must be
+    // rejected so `searchVault` falls back to a cold build.
     const data = {
       fingerprint: "old-fingerprint",
       index: "{}",
       docs: [],
       backlinkCounts: {},
     };
-    saveSearchCache(vault.vaultPath, data);
+    fs.writeFileSync(
+      path.join(vault.vaultPath, "search-cache.json"),
+      JSON.stringify(data),
+    );
 
-    const loaded = loadSearchCache(vault.vaultPath, "new-fingerprint");
+    const loaded = loadSearchCache(vault.vaultPath);
     expect(loaded).toBeNull();
   });
 
   test("cache file lives in config dir", () => {
     const data = {
-      fingerprint: "test",
+      folder: null,
+      fileMtimes: {},
       index: "{}",
       docs: [],
       backlinkCounts: {},
+      outgoingLinks: {},
     };
     saveSearchCache(vault.vaultPath, data);
 
@@ -111,7 +169,7 @@ describe("saveSearchCache / loadSearchCache", () => {
       "not valid json{{{",
     );
 
-    const loaded = loadSearchCache(vault.vaultPath, "any");
+    const loaded = loadSearchCache(vault.vaultPath);
     expect(loaded).toBeNull();
   });
 });
