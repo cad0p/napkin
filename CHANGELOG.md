@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### ⚡ Performance
+
+- *(search)* Approach G — basename-only MiniSearch + substring content scan; incremental mtime+size diff; fused backlinks; memory cache ([#19](https://github.com/cad0p/napkin/pull/19))
+
 ### ⚙️ Miscellaneous Tasks
 
 - Add AGENTS.md with project onboarding instructions ([#17](https://github.com/cad0p/napkin/pull/17))
