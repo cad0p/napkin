@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(search)* Restore warm-path content recall by persisting content in cache ([#22](https://github.com/cad0p/napkin/pull/22)) ([#23](https://github.com/cad0p/napkin/pull/23))
+
+
 ## [0.10.0] - 2026-08-01
 
 <!-- USER-EDITABLE SECTION START -->
