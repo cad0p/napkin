@@ -108,7 +108,15 @@ describe("saveSearchCache / loadSearchCache", () => {
       folder: null,
       fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
       index: '{"serialized":"index"}',
-      docs: [{ file: "README.md", basename: "README", mtime: 1000, size: 42 }],
+      docs: [
+        {
+          file: "README.md",
+          basename: "README",
+          content: "# readme body",
+          mtime: 1000,
+          size: 42,
+        },
+      ],
       backlinkCounts: { "README.md": 2 },
       outgoingLinks: { "README.md": [] },
     };
@@ -122,6 +130,24 @@ describe("saveSearchCache / loadSearchCache", () => {
     expect(loaded?.backlinkCounts).toEqual(data.backlinkCounts);
     expect(loaded?.fileMtimes).toEqual(data.fileMtimes);
     expect(loaded?.folder).toBeNull();
+  });
+
+  test("rejects content-less caches (legacy format) so cold-rebuild restores recall", () => {
+    // v0.10.0 wrote caches WITHOUT doc.content; on the warm path contentScan
+    // then matched nothing and recall collapsed (bug #22). Such caches must be
+    // rejected here so searchVault falls back to a cold rebuild in the new
+    // (content-bearing) format instead of loading and silently degrading recall.
+    const data = {
+      folder: null,
+      fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
+      index: '{"serialized":"index"}',
+      docs: [{ file: "README.md", basename: "README", mtime: 1000, size: 42 }],
+      backlinkCounts: { "README.md": 2 },
+      outgoingLinks: { "README.md": [] },
+    };
+
+    saveSearchCache(vault.vaultPath, data);
+    expect(loadSearchCache(vault.vaultPath)).toBeNull();
   });
 
   test("returns null when no cache exists", () => {

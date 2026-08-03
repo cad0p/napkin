@@ -412,7 +412,10 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
       docs.set(d.file, {
         file: d.file,
         basename: d.basename,
-        content: "", // deferred — read on demand for content scan + snippets
+        // Content IS persisted in the disk cache (fixes #22) so the warm
+        // path can run contentScan with correct recall. Old caches that
+        // omit `content` are rejected by loadSearchCache and rebuilt.
+        content: d.content,
         mtime: d.mtime,
         size: d.size,
         outgoingLinks: cache.outgoingLinks[d.file] ?? [],
@@ -535,6 +538,7 @@ function persistCache(
       docs: docsArr.map((d) => ({
         file: d.file,
         basename: d.basename,
+        content: d.content,
         mtime: d.mtime,
         size: d.size,
       })),
