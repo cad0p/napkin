@@ -10,6 +10,11 @@ export interface CachedDoc {
   basename: string;
   mtime: number;
   size: number;
+  /**
+   * Full file content, persisted so the warm path can run the content scan
+   * with correct recall (fixes #22).
+   */
+  content: string;
 }
 
 export interface SearchCacheData {
@@ -19,7 +24,7 @@ export interface SearchCacheData {
   fileMtimes: Record<string, FileStatSig>;
   /** JSON-serialized MiniSearch index. */
   index: string;
-  /** Doc metadata (without content — content is read on demand for snippets). */
+  /** Doc metadata (with content — needed by the warm-path content scan). */
   docs: CachedDoc[];
   /** file → inbound backlink count. */
   backlinkCounts: Record<string, number>;
@@ -157,6 +162,12 @@ export function loadSearchCache(configPath: string): SearchCacheData | null {
       !data.outgoingLinks
     ) {
       return null;
+    }
+    // docs[].content must be present: v0.10.0 wrote content-less caches whose
+    // warm path ran contentScan over empty content and lost recall (#22). If
+    // any entry lacks content we reject here and cold-rebuild in the new format.
+    for (const doc of data.docs) {
+      if (typeof doc.content !== "string") return null;
     }
     return data as SearchCacheData;
   } catch {
