@@ -292,14 +292,38 @@ function relativeTime(mtimeMs: number): string {
  * Uses case-insensitive substring matching (matches napkin's prior
  * `extractSnippets` behavior and MiniSearch's `prefix: true` recall).
  */
+/**
+ * In-memory substring scan over doc content.
+ *
+ * Warm-path (disk-cached) docs carry `content: ""` to keep the cache small
+ * (v0.10.0 regression #22: the scan silently matched nothing because it only
+ * ever read `doc.content`). Here we read content on demand from disk for any
+ * doc whose content is missing, then populate `doc.content` so subsequent
+ * queries in this process hit memory. Napkin is a synchronous, zero-dep tool
+ * so reads are `readFileSync` (serial). See issue #22 for the A-vs-B tradeoff:
+ * on fast disks reading 2717 files is ~240ms (sub-jiti), so the small cache is
+ * preferred over persisting 29MB of content.
+ */
 function contentScan(
   docs: Map<string, DocRecord>,
   terms: string[],
+  contentPath: string,
 ): Map<string, number> {
   const tf = new Map<string, number>();
   if (terms.length === 0) return tf;
   const lowerTerms = terms.map((t) => t.toLowerCase());
   for (const doc of docs.values()) {
+    if (!doc.content) {
+      try {
+        doc.content = fs.readFileSync(
+          path.join(contentPath, doc.file),
+          "utf-8",
+        );
+      } catch {
+        // File vanished between stat and read — treat as no content match.
+        continue;
+      }
+    }
     const lo = doc.content.toLowerCase();
     let total = 0;
     for (const term of lowerTerms) {
@@ -575,7 +599,7 @@ export function searchVault(
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 0);
-  const contentTf = contentScan(docs, terms);
+  const contentTf = contentScan(docs, terms, contentPath);
 
   // Merge basename + content hits.
   const allHits = new Set([...basenameScores.keys(), ...contentTf.keys()]);
