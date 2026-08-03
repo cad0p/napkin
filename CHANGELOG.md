@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1] - 2026-08-03
+
+<!-- USER-EDITABLE SECTION START -->
+Critical hotfix for the warm-path search regression introduced in 0.10.0.
+After the first cold search built the on-disk cache, every subsequent search
+silently lost all content matches (returned only basename hits — e.g. 22
+results instead of 388 on a large vault). See #22 for the deep A-vs-B
+analysis.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(search)* Restore warm-path content recall by persisting content in cache ([#22](https://github.com/cad0p/napkin/pull/22)) ([#23](https://github.com/cad0p/napkin/pull/23))
+
+
 ## [0.10.0] - 2026-08-01
 
 <!-- USER-EDITABLE SECTION START -->
