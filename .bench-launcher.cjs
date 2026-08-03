@@ -1,0 +1,1 @@
+const {createRequire}=require("node:module");const req=createRequire("/home/pier/open-source/github/napkin-opt-b/bin/napkin.js");const {createJiti}=req("jiti");const jiti=createJiti("/home/pier/open-source/github/napkin-opt-b/bin/napkin.js",{moduleCache:false});jiti.import("/home/pier/open-source/github/napkin-opt-b/src/main.ts");
