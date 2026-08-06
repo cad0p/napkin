@@ -78,14 +78,13 @@ function renderSearchResults(
             `[Page ${paginationMeta.currentPage} of ${paginationMeta.totalPages}. Use --page ${paginationMeta.currentPage + 1} to continue.]`,
           ),
         );
-      } else if (!paginationMeta) {
-        console.log("");
-        console.log(
-          dim(
-            "HINT: Use napkin read <file> to open a full file. Use napkin outline --file <file> to see its structure.",
-          ),
-        );
       }
+      console.log("");
+      console.log(
+        dim(
+          "HINT: Use napkin read <file> to open a full file. Use napkin outline --file <file> to see its structure.",
+        ),
+      );
     },
   });
 }
