@@ -79,6 +79,9 @@ describe("readFile with section support", () => {
     expect(result.currentPage).toBe(1);
     expect(result.content).toContain("[Page 1 of");
     expect(result.content).toContain("Use --page 2 to continue.]");
+    expect(result.content).toContain(
+      "HINT: Use napkin outline --file <file> to see its structure.",
+    );
   });
 
   test("returns second page when requested", () => {
@@ -107,6 +110,18 @@ describe("readFile with section support", () => {
       page: result.totalPages,
     });
     expect(lastPage.content).not.toContain("Use --page");
+  });
+
+  test("last page includes outline hint but no continuation hint", () => {
+    const result = readFile(v.vaultPath, "sectioned.md", { pageSize: 50 });
+    const lastPage = readFile(v.vaultPath, "sectioned.md", {
+      pageSize: 50,
+      page: result.totalPages,
+    });
+    expect(lastPage.content).not.toContain("Use --page");
+    expect(lastPage.content).toContain(
+      "HINT: Use napkin outline --file <file> to see its structure.",
+    );
   });
 
   test("extracts section via wikilink heading", () => {

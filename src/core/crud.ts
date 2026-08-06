@@ -86,10 +86,11 @@ export function readFile(
   const end = Math.min(start + pageSize, content.length);
   const chunk = content.slice(start, end);
 
-  const suffix =
+  const pageHint =
     page < totalPages
       ? `\n\n[Page ${page} of ${totalPages}. Use --page ${page + 1} to continue.]`
       : "";
+  const suffix = `${pageHint}\n\nHINT: Use napkin outline --file <file> to see its structure.`;
 
   return {
     path: resolved.path,
