@@ -18,6 +18,15 @@ async function captureJson(
   return JSON.parse(logs.join(""));
 }
 
+async function captureHuman(fn: () => Promise<void>): Promise<string> {
+  const orig = console.log;
+  const logs: string[] = [];
+  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  await fn();
+  console.log = orig;
+  return logs.join("\n");
+}
+
 beforeEach(() => {
   v = createTempVault({
     "Projects/alpha.md": "# Alpha\nThis is the alpha project\nWith TODO items",
@@ -364,6 +373,50 @@ describe("search", () => {
     for (const f of p2Files) {
       expect(p1Files).not.toContain(f);
     }
+  });
+
+  test("human output on first page includes page hint and outline hint", async () => {
+    for (let i = 0; i < 15; i++) {
+      fs.writeFileSync(
+        path.join(v.vaultPath, `hint-extra-${i}.md`),
+        `# Hint Extra ${i}\n\nhint-unique-token-zzz content for pagination test\n`,
+      );
+    }
+
+    const out = await captureHuman(() =>
+      search({
+        vault: v.path,
+        query: "hint-unique-token-zzz",
+        page: "1",
+      }),
+    );
+
+    expect(out).toContain("[Page 1 of 2. Use --page 2 to continue.]");
+    expect(out).toContain(
+      "HINT: Use napkin read <file> to open a full file. Use napkin outline --file <file> to see its structure.",
+    );
+  });
+
+  test("human output on last page includes outline hint but no page hint", async () => {
+    for (let i = 0; i < 15; i++) {
+      fs.writeFileSync(
+        path.join(v.vaultPath, `hint-extra-${i}.md`),
+        `# Hint Extra ${i}\n\nhint-unique-token-zzz content for pagination test\n`,
+      );
+    }
+
+    const out = await captureHuman(() =>
+      search({
+        vault: v.path,
+        query: "hint-unique-token-zzz",
+        page: "2",
+      }),
+    );
+
+    expect(out).not.toContain("[Page");
+    expect(out).toContain(
+      "HINT: Use napkin read <file> to open a full file. Use napkin outline --file <file> to see its structure.",
+    );
   });
 
   test("page < 1 throws an error", () => {
