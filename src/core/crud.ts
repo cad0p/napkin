@@ -75,22 +75,36 @@ export function readFile(
     return { path: resolved.path, content };
   }
 
-  const totalPages = Math.ceil(content.length / pageSize);
+  // Reserve room for the always-appended suffix (page hint + outline nudge)
+  // so paginated page output never exceeds the advertised page size. The
+  // reserve covers the longest plausible page hint (page numbers up to 6
+  // digits, i.e. >50GB vaults); for tiny page sizes the suffix rides on top
+  // (unchanged behavior).
+  const MAX_PAGE_HINT =
+    "\n\n[Page 999999 of 999999. Use --page 1000000 to continue.]";
+  const NUDGE =
+    "\n\nHINT: Use napkin outline --file <file> to see its structure.";
+  const chunkBudget =
+    pageSize > MAX_PAGE_HINT.length + NUDGE.length
+      ? pageSize - MAX_PAGE_HINT.length - NUDGE.length
+      : pageSize;
+
+  const totalPages = Math.ceil(content.length / chunkBudget);
   const page = opts?.page ?? 1;
 
   if (page < 1 || page > totalPages) {
     throw new Error(`Invalid page: ${page}. Valid range: 1-${totalPages}`);
   }
 
-  const start = (page - 1) * pageSize;
-  const end = Math.min(start + pageSize, content.length);
+  const start = (page - 1) * chunkBudget;
+  const end = Math.min(start + chunkBudget, content.length);
   const chunk = content.slice(start, end);
 
   const pageHint =
     page < totalPages
       ? `\n\n[Page ${page} of ${totalPages}. Use --page ${page + 1} to continue.]`
       : "";
-  const suffix = `${pageHint}\n\nHINT: Use napkin outline --file <file> to see its structure.`;
+  const suffix = `${pageHint}${NUDGE}`;
 
   return {
     path: resolved.path,
