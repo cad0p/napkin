@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+The vault overview now protects the top-level taxonomy: `overview.collapseDepth`
+(default 2) restricts homogeneous-sibling collapse to merge targets at depth ≥ 2,
+so curated namespaces (e.g. `amazon/`, `open-source/`) always render their real
+children instead of one rolled-up row. A new `overview.maxRows` (default 100,
+0 = unlimited) caps the listing at the most relevant folders — rows sort by
+depth, then note count desc, then path — and truncated listings report exactly
+how many rows/notes were dropped (`VaultOverview.truncated`), so consumers can
+print an honest footer.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Overview collapseDepth + maxRows — taxonomy-safe collapse and row cap ([#37](https://github.com/cad0p/napkin/pull/37))
+
+### 📚 Documentation
+
+- Point AGENTS.md kanban check at gh project ([#35](https://github.com/cad0p/napkin/pull/35))
+
+
 ## [0.11.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
@@ -38,22 +60,6 @@ exceeds 50,000 chars.
 ### ⚙️ Miscellaneous Tasks
 
 - Re-trigger release after GitHub Actions outage ([#28](https://github.com/cad0p/napkin/pull/28))
-
-
-## [calver-released]
-
-<!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
-<!-- USER-EDITABLE SECTION END -->
-
-### 🚀 Features
-
-- Always nudge toward outline (search pagination + multi-page reads) ([#27](https://github.com/cad0p/napkin/pull/27))
-
-### ⚙️ Miscellaneous Tasks
-
-- Re-trigger release after GitHub Actions outage ([#28](https://github.com/cad0p/napkin/pull/28))
-
 
 ## [0.10.1] - 2026-08-03
 
