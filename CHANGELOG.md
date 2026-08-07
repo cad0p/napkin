@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🐛 Bug Fixes
+
+- Budget page hint + outline nudge into read page size ([#34](https://github.com/cad0p/napkin/pull/34))
+
 ### 📚 Documentation
 
 - Point AGENTS.md vault check at kb tools ([#31](https://github.com/cad0p/napkin/pull/31))
