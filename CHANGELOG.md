@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 📚 Documentation
 
 - Point AGENTS.md vault check at kb tools ([#31](https://github.com/cad0p/napkin/pull/31))
+- Make AGENTS.md bootstrap mandatory for every request ([#33](https://github.com/cad0p/napkin/pull/33))
 
 
 ## [0.11.0] - 2026-08-07
