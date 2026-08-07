@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Always nudge toward outline (search pagination + multi-page reads) ([#27](https://github.com/cad0p/napkin/pull/27))
+
+### ⚙️ Miscellaneous Tasks
+
+- Re-trigger release after GitHub Actions outage ([#28](https://github.com/cad0p/napkin/pull/28))
+
+
 ## [0.10.1] - 2026-08-03
 
 <!-- USER-EDITABLE SECTION START -->
