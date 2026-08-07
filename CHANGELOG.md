@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.1] - 2026-08-07
+
+<!-- USER-EDITABLE SECTION START -->
+Paginated reads never exceed the advertised page size: the always-appended page
+hint + outline nudge are now budgeted with the exact worst-case hint for the
+actual page-count magnitude. Previously the reserve assumed at most 6-digit page
+counts, so files with >= 1,000,000 pages (> ~50GB) emitted pages 1 char over
+`pageSize`. Byte-identical output for page counts <= 999999.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(crud)* Reserve exact worst-case page hint for >6-digit page counts ([#40](https://github.com/cad0p/napkin/pull/40))
+
+### ⚙️ Miscellaneous Tasks
+
+- Give validate workflows distinct job names ([#39](https://github.com/cad0p/napkin/pull/39))
+
+
 ## [0.12.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
