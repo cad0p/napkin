@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1] - 2026-08-07
+
+<!-- USER-EDITABLE SECTION START -->
+Paginated reads (kb_read / napkin read --page) now stay within the advertised
+page size: the page hint and the always-on outline nudge are reserved inside
+the chunk budget instead of being appended on top, so page output never
+exceeds 50,000 chars.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- Budget page hint + outline nudge into read page size ([#34](https://github.com/cad0p/napkin/pull/34))
+
+### 📚 Documentation
+
+- Point AGENTS.md vault check at kb tools ([#31](https://github.com/cad0p/napkin/pull/31))
+- Make AGENTS.md bootstrap mandatory for every request ([#33](https://github.com/cad0p/napkin/pull/33))
+
+
 ## [0.11.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
