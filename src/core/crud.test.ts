@@ -124,6 +124,34 @@ describe("readFile with section support", () => {
     );
   });
 
+  test("page output never exceeds the page size (suffix budgeted into chunk)", () => {
+    const big = `# Big\n\n${"needle ".repeat(12_000)}`; // ~72KB
+    const v2 = createTempVault({ "big.md": big });
+    try {
+      const page1 = readFile(v2.vaultPath, "big.md");
+      const page2 = readFile(v2.vaultPath, "big.md", { page: 2 });
+
+      expect(page1.totalPages).toBe(2);
+      // page hint + outline nudge are reserved inside the chunk budget
+      expect(page1.content.length).toBeLessThanOrEqual(50_000);
+      expect(page2.content.length).toBeLessThanOrEqual(50_000);
+      expect(page1.content).toContain(
+        "[Page 1 of 2. Use --page 2 to continue.]",
+      );
+      // full body still arrives across the pages, suffixes stripped
+      const strip = (s: string) =>
+        s
+          .replace("\n\n[Page 1 of 2. Use --page 2 to continue.]", "")
+          .replace(
+            "\n\nHINT: Use napkin outline --file <file> to see its structure.",
+            "",
+          );
+      expect(strip(page1.content) + strip(page2.content)).toBe(big);
+    } finally {
+      v2.cleanup();
+    }
+  });
+
   test("extracts section via wikilink heading", () => {
     const result = readFile(v.vaultPath, "[[sectioned#Methods]]");
     expect(result.content).toContain("## Methods");
