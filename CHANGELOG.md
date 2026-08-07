@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 📚 Documentation
+
+- Point AGENTS.md vault check at kb tools ([#31](https://github.com/cad0p/napkin/pull/31))
+
+
 ## [0.11.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
