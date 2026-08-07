@@ -2,10 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.11.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+Paginated reads (kb_read / napkin read --page) now stay within the advertised
+page size: the page hint and the always-on outline nudge are reserved inside
+the chunk budget instead of being appended on top, so page output never
+exceeds 50,000 chars.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes

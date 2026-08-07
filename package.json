@@ -1,6 +1,6 @@
 {
   "name": "@cad0p/napkin",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
