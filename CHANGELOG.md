@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(crud)* Reserve exact worst-case page hint for >6-digit page counts ([#40](https://github.com/cad0p/napkin/pull/40))
+
+### ⚙️ Miscellaneous Tasks
+
+- Give validate workflows distinct job names ([#39](https://github.com/cad0p/napkin/pull/39))
+
+
 ## [0.12.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
