@@ -12,6 +12,25 @@ All notable changes to this project will be documented in this file.
 
 - Always nudge toward outline (search pagination + multi-page reads) ([#27](https://github.com/cad0p/napkin/pull/27))
 
+### 📚 Documentation
+
+- *(changelog)* Changes from v0.10.1 to v0.10.1-20260807.0 ([#29](https://github.com/cad0p/napkin/pull/29))
+
+### ⚙️ Miscellaneous Tasks
+
+- Re-trigger release after GitHub Actions outage ([#28](https://github.com/cad0p/napkin/pull/28))
+
+
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Always nudge toward outline (search pagination + multi-page reads) ([#27](https://github.com/cad0p/napkin/pull/27))
+
 ### ⚙️ Miscellaneous Tasks
 
 - Re-trigger release after GitHub Actions outage ([#28](https://github.com/cad0p/napkin/pull/28))
