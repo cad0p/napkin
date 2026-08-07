@@ -141,10 +141,7 @@ describe("readFile with section support", () => {
       // full body still arrives across the pages, suffixes stripped
       const strip = (s: string) =>
         s
-          .replace(
-            "\n\n[Page 1 of 2. Use --page 2 to continue.]",
-            "",
-          )
+          .replace("\n\n[Page 1 of 2. Use --page 2 to continue.]", "")
           .replace(
             "\n\nHINT: Use napkin outline --file <file> to see its structure.",
             "",
