@@ -2,10 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.12.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+Paginated reads never exceed the advertised page size: the always-appended page
+hint + outline nudge are now budgeted with the exact worst-case hint for the
+actual page-count magnitude. Previously the reserve assumed at most 6-digit page
+counts, so files with >= 1,000,000 pages (> ~50GB) emitted pages 1 char over
+`pageSize`. Byte-identical output for page counts <= 999999.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes
