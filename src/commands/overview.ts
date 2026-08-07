@@ -13,6 +13,8 @@ export async function overview(
     depth?: string;
     keywords?: string;
     collapse?: boolean;
+    collapseDepth?: number;
+    maxRows?: number;
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
@@ -20,6 +22,8 @@ export async function overview(
     depth: opts.depth ? Number.parseInt(opts.depth, 10) : undefined,
     keywords: opts.keywords ? Number.parseInt(opts.keywords, 10) : undefined,
     ...(opts.collapse === false ? { collapse: false } : {}),
+    collapseDepth: opts.collapseDepth,
+    maxRows: opts.maxRows,
   });
 
   for (const w of result.warnings ?? []) {
@@ -58,6 +62,13 @@ export async function overview(
         console.log(`  ${dim("notes:")} ${f.notes}`);
       }
       console.log("");
+      if (result.truncated) {
+        console.log(
+          dim(
+            `... ${result.truncated.rows} more folders (${result.truncated.notes} notes) - use search <query> for the full map`,
+          ),
+        );
+      }
       console.log(
         dim(
           "HINT: Use napkin search <query> to find specific content. Use napkin read <file> to open a file.",
