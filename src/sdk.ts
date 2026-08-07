@@ -122,6 +122,8 @@ export class Napkin {
     depth?: number;
     keywords?: number;
     collapse?: boolean;
+    collapseDepth?: number;
+    maxRows?: number;
   }): VaultOverview {
     return getOverview(this.vault.contentPath, this.vault.configPath, opts);
   }

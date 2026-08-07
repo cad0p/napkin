@@ -23,6 +23,10 @@ export interface NapkinConfig {
     keywords: number;
     /** Roll up numerous, lexically homogeneous sibling folders into one row. */
     collapse: boolean;
+    /** Minimum depth of a collapse target (parent) row; depth-1 rows never collapse. */
+    collapseDepth: number;
+    /** Max rows in the overview listing; 0 = unlimited. */
+    maxRows: number;
   };
   search: {
     limit: number;
@@ -46,6 +50,8 @@ export const DEFAULT_CONFIG: NapkinConfig = {
     depth: 3,
     keywords: 8,
     collapse: true,
+    collapseDepth: 2,
+    maxRows: 100,
   },
   search: {
     limit: 30,
