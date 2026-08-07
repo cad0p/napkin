@@ -152,6 +152,47 @@ describe("readFile with section support", () => {
     }
   });
 
+  test("page output stays within pageSize when totalPages rolls past 999999 (7-digit hint)", () => {
+    // SDK-side regression for the page-size boundary flake
+    // (cad0p/pi-napkin issue #49): the reserve used a hardcoded 6-digit
+    // worst-case page hint ("…Page 999999 of 999999…", 58 chars), but the
+    // hint for page 999999 of a 7-digit total ("…Page 999999 of 1000000…")
+    // is 1 char longer, so page output exceeded pageSize by 1 on files
+    // with >= 1,000,000 pages. The reserve is now computed from the
+    // actual page-count magnitude (convergent recompute).
+    //
+    // pageSize 125 + 5,000,000 chars: initial budget = 125 − 58 − 62 = 5
+    // → totalPages = 1,000,000 (7 digits) → recomputed budget = 125 − 60
+    // − 62 = 3 → totalPages = 1,666,667. The old code emitted
+    // 5 + 59 + 62 = 126 > 125 on page 999999.
+    const big = "x".repeat(5_000_000);
+    const v2 = createTempVault({ "big.md": big });
+    try {
+      const first = readFile(v2.vaultPath, "big.md", { pageSize: 125 });
+      const rollover = readFile(v2.vaultPath, "big.md", {
+        pageSize: 125,
+        page: 999_999,
+      });
+      const lastPageNum = first.totalPages ?? 1;
+      const last = readFile(v2.vaultPath, "big.md", {
+        pageSize: 125,
+        page: lastPageNum,
+      });
+
+      expect(first.totalPages).toBeGreaterThanOrEqual(1_000_000);
+      // the long 7-digit hint is exactly what the reserve must cover
+      expect(rollover.content).toContain("[Page 999999 of");
+      expect(rollover.content).toContain("Use --page 1000000 to continue.]");
+      expect(first.content.length).toBeLessThanOrEqual(125);
+      expect(rollover.content.length).toBeLessThanOrEqual(125);
+      expect(last.content.length).toBeLessThanOrEqual(125);
+      // last page carries no continuation hint
+      expect(last.content).not.toContain("Use --page");
+    } finally {
+      v2.cleanup();
+    }
+  });
+
   test("extracts section via wikilink heading", () => {
     const result = readFile(v.vaultPath, "[[sectioned#Methods]]");
     expect(result.content).toContain("## Methods");

@@ -77,19 +77,46 @@ export function readFile(
 
   // Reserve room for the always-appended suffix (page hint + outline nudge)
   // so paginated page output never exceeds the advertised page size. The
-  // reserve covers the longest plausible page hint (page numbers up to 6
-  // digits, i.e. >50GB vaults); for tiny page sizes the suffix rides on top
+  // initial reserve covers page counts up to 6 digits (files > ~50GB at the
+  // default page size); for tiny page sizes the suffix rides on top
   // (unchanged behavior).
   const MAX_PAGE_HINT =
     "\n\n[Page 999999 of 999999. Use --page 1000000 to continue.]";
   const NUDGE =
     "\n\nHINT: Use napkin outline --file <file> to see its structure.";
-  const chunkBudget =
+  // Worst-case page-hint length for `digits`-digit page counts: the hint is
+  // longest when the current page is all 9s and the next page rolls over to
+  // one more digit ("…Page 999999 of 1000000. Use --page 1000000…"), i.e.
+  // 39 + 3·digits chars. The 6-digit constant above (58 chars) covers this
+  // exactly for page counts ≤ 999999 (worst hint there is 57 chars:
+  // "…Page 999998 of 999999. Use --page 999999…").
+  const worstPageHintLen = (digits: number): number => 39 + 3 * digits;
+
+  let chunkBudget =
     pageSize > MAX_PAGE_HINT.length + NUDGE.length
       ? pageSize - MAX_PAGE_HINT.length - NUDGE.length
       : pageSize;
-
-  const totalPages = Math.ceil(content.length / chunkBudget);
+  let totalPages = Math.ceil(content.length / chunkBudget);
+  // The 6-digit MAX_PAGE_HINT reserve silently under-reserves by 1+ chars
+  // once totalPages rolls past 999999 ("…Page 999999 of 1000000…" is 59
+  // chars), which would emit pageSize+1 output on files > ~50GB. Recompute
+  // the budget with the exact worst-case hint for the actual page-count
+  // magnitude. Page counts only grow when the budget shrinks, so the digit
+  // count is non-decreasing and bounded by digits(content.length)+1 — the
+  // loop terminates in ≤ that many passes (2 for any realistic file).
+  for (
+    let digits = String(totalPages).length;
+    digits > 6;
+    digits = String(totalPages).length
+  ) {
+    const budget =
+      pageSize > worstPageHintLen(digits) + NUDGE.length
+        ? pageSize - worstPageHintLen(digits) - NUDGE.length
+        : pageSize;
+    if (budget === chunkBudget) break;
+    chunkBudget = budget;
+    totalPages = Math.ceil(content.length / chunkBudget);
+  }
   const page = opts?.page ?? 1;
 
   if (page < 1 || page > totalPages) {
