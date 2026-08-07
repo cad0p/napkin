@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🚀 Features
+
+- Overview collapseDepth + maxRows — taxonomy-safe collapse and row cap ([#37](https://github.com/cad0p/napkin/pull/37))
+
 ### 📚 Documentation
 
 - Point AGENTS.md kanban check at gh project ([#35](https://github.com/cad0p/napkin/pull/35))
