@@ -70,7 +70,7 @@ const program = new Command();
 program
   .name("napkin")
   .description(
-    "🧻 Knowledge system for AI agents. Local-first, file-based, progressively disclosed.",
+    "📜 Knowledge system for AI agents. Local-first, file-based, progressively disclosed.",
   )
   .version(`napkin ${version}`, "-v, --version")
   .option("--json", "Output as JSON")
@@ -87,7 +87,7 @@ program
 function showHelp() {
   console.log(`Usage: napkin [options] [command]
 
-🧻 Knowledge system for AI agents. Local-first, file-based, progressively disclosed.
+📜 Knowledge system for AI agents. Local-first, file-based, progressively disclosed.
 
 Examples:
   $ napkin init --template coding    Create a vault with coding structure
