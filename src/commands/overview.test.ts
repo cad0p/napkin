@@ -365,7 +365,9 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     // collapseDepth 1 = upstream-equivalent collapse semantics: this test pins
     // the collapse MECHANISM; the fork's default (collapseDepth 2) protects
     // depth-1 folders and is pinned by the golden snapshot + the defaults test.
-    const result = (await runOverviewJson(vault.path, { collapseDepth: 1 })) as {
+    const result = (await runOverviewJson(vault.path, {
+      collapseDepth: 1,
+    })) as {
       overview: Array<{
         path: string;
         notes: number;
