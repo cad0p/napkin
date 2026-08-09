@@ -227,7 +227,9 @@ program
 
 program
   .command("search [query...]")
-  .description("Search vault (ranked by basename BM25 + content scan + backlinks + recency)")
+  .description(
+    "Search vault (ranked by basename BM25 + content scan + backlinks + recency)",
+  )
   .option("--query <text>", "Search query")
   .option("--path <folder>", "Limit to folder")
   .option("--limit <n>", "Max results (default: 30)")
