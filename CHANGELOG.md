@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(overview)* Restore fork defaults collapseDepth 2 / maxRows 100 ([#46](https://github.com/cad0p/napkin/pull/46))
+
+
 ## [0.12.2] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
