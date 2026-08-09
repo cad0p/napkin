@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.3] - 2026-08-09
+
+<!-- USER-EDITABLE SECTION START -->
+Restore the fork's overview defaults — `collapseDepth: 2, maxRows: 100`
+(DEFAULT_CONFIG). The 0.12.2 upstream sync had lowered them to
+upstream-identical 1/0 to keep the equivalence oracle green, which silently
+removed the 100-row session-context cap (pi-napkin's bloat protection) and
+the depth-1 taxonomy protection, and forced pi-napkin to re-implement
+divergent defaults. Now:
+
+- fork defaults restored; upstream-identical behavior (1/0) remains
+  available via explicit opts / config and is what the equivalence oracle
+  and two of the three golden option sets pin
+- golden "default options" snapshot regenerated: depth-1 folders
+  (imports/, decisions/, people/, contracts/) are no longer collapse
+  targets at default
+- new config-contract test pins the defaults (100-row cap + truncated
+  tail + depth-1 protection)
+- pi-napkin follow-up: drop its divergent extension fallback (0.6.3)
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(overview)* Restore fork defaults collapseDepth 2 / maxRows 100 ([#46](https://github.com/cad0p/napkin/pull/46))
+
+
 ## [0.12.2] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
