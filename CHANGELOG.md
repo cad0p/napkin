@@ -2,7 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.12.4] - 2026-08-09
+
+<!-- USER-EDITABLE SECTION START -->
+- **Doc accuracy pass** (subagent audit of the #43 sync diff): README now
+  describes the shipped search engine (MiniSearch basename index + substring
+  content scan + backlink/recency composite — the ferrosearch claim was stale),
+  SDK example imports `@cad0p/napkin`, `distill.*` config keys attributed to
+  the pi-napkin distill extension, cache-invalidation doc covers
+  `collapseDepth`/`maxRows`/`templates.folder`, CLI search help mentions the
+  content scan.
+- **Branding**: 🧻 → 📜 scroll emoji (README, package description, CLI
+  version/help) to match pi-napkin.
+<!-- USER-EDITABLE SECTION END -->
 
 <!-- USER-EDITABLE SECTION START -->
 <!-- Add your curated release notes here. -->
