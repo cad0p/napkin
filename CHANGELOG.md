@@ -29,10 +29,6 @@ option-gated (defaults unchanged), incremental search cache, pagination/page
 hints/outline nudge, pnpm+vitest stack, fork-only workflows/bench/scripts.
 <!-- USER-EDITABLE SECTION END -->
 
-<!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
-<!-- USER-EDITABLE SECTION END -->
-
 ### 💼 Other
 
 - Upstream v0.9.1–v0.9.2 minus search engine swap — keeps Approach G search, gains overview cache + gray-matter fix (bench-verified) ([#43](https://github.com/cad0p/napkin/pull/43))
