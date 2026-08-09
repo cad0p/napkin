@@ -6,7 +6,7 @@ description: >
   "distill this", "remember this", "capture this conversation", or at the end of a
   session where something non-obvious was figured out. Extracts the substance —
   decisions, fixes, gotchas, patterns — not a transcript. Requires the napkin
-  CLI (`npm install -g napkin-ai`; run `napkin --help` for the command surface).
+  CLI (`npm install -g @cad0p/napkin`; run `napkin --help` for the command surface).
 ---
 
 # Distill — Conversation to Vault
@@ -131,6 +131,6 @@ Tell the user what was written, one line per note:
 
 ```
 Distilled 2 notes:
-  decisions/Use Ferrosearch For Search.md   (new)
+  decisions/Use a Basename MiniSearch Index.md   (new)
   guides/Debugging Bun Compiled Binaries.md (merged)
 ```
