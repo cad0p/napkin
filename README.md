@@ -1,6 +1,6 @@
 # napkin
 
-🧻 Knowledge system for agents. Local-first, file-based, progressively disclosed.
+📜 Knowledge system for agents. Local-first, file-based, progressively disclosed.
 
 Every great idea started on a napkin.
 
