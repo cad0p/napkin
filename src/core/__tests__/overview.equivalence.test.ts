@@ -355,10 +355,17 @@ describe("getOverview ≡ original on randomized vaults", () => {
     for (let i = 0; i < 60; i++) {
       const vault = createTempVault(randomVault(rand));
       try {
+        // Pin upstream-equivalent listing options: the oracle (overview-
+        // original.ts) predates the fork's collapseDepth/maxRows, and the
+        // fork's config defaults (2/100) are a product decision pinned in
+        // commands/overview.test.ts — they must not leak into the pipeline
+        // equivalence contract.
         const opts = {
           depth: int(rand, 1, 4),
           keywords: int(rand, 3, 10),
           collapse: rand() < 0.5,
+          collapseDepth: 1,
+          maxRows: 0,
         };
         const got = isolated(() =>
           getOverview(vault.vaultPath, vault.vaultPath, opts),
@@ -378,13 +385,19 @@ describe("getOverview ≡ original on randomized vaults", () => {
   test("empty vault and default options", () => {
     const vault = createTempVault({});
     try {
+      // Empty vault: no rows, so defaults (including the fork's maxRows 100 /
+      // collapseDepth 2) cannot diverge from the oracle. Pin them explicitly
+      // anyway to keep this test independent of config-default changes.
+      const opts = { collapseDepth: 1, maxRows: 0 };
       expect(
         JSON.stringify(
-          isolated(() => getOverview(vault.vaultPath, vault.vaultPath)),
+          isolated(() => getOverview(vault.vaultPath, vault.vaultPath, opts)),
         ),
       ).toBe(
         JSON.stringify(
-          isolated(() => originalGetOverview(vault.vaultPath, vault.vaultPath)),
+          isolated(() =>
+            originalGetOverview(vault.vaultPath, vault.vaultPath, opts),
+          ),
         ),
       );
     } finally {

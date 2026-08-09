@@ -50,8 +50,13 @@ export const DEFAULT_CONFIG: NapkinConfig = {
     depth: 3,
     keywords: 8,
     collapse: true,
-    collapseDepth: 1,
-    maxRows: 0,
+    // Fork defaults: maxRows caps session-context bloat (pi-napkin relies on
+    // it) and collapseDepth protects the curated top-level taxonomy from
+    // homogeneous-sibling collapse. Upstream-identical behavior is available
+    // via explicit opts/config (maxRows 0, collapseDepth 1) and is what the
+    // equivalence + golden oracle suites pin.
+    collapseDepth: 2,
+    maxRows: 100,
   },
   search: {
     limit: 30,
