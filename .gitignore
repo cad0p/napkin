@@ -28,3 +28,6 @@ bench/results/
 # Vault (local content)
 .napkin/
 thread-draft.md
+
+# bun rebuilds (fork dropped bun builds; keep for accidental rebuilds)
+*.bun-build

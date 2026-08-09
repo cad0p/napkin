@@ -12,6 +12,11 @@ pnpm add -g @cad0p/napkin
 npm install -g @cad0p/napkin
 ```
 
+Search runs on [ferrosearch](https://github.com/shift-labs-ai/ferrosearch),
+a native MiniSearch-compatible engine with prebuilt binaries for macOS
+(arm64, x64) and Linux (x64, arm64, glibc and musl). Other platforms build
+it from source with Rust installed.
+
 ---
 
 ## Quick Start
@@ -28,6 +33,9 @@ napkin search "authentication"
 
 # Read a file
 napkin read "Architecture"
+
+# Update the CLI
+napkin update
 
 # Write
 napkin create "Decision" --template Decision
@@ -114,8 +122,9 @@ See [`bench/README.md`](bench/README.md) for details and usage.
 
 ```
 my-project/
-  .napkin/                  # napkin config
+  .napkin/                  # napkin config + caches
     config.json             # Unified config (syncs to .obsidian/)
+    *-cache.json            # Search/overview caches (auto-managed)
   .obsidian/                # Obsidian config (auto-generated)
   NAPKIN.md                 # Context note (Level 0)
   decisions/                # Template-defined directories
@@ -150,6 +159,11 @@ napkin search "auth" --json     # Ranked results as JSON
 napkin read "Note" -q           # Raw markdown, nothing else
 ```
 
+The package ships two agent skills in `skills/` — **distill** (turn a working
+session into vault notes: gate, dedup via search, merge over create) and
+**tend** (periodic upkeep: broken links, orphans, duplicates, tag sprawl).
+Point your agent's skill loader at them or copy them into its skills directory.
+
 ---
 
 ## CLI Reference
@@ -168,6 +182,7 @@ napkin read "Note" -q           # Raw markdown, nothing else
 ```bash
 napkin vault                          # Vault info
 napkin overview                       # Vault map with keywords
+napkin update                         # Update the napkin CLI
 napkin read <file>                    # Read file contents
 napkin create "Note" $'# Hello\nFirst note.'   # Create with content
 napkin append "Note" $'\n## Update\nNew info.'   # Append to file

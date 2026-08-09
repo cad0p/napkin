@@ -27,10 +27,8 @@ async function runOverviewJson(
   return JSON.parse(captured[0] as string);
 }
 
-// six near-identical converted-contract subfolders under a depth-2 parent —
-// heavy shared boilerplate, rotated so no sentence is in every folder. The
-// merge target is depth 2, so default collapseDepth 2 allows the rollup
-// while depth-1 namespaces stay protected.
+// six near-identical converted-contract subfolders — heavy shared
+// boilerplate, rotated so no sentence is in every folder
 function documentsFan(parent: string): Record<string, string> {
   const files: Record<string, string> = {};
   const boilerplate = [
@@ -56,10 +54,10 @@ function documentsFixture(): Record<string, string> {
 
 // amazon/ is a curated depth-1 namespace with a direct note, five depth-2
 // children (each with its own direct note), and five homogeneous depth-3
-// report folders under each child. The old code merged each depth-3 fan into
-// its depth-2 parent and then cascaded the near-identical depth-2 parents up
-// into amazon; collapseDepth 2 must stop after the first hop so the depth-2
-// rows survive with their own fans rolled in.
+// report folders under each child. Without collapseDepth, each depth-3 fan
+// merges into its depth-2 parent and the near-identical depth-2 parents then
+// cascade up into amazon; collapseDepth 2 stops after the first hop so the
+// depth-2 rows survive with their own fans rolled in.
 function amazonCascadeFixture(): Record<string, string> {
   const files: Record<string, string> = {
     "amazon/overview.md": "# Amazon namespace\nCurated top-level namespace.",
@@ -189,6 +187,57 @@ describe("overview", () => {
     vault.cleanup();
   });
 
+  test("warns for every file with identical malformed frontmatter", async () => {
+    // Regression: gray-matter's parse cache is poisoned by a failed parse,
+    // so a second file with byte-identical malformed frontmatter used to
+    // silently parse as empty data — no warning, wrong tags/keywords.
+    const badContent =
+      "---\ntags: [#twin, #copies]\n---\n# Twin\nIdentical broken note.";
+    const vault = createTempVault({
+      "a/bad.md": badContent,
+      "b/bad.md": badContent,
+    });
+
+    const warnings: string[] = [];
+    const captured: unknown[] = [];
+    const origLog = console.log;
+    const origError = console.error;
+
+    try {
+      console.error = (...args: unknown[]) => {
+        const msg = args.map(String).join(" ");
+        if (msg.includes("⚠")) warnings.push(msg);
+      };
+      console.log = (...args: unknown[]) => {
+        captured.push(...args);
+      };
+      await overview({
+        vault: vault.path,
+        json: true,
+        quiet: false,
+        copy: false,
+      });
+    } finally {
+      console.log = origLog;
+      console.error = origError;
+    }
+
+    expect(warnings.length).toBe(2);
+    expect(warnings.join("\n")).toContain("a/bad.md");
+    expect(warnings.join("\n")).toContain("b/bad.md");
+
+    // and neither file leaks tags from the unparsed frontmatter
+    const result = JSON.parse(captured[0] as string) as {
+      overview: Array<{ path: string; tags: string[] }>;
+    };
+    for (const folder of result.overview) {
+      expect(folder.tags).not.toContain("twin");
+      expect(folder.tags).not.toContain("copies");
+    }
+
+    vault.cleanup();
+  });
+
   test("empty vault", async () => {
     const vault = createTempVault({});
 
@@ -295,6 +344,53 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
   });
 
   test("collapses numerous homogeneous sibling folders", async () => {
+    const files: Record<string, string> = {
+      "procedures/deploy.md":
+        "# Deploy checklist\nRun the smoke tests, then promote the build.",
+    };
+    // six near-identical converted-contract subfolders under imports/ —
+    // heavy shared boilerplate, rotated so no sentence is in every folder
+    const boilerplate = [
+      "Lease agreement between landlord and tenant with signature page attached.",
+      "Rent schedule and lease term apply as stated in the appendix.",
+      "Bank guarantee and insurance certificate are required before occupancy.",
+    ];
+    for (let i = 0; i < 6; i++) {
+      const shared = boilerplate.filter((_, j) => j !== i % 3).join("\n");
+      files[`imports/tenant-${i}/contract.md`] =
+        `# Converted document ${i}\n${shared}\nSuite ${100 + i} on floor ${i}.`;
+    }
+    const vault = createTempVault(files);
+
+    const result = (await runOverviewJson(vault.path)) as {
+      overview: Array<{
+        path: string;
+        notes: number;
+        collapsedFolders?: number;
+      }>;
+    };
+    const paths = result.overview.map((f) => f.path);
+    expect(paths).toContain("imports");
+    expect(paths).not.toContain("imports/tenant-0");
+    const imports = result.overview.find((f) => f.path === "imports");
+    expect(imports?.collapsedFolders).toBe(6);
+    expect(imports?.notes).toBe(6);
+    // curated folder untouched
+    expect(paths).toContain("procedures");
+
+    // top-level folders are never collapsed into the root
+    expect(paths).not.toContain("/");
+
+    // --no-collapse restores the full listing
+    const flat = (await runOverviewJson(vault.path, { collapse: false })) as {
+      overview: Array<{ path: string }>;
+    };
+    expect(flat.overview.map((f) => f.path)).toContain("imports/tenant-0");
+
+    vault.cleanup();
+  });
+
+  test("collapses homogeneous siblings under a depth-2 parent", async () => {
     const vault = createTempVault(documentsFixture());
 
     const result = (await runOverviewJson(vault.path)) as {
@@ -313,21 +409,10 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     // curated folder untouched
     expect(paths).toContain("procedures");
 
-    // top-level folders are never collapsed into the root
-    expect(paths).not.toContain("/");
-
-    // --no-collapse restores the full listing
-    const flat = (await runOverviewJson(vault.path, { collapse: false })) as {
-      overview: Array<{ path: string }>;
-    };
-    expect(flat.overview.map((f) => f.path)).toContain(
-      "imports/documents/tenant-0",
-    );
-
     vault.cleanup();
   });
 
-  test("does not collapse depth-1 parents by default", async () => {
+  test("does not collapse depth-1 parents when collapseDepth is 2", async () => {
     const files: Record<string, string> = {
       "top/overview.md": "# Top namespace\nCurated top-level namespace.",
     };
@@ -339,7 +424,9 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     }
     const vault = createTempVault(files);
 
-    const result = (await runOverviewJson(vault.path)) as {
+    const result = (await runOverviewJson(vault.path, {
+      collapseDepth: 2,
+    })) as {
       overview: Array<{ path: string; collapsedFolders?: number }>;
     };
     const paths = result.overview.map((f) => f.path);
@@ -353,10 +440,12 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     vault.cleanup();
   });
 
-  test("cascade stops at depth 1: depth-2 fans merge into their own rows", async () => {
+  test("collapseDepth 2: depth-2 fans merge, cascade stops at depth 1", async () => {
     const vault = createTempVault(amazonCascadeFixture());
 
-    const result = (await runOverviewJson(vault.path)) as {
+    const result = (await runOverviewJson(vault.path, {
+      collapseDepth: 2,
+    })) as {
       overview: Array<{
         path: string;
         notes: number;
@@ -414,7 +503,7 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     fan.cleanup();
   });
 
-  test("sorts by depth then notes desc", async () => {
+  test("sorts by depth then notes desc when capped", async () => {
     const vault = createTempVault({
       "readme.md": "# Welcome\nRoot note.",
       "big/01.md":
@@ -433,7 +522,9 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
       "nested/deep/02.md": "# Mount\nPolar alignment and tracking calibration.",
     });
 
-    const result = (await runOverviewJson(vault.path)) as {
+    const result = (await runOverviewJson(vault.path, {
+      maxRows: 100,
+    })) as {
       overview: Array<{ path: string; notes: number }>;
     };
     expect(result.overview.map((f) => `${f.path}:${f.notes}`)).toEqual([

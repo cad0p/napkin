@@ -1,14 +1,17 @@
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { loadConfig } from "../utils/config.js";
-import { listFiles } from "../utils/files.js";
-import { parseFrontmatter } from "../utils/frontmatter.js";
-import { extractHeadings, extractTags } from "../utils/markdown.js";
-import {
-  loadOverviewCache,
-  saveOverviewCache,
-} from "../utils/overview-cache.js";
+import { loadConfig } from "../../utils/config.js";
+import { listFiles } from "../../utils/files.js";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
+import { extractHeadings, extractTags } from "../../utils/markdown.js";
+
+// ============================================================================
+// VERBATIM COPY of src/core/overview.ts BEFORE the performance refactor
+// (git 36e88ab), used exclusively as the reference oracle in
+// overview.equivalence.test.ts. Only the import paths above and the export
+// block at the bottom of this file were changed. DO NOT "optimize" or edit
+// this file — its entire value is that it is the original algorithm.
+// ============================================================================
 
 export interface OverviewFolder {
   path: string;
@@ -22,8 +25,6 @@ export interface OverviewFolder {
 export interface VaultOverview {
   context?: string;
   overview: OverviewFolder[];
-  /** Present only when maxRows capped the listing; rows/notes of dropped entries. */
-  truncated?: { rows: number; notes: number };
   warnings?: string[];
 }
 
@@ -192,9 +193,8 @@ const STOP_WORDS = new Set([
   "tbd",
 ]); // prettier-ignore
 
-interface WeightedTerms {
-  /** Term → occurrence count for one source text. */
-  counts: Map<string, number>;
+interface WeightedText {
+  text: string;
   weight: number;
 }
 
@@ -217,29 +217,18 @@ interface FolderData {
   noteCount: number;
 }
 
-const DIGIT_RE = /\d/;
-
-/**
- * Each replace is guarded by a necessary condition of its pattern (an email
- * must contain "@", a URL "http", ...) so clean prose skips the expensive
- * regex scans entirely. Guards never change the result: when the guard is
- * false the pattern cannot match. HEX_HASH_RE can skip when no digit remains
- * because HEXLETTER_RUN_RE has already removed pure-letter hex runs ≥7.
- */
 function stripNoise(text: string): string {
-  let out = text;
-  if (out.includes("```")) out = out.replace(CODE_BLOCK_RE, "");
-  if (out.includes("`")) out = out.replace(INLINE_CODE_RE, "");
-  if (out.includes("http")) out = out.replace(URL_RE, "");
-  if (out.includes("@")) out = out.replace(EMAIL_RE, "");
-  if (out.includes("<")) out = out.replace(HTML_TAG_RE, " ");
-  if (out.includes("&")) out = out.replace(HTML_ENTITY_RE, " ");
-  const hasDigit = DIGIT_RE.test(out);
-  if (out.includes("-")) out = out.replace(DASHED_HEX_RE, " ");
-  if (hasDigit) out = out.replace(DIGIT_BLOB_RE, " ");
-  out = out.replace(HEXLETTER_RUN_RE, " ");
-  if (hasDigit) out = out.replace(HEX_HASH_RE, "");
-  return out;
+  return text
+    .replace(CODE_BLOCK_RE, "")
+    .replace(INLINE_CODE_RE, "")
+    .replace(URL_RE, "")
+    .replace(EMAIL_RE, "")
+    .replace(HTML_TAG_RE, " ")
+    .replace(HTML_ENTITY_RE, " ")
+    .replace(DASHED_HEX_RE, " ")
+    .replace(DIGIT_BLOB_RE, " ")
+    .replace(HEXLETTER_RUN_RE, " ")
+    .replace(HEX_HASH_RE, "");
 }
 
 function tokenize(text: string): string[] {
@@ -249,34 +238,17 @@ function tokenize(text: string): string[] {
   );
 }
 
-/**
- * Term → occurrence count for one text, from a single tokenize() pass.
- * Unigrams are inserted before bigrams, each in first-occurrence order —
- * the same insertion order occurrence-wise accumulation produced, so
- * downstream keyword tie-breaking (stable sort over Map order) is unchanged.
- */
-function termCounts(text: string): Map<string, number> {
-  const tokens = tokenize(text);
-  const counts = new Map<string, number>();
-  for (const token of tokens) {
-    counts.set(token, (counts.get(token) || 0) + 1);
+function extractBigrams(text: string): string[] {
+  const words = tokenize(text);
+  const bigrams: string[] = [];
+  for (let i = 0; i < words.length - 1; i++) {
+    bigrams.push(`${words[i]} ${words[i + 1]}`);
   }
-  for (let i = 0; i < tokens.length - 1; i++) {
-    const bigram = `${tokens[i]} ${tokens[i + 1]}`;
-    counts.set(bigram, (counts.get(bigram) || 0) + 1);
-  }
-  return counts;
+  return bigrams;
 }
 
-/** Merge per-text counts into an accumulator, scaled by an integer weight. */
-function mergeCounts(
-  target: Map<string, number>,
-  counts: Map<string, number>,
-  weight: number,
-): void {
-  for (const [term, count] of counts) {
-    target.set(term, (target.get(term) || 0) + count * weight);
-  }
+function terms(text: string): string[] {
+  return [...tokenize(text), ...extractBigrams(text)];
 }
 
 function addWeightedTerms(
@@ -289,17 +261,12 @@ function addWeightedTerms(
   }
 }
 
-function buildTF(sources: WeightedTerms[]): Map<string, number> {
+function buildTF(sources: WeightedText[]): Map<string, number> {
   const freq = new Map<string, number>();
-  for (const source of sources) {
-    mergeCounts(freq, source.counts, source.weight);
+  for (const { text, weight } of sources) {
+    addWeightedTerms(freq, terms(text), weight);
   }
   return freq;
-}
-
-/** Depth of a folder path: root `/` is 0, `amazon` is 1, `amazon/features` is 2. */
-function folderDepth(folder: string): number {
-  return folder === "/" ? 0 : folder.split("/").length;
 }
 
 function folderKeywordTokens(folderPath: string): Set<string> {
@@ -355,15 +322,14 @@ function markdownBodyText(content: string): string {
   return content.replace(FRONTMATTER_RE, "").replace(ATX_HEADING_LINE_RE, "");
 }
 
-function buildHeadingSignals(
-  headingCounts: Iterable<Map<string, number>>,
-): HeadingSignals {
+function buildHeadingSignals(headings: Iterable<string>): HeadingSignals {
   const lineCount = new Map<string, number>();
   const weightedTerms = new Map<string, number>();
   const uniqueTerms = new Set<string>();
 
-  for (const counts of headingCounts) {
-    for (const term of counts.keys()) {
+  for (const heading of headings) {
+    const seenInHeading = new Set(terms(heading));
+    for (const term of seenInHeading) {
       uniqueTerms.add(term);
       lineCount.set(term, (lineCount.get(term) || 0) + 1);
     }
@@ -489,13 +455,8 @@ function mergeFolderData(items: FolderData[]): FolderData {
  * so repetitive subtrees (imported document dumps, per-entity folder fans)
  * render as one aggregate row instead of dominating the overview. The vault
  * root is never a collapse target: top-level folders are the taxonomy.
- * Parents shallower than `collapseDepth` are also skipped, so curated
- * top-level namespaces cannot be absorbed by a similarity artifact.
  */
-function collapseHomogeneousSiblings(
-  folderData: Map<string, FolderData>,
-  collapseDepth: number,
-): {
+function collapseHomogeneousSiblings(folderData: Map<string, FolderData>): {
   data: Map<string, FolderData>;
   collapsed: Map<string, number>;
 } {
@@ -517,9 +478,7 @@ function collapseHomogeneousSiblings(
   const collapsed = new Map<string, number>();
 
   for (const parent of parents) {
-    // Root is depth 0 and always skipped; parents shallower than
-    // collapseDepth can never be collapse targets.
-    if (parent === "/" || folderDepth(parent) < collapseDepth) continue;
+    if (parent === "/") continue;
     const children = (byParent.get(parent) || []).filter((c) => data.has(c));
     if (children.length < COLLAPSE_MIN_CHILDREN) continue;
 
@@ -582,10 +541,8 @@ function buildFolderData(
   warnings: string[],
 ): FolderData {
   const allTags = new Set<string>();
-  // Term counts per unique heading text (first-seen order), computed once and
-  // reused for both bodyTF (per occurrence) and heading signals (per unique).
-  const headingCountCache = new Map<string, Map<string, number>>();
-  const weightedSources: WeightedTerms[] = [];
+  const headings = new Set<string>();
+  const weightedSources: WeightedText[] = [];
   const bodyTF = new Map<string, number>();
 
   for (const file of folderFileList) {
@@ -606,36 +563,25 @@ function buildFolderData(
 
     const fileHeadings = extractHeadings(content);
     for (const heading of fileHeadings) {
-      const key = heading.text.trim();
-      let headingCounts = headingCountCache.get(key);
-      if (!headingCounts) {
-        headingCounts = termCounts(heading.text);
-        headingCountCache.set(key, headingCounts);
-      }
-      mergeCounts(bodyTF, headingCounts, 1);
+      headings.add(heading.text.trim());
+      addWeightedTerms(bodyTF, terms(heading.text), 1);
     }
 
-    weightedSources.push({
-      counts: termCounts(path.basename(file, ".md")),
-      weight: 2,
-    });
+    weightedSources.push({ text: path.basename(file, ".md"), weight: 2 });
     if (properties.title) {
-      weightedSources.push({
-        counts: termCounts(String(properties.title)),
-        weight: 2,
-      });
+      weightedSources.push({ text: String(properties.title), weight: 2 });
     }
     for (const value of frontmatterText(properties)) {
-      weightedSources.push({ counts: termCounts(value), weight: 2 });
+      weightedSources.push({ text: value, weight: 2 });
     }
-    const bodyCounts = termCounts(markdownBodyText(content));
-    weightedSources.push({ counts: bodyCounts, weight: 1 });
-    mergeCounts(bodyTF, bodyCounts, 1);
+    const body = markdownBodyText(content);
+    weightedSources.push({ text: body, weight: 1 });
+    addWeightedTerms(bodyTF, terms(body), 1);
   }
 
   const tf = buildTF(weightedSources);
   const hasNonHeading = new Set(tf.keys());
-  const headingSignals = buildHeadingSignals(headingCountCache.values());
+  const headingSignals = buildHeadingSignals(headings);
 
   for (const [term, weight] of headingSignals.weightedTerms) {
     tf.set(term, (tf.get(term) || 0) + weight);
@@ -657,8 +603,6 @@ function buildOverviewFolders(
   maxKeywords: number,
   templatesFolder: string,
   collapse: boolean,
-  collapseDepth: number,
-  maxRows: number,
 ): { folders: OverviewFolder[]; warnings: string[] } {
   const files = listFiles(vaultPath, { ext: "md" });
   const warnings: string[] = [];
@@ -666,7 +610,8 @@ function buildOverviewFolders(
   let folderData = new Map<string, FolderData>();
 
   for (const [folder, folderFileList] of folderFiles) {
-    if (folderDepth(folder) > maxDepth) continue;
+    const depth = folder === "/" ? 0 : folder.split("/").length;
+    if (depth > maxDepth) continue;
 
     folderData.set(
       folder,
@@ -676,7 +621,7 @@ function buildOverviewFolders(
 
   let collapsedCounts = new Map<string, number>();
   if (collapse) {
-    const result = collapseHomogeneousSiblings(folderData, collapseDepth);
+    const result = collapseHomogeneousSiblings(folderData);
     folderData = result.data;
     collapsedCounts = result.collapsed;
   }
@@ -691,22 +636,9 @@ function buildOverviewFolders(
   const totalFolders = folderData.size;
   const folders: OverviewFolder[] = [];
 
-  // Upstream default: purely lexical order. Only when a row cap is active
-  // (maxRows > 0) does the fork's priority order apply — shallow first, then
-  // note count descending, then lexical — so the most informative rows
-  // survive the cut. Unset/0 keeps output byte-identical to upstream.
-  const entries = [...folderData.entries()].sort((a, b) => {
-    if (maxRows > 0) {
-      const depthDiff = folderDepth(a[0]) - folderDepth(b[0]);
-      if (depthDiff !== 0) return depthDiff;
-      if (a[1].noteCount !== b[1].noteCount) {
-        return b[1].noteCount - a[1].noteCount;
-      }
-    }
-    return a[0].localeCompare(b[0]);
-  });
-
-  for (const [folder, data] of entries) {
+  for (const [folder, data] of [...folderData.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0]),
+  )) {
     folders.push({
       path: folder,
       notes: data.noteCount,
@@ -729,51 +661,15 @@ function buildOverviewFolders(
   return { folders, warnings };
 }
 
-/**
- * Whole-vault fingerprint: file paths + mtimes only. The shared
- * search-cache helper hashes size too (its own tradeoff); the overview
- * cache must treat a frozen-mtime content rewrite as invisible, so it
- * fingerprints independently.
- */
-function overviewFingerprint(contentPath: string): string {
-  const entries: string[] = [];
-  for (const file of listFiles(contentPath, { ext: "md" })) {
-    const stat = fs.statSync(path.join(contentPath, file));
-    entries.push(`${file}:${stat.mtimeMs}`);
-  }
-  return crypto.createHash("md5").update(entries.join("\n")).digest("hex");
-}
-
 export function getOverview(
   contentPath: string,
   configPath: string,
-  opts?: {
-    depth?: number;
-    keywords?: number;
-    collapse?: boolean;
-    collapseDepth?: number;
-    maxRows?: number;
-  },
+  opts?: { depth?: number; keywords?: number; collapse?: boolean },
 ): VaultOverview {
   const config = loadConfig(configPath);
   const maxDepth = opts?.depth ?? config.overview.depth;
   const maxKeywords = opts?.keywords ?? config.overview.keywords;
   const collapse = opts?.collapse ?? config.overview.collapse;
-  const collapseDepth = opts?.collapseDepth ?? config.overview.collapseDepth;
-  const maxRows = opts?.maxRows ?? config.overview.maxRows;
-
-  // Whole-vault cache: one stat pass instead of reading + tokenizing every
-  // note. Any file add/remove/touch changes the fingerprint; NAPKIN.md is a
-  // vault .md file, so context changes invalidate too. Resolved options are
-  // part of the key because they change the result.
-  const fingerprint = overviewFingerprint(contentPath);
-  const optionsKey = `${maxDepth}|${maxKeywords}|${collapse}|${collapseDepth}|${maxRows}|${config.templates.folder}`;
-  const cached = loadOverviewCache<VaultOverview>(
-    configPath,
-    fingerprint,
-    optionsKey,
-  );
-  if (cached) return cached;
 
   const { folders, warnings } = buildOverviewFolders(
     contentPath,
@@ -781,8 +677,6 @@ export function getOverview(
     maxKeywords,
     config.templates.folder,
     collapse,
-    collapseDepth,
-    maxRows,
   );
 
   const contextPath = path.join(contentPath, "NAPKIN.md");
@@ -790,30 +684,16 @@ export function getOverview(
     ? fs.readFileSync(contextPath, "utf-8").trim()
     : undefined;
 
-  // Row cap (fork extension): maxRows > 0 truncates the listing and reports
-  // what was dropped; 0/unset is unlimited (upstream behavior).
-  let overview = folders;
-  let truncated: { rows: number; notes: number } | undefined;
-  if (maxRows > 0 && folders.length > maxRows) {
-    overview = folders.slice(0, maxRows);
-    const dropped = folders.slice(maxRows);
-    truncated = {
-      rows: dropped.length,
-      notes: dropped.reduce((sum, f) => sum + f.notes, 0),
-    };
-  }
-
-  const result: VaultOverview = {
+  return {
     ...(context ? { context } : {}),
-    overview,
-    ...(truncated ? { truncated } : {}),
+    overview: folders,
     ...(warnings.length > 0 ? { warnings } : {}),
   };
-
-  saveOverviewCache(configPath, { fingerprint, optionsKey, result });
-  return result;
 }
 
-// Exported for differential testing against the pre-optimization oracle
-// (src/core/__tests__/overview.equivalence.test.ts). Not public API.
-export { stripNoise as _stripNoise, termCounts as _termCounts };
+// Exported for differential testing only (see overview.equivalence.test.ts).
+export {
+  getOverview as originalGetOverview,
+  stripNoise as originalStripNoise,
+  terms as originalTerms,
+};

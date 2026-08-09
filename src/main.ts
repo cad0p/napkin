@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
-import { createRequire } from "node:module";
 import { Command } from "commander";
+// A static JSON import bundles into compiled binaries (`build:bun`), where
+// a runtime require("../package.json") cannot resolve.
+import packageJson from "../package.json" with { type: "json" };
 import { aliases } from "./commands/aliases.js";
 import { baseCreate, baseQuery, bases, baseViews } from "./commands/bases.js";
 import { bookmark, bookmarks } from "./commands/bookmarks.js";
@@ -61,8 +63,7 @@ import { update } from "./commands/update.js";
 import { vault } from "./commands/vault.js";
 import { wordcount } from "./commands/wordcount.js";
 
-const require = createRequire(import.meta.url);
-const { version } = require("../package.json");
+const { version } = packageJson;
 
 const program = new Command();
 
@@ -123,7 +124,7 @@ Writing:
   delete <file>        Delete a file
 
 Subcommands:
-  file                 Files, folders, wordcount
+  file                 Files, folders, outline, wordcount
   daily                Daily notes (today, read, append, prepend)
   tag                  Tags and aliases
   property             Frontmatter properties (list, set, remove, read)
@@ -369,6 +370,18 @@ fileCmd
   .action(async (opts, cmd) => {
     const root = { ...cmd.optsWithGlobals(), ...opts };
     await folders(root);
+  });
+
+fileCmd
+  .command("outline [file]")
+  .description("Show headings for a file")
+  .option("--file <name>", "File name (alternative to positional)")
+  .option("--format <type>", "Output format: tree, md, json")
+  .option("--total", "Return heading count")
+  .action(async (file, opts, cmd) => {
+    const root = { ...cmd.optsWithGlobals(), ...opts };
+    root.file = root.file || file;
+    await outline(root);
   });
 
 fileCmd

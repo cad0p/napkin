@@ -23,7 +23,7 @@ export interface NapkinConfig {
     keywords: number;
     /** Roll up numerous, lexically homogeneous sibling folders into one row. */
     collapse: boolean;
-    /** Minimum depth of a collapse target (parent) row; depth-1 rows never collapse. */
+    /** Collapse targets must be at least this deep; 1 = only the vault root is protected (upstream default). */
     collapseDepth: number;
     /** Max rows in the overview listing; 0 = unlimited. */
     maxRows: number;
@@ -50,8 +50,8 @@ export const DEFAULT_CONFIG: NapkinConfig = {
     depth: 3,
     keywords: 8,
     collapse: true,
-    collapseDepth: 2,
-    maxRows: 100,
+    collapseDepth: 1,
+    maxRows: 0,
   },
   search: {
     limit: 30,
