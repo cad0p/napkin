@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 📚 Documentation
 
 - Fix post-sync accuracy (subagent audit of #43 diff) ([#48](https://github.com/cad0p/napkin/pull/48))
+- *(branding)* 🧻 → 📜 scroll emoji — match pi-napkin ([#50](https://github.com/cad0p/napkin/pull/50))
 
 
 ## [0.12.3] - 2026-08-09
