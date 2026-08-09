@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
@@ -8,7 +9,6 @@ import {
   loadOverviewCache,
   saveOverviewCache,
 } from "../utils/overview-cache.js";
-import { computeFingerprint } from "../utils/search-cache.js";
 
 export interface OverviewFolder {
   path: string;
@@ -22,6 +22,8 @@ export interface OverviewFolder {
 export interface VaultOverview {
   context?: string;
   overview: OverviewFolder[];
+  /** Present only when maxRows capped the listing; rows/notes of dropped entries. */
+  truncated?: { rows: number; notes: number };
   warnings?: string[];
 }
 
@@ -295,6 +297,11 @@ function buildTF(sources: WeightedTerms[]): Map<string, number> {
   return freq;
 }
 
+/** Depth of a folder path: root `/` is 0, `amazon` is 1, `amazon/features` is 2. */
+function folderDepth(folder: string): number {
+  return folder === "/" ? 0 : folder.split("/").length;
+}
+
 function folderKeywordTokens(folderPath: string): Set<string> {
   const tokens = new Set<string>();
   for (const segment of folderPath.split("/")) {
@@ -482,8 +489,13 @@ function mergeFolderData(items: FolderData[]): FolderData {
  * so repetitive subtrees (imported document dumps, per-entity folder fans)
  * render as one aggregate row instead of dominating the overview. The vault
  * root is never a collapse target: top-level folders are the taxonomy.
+ * Parents shallower than `collapseDepth` are also skipped, so curated
+ * top-level namespaces cannot be absorbed by a similarity artifact.
  */
-function collapseHomogeneousSiblings(folderData: Map<string, FolderData>): {
+function collapseHomogeneousSiblings(
+  folderData: Map<string, FolderData>,
+  collapseDepth: number,
+): {
   data: Map<string, FolderData>;
   collapsed: Map<string, number>;
 } {
@@ -505,7 +517,9 @@ function collapseHomogeneousSiblings(folderData: Map<string, FolderData>): {
   const collapsed = new Map<string, number>();
 
   for (const parent of parents) {
-    if (parent === "/") continue;
+    // Root is depth 0 and always skipped; parents shallower than
+    // collapseDepth can never be collapse targets.
+    if (parent === "/" || folderDepth(parent) < collapseDepth) continue;
     const children = (byParent.get(parent) || []).filter((c) => data.has(c));
     if (children.length < COLLAPSE_MIN_CHILDREN) continue;
 
@@ -643,6 +657,8 @@ function buildOverviewFolders(
   maxKeywords: number,
   templatesFolder: string,
   collapse: boolean,
+  collapseDepth: number,
+  maxRows: number,
 ): { folders: OverviewFolder[]; warnings: string[] } {
   const files = listFiles(vaultPath, { ext: "md" });
   const warnings: string[] = [];
@@ -650,8 +666,7 @@ function buildOverviewFolders(
   let folderData = new Map<string, FolderData>();
 
   for (const [folder, folderFileList] of folderFiles) {
-    const depth = folder === "/" ? 0 : folder.split("/").length;
-    if (depth > maxDepth) continue;
+    if (folderDepth(folder) > maxDepth) continue;
 
     folderData.set(
       folder,
@@ -661,7 +676,7 @@ function buildOverviewFolders(
 
   let collapsedCounts = new Map<string, number>();
   if (collapse) {
-    const result = collapseHomogeneousSiblings(folderData);
+    const result = collapseHomogeneousSiblings(folderData, collapseDepth);
     folderData = result.data;
     collapsedCounts = result.collapsed;
   }
@@ -676,9 +691,22 @@ function buildOverviewFolders(
   const totalFolders = folderData.size;
   const folders: OverviewFolder[] = [];
 
-  for (const [folder, data] of [...folderData.entries()].sort((a, b) =>
-    a[0].localeCompare(b[0]),
-  )) {
+  // Upstream default: purely lexical order. Only when a row cap is active
+  // (maxRows > 0) does the fork's priority order apply — shallow first, then
+  // note count descending, then lexical — so the most informative rows
+  // survive the cut. Unset/0 keeps output byte-identical to upstream.
+  const entries = [...folderData.entries()].sort((a, b) => {
+    if (maxRows > 0) {
+      const depthDiff = folderDepth(a[0]) - folderDepth(b[0]);
+      if (depthDiff !== 0) return depthDiff;
+      if (a[1].noteCount !== b[1].noteCount) {
+        return b[1].noteCount - a[1].noteCount;
+      }
+    }
+    return a[0].localeCompare(b[0]);
+  });
+
+  for (const [folder, data] of entries) {
     folders.push({
       path: folder,
       notes: data.noteCount,
@@ -701,22 +729,45 @@ function buildOverviewFolders(
   return { folders, warnings };
 }
 
+/**
+ * Whole-vault fingerprint: file paths + mtimes only. The shared
+ * search-cache helper hashes size too (its own tradeoff); the overview
+ * cache must treat a frozen-mtime content rewrite as invisible, so it
+ * fingerprints independently.
+ */
+function overviewFingerprint(contentPath: string): string {
+  const entries: string[] = [];
+  for (const file of listFiles(contentPath, { ext: "md" })) {
+    const stat = fs.statSync(path.join(contentPath, file));
+    entries.push(`${file}:${stat.mtimeMs}`);
+  }
+  return crypto.createHash("md5").update(entries.join("\n")).digest("hex");
+}
+
 export function getOverview(
   contentPath: string,
   configPath: string,
-  opts?: { depth?: number; keywords?: number; collapse?: boolean },
+  opts?: {
+    depth?: number;
+    keywords?: number;
+    collapse?: boolean;
+    collapseDepth?: number;
+    maxRows?: number;
+  },
 ): VaultOverview {
   const config = loadConfig(configPath);
   const maxDepth = opts?.depth ?? config.overview.depth;
   const maxKeywords = opts?.keywords ?? config.overview.keywords;
   const collapse = opts?.collapse ?? config.overview.collapse;
+  const collapseDepth = opts?.collapseDepth ?? config.overview.collapseDepth;
+  const maxRows = opts?.maxRows ?? config.overview.maxRows;
 
   // Whole-vault cache: one stat pass instead of reading + tokenizing every
   // note. Any file add/remove/touch changes the fingerprint; NAPKIN.md is a
   // vault .md file, so context changes invalidate too. Resolved options are
   // part of the key because they change the result.
-  const fingerprint = computeFingerprint(contentPath);
-  const optionsKey = `${maxDepth}|${maxKeywords}|${collapse}|${config.templates.folder}`;
+  const fingerprint = overviewFingerprint(contentPath);
+  const optionsKey = `${maxDepth}|${maxKeywords}|${collapse}|${collapseDepth}|${maxRows}|${config.templates.folder}`;
   const cached = loadOverviewCache<VaultOverview>(
     configPath,
     fingerprint,
@@ -730,6 +781,8 @@ export function getOverview(
     maxKeywords,
     config.templates.folder,
     collapse,
+    collapseDepth,
+    maxRows,
   );
 
   const contextPath = path.join(contentPath, "NAPKIN.md");
@@ -737,9 +790,23 @@ export function getOverview(
     ? fs.readFileSync(contextPath, "utf-8").trim()
     : undefined;
 
+  // Row cap (fork extension): maxRows > 0 truncates the listing and reports
+  // what was dropped; 0/unset is unlimited (upstream behavior).
+  let overview = folders;
+  let truncated: { rows: number; notes: number } | undefined;
+  if (maxRows > 0 && folders.length > maxRows) {
+    overview = folders.slice(0, maxRows);
+    const dropped = folders.slice(maxRows);
+    truncated = {
+      rows: dropped.length,
+      notes: dropped.reduce((sum, f) => sum + f.notes, 0),
+    };
+  }
+
   const result: VaultOverview = {
     ...(context ? { context } : {}),
-    overview: folders,
+    overview,
+    ...(truncated ? { truncated } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 

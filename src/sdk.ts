@@ -34,6 +34,7 @@ import {
   type MoveResult,
   moveFile,
   prependFile,
+  type ReadOptions,
   type ReadResult,
   readFile,
   renameFile,
@@ -77,9 +78,11 @@ import {
   setProperty,
 } from "./core/properties.js";
 import {
+  type PaginatedSearchResults,
   type SearchOptions,
   type SearchResult,
   searchVault,
+  searchVaultPaginated,
 } from "./core/search.js";
 import { collectTags, getTagInfo, type TagInfo } from "./core/tags.js";
 import {
@@ -119,6 +122,8 @@ export class Napkin {
     depth?: number;
     keywords?: number;
     collapse?: boolean;
+    collapseDepth?: number;
+    maxRows?: number;
   }): VaultOverview {
     return getOverview(this.vault.contentPath, this.vault.configPath, opts);
   }
@@ -134,10 +139,19 @@ export class Napkin {
     );
   }
 
+  searchPaginated(query: string, opts?: SearchOptions): PaginatedSearchResults {
+    return searchVaultPaginated(
+      this.vault.contentPath,
+      this.vault.configPath,
+      query,
+      opts,
+    );
+  }
+
   // ── CRUD ────────────────────────────────────────────────────────
 
-  read(file: string): ReadResult {
-    return readFile(this.vault.contentPath, file);
+  read(file: string, opts?: ReadOptions): ReadResult {
+    return readFile(this.vault.contentPath, file, opts);
   }
 
   create(opts: CreateOptions): CreateResult {

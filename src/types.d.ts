@@ -9,6 +9,7 @@ declare module "sql.js" {
   interface SqlJsStatic {
     Database: new () => Database;
   }
+
   export type { Database };
   export default function initSqlJs(): Promise<SqlJsStatic>;
 }

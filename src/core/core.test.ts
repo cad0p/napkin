@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTempVault } from "../utils/test-helpers.js";
 import { findVault } from "../utils/vault.js";
 import {
@@ -12,16 +12,11 @@ import {
   readFile,
   renameFile,
 } from "./crud.js";
-import { ensureDaily, getDailyPath, readDaily } from "./daily.js";
+import { ensureDaily, readDaily } from "./daily.js";
 import { getFileInfoResolved, getFolderInfo } from "./files.js";
 import { initVault } from "./init.js";
 import { getOutline } from "./outline.js";
-import {
-  collectProperties,
-  readProperty,
-  removeProperty,
-  setProperty,
-} from "./properties.js";
+import { readProperty, removeProperty, setProperty } from "./properties.js";
 import { showTask, updateTask } from "./tasks.js";
 import { getWordCount } from "./wordcount.js";
 

@@ -19,13 +19,16 @@ napkin config set --key search.limit --value 50
 | `overview.depth` | `3` | Max folder depth in vault map |
 | `overview.keywords` | `8` | Max TF-IDF keywords per folder |
 | `overview.collapse` | `true` | Roll up numerous, lexically similar sibling folders into one row |
+| `overview.collapseDepth` | `2` | Minimum depth of a collapse target (parent) row; depth-1 rows never collapse |
+| `overview.maxRows` | `100` | Cap on rows in the vault map (prevents huge outputs) |
 
 ### search
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `search.limit` | `30` | Max results returned |
-| `search.snippetLines` | `0` | Context lines around matches. 0 = match-only |
+| `search.limit` | `30` | Max results returned (total pool available across all pages) |
+| `search.contextLines` | `5` | Context lines around matches. 0 = match-only |
+| `search.resultsPerPage` | `10` | Max results returned per page. Use `--page N` to paginate. |
 
 ### daily
 
@@ -75,3 +78,22 @@ The cache files are keyed by a fingerprint of vault file mtimes and rebuild
 automatically; they are safe to delete at any time.
 
 Config is created on first `napkin config set` or `napkin init`. If the file doesn't exist, defaults are used.
+
+## Global config fallback
+
+When no vault is found from the current directory, napkin falls back to a
+user-level config that can point at a default vault:
+
+```
+$XDG_CONFIG_HOME/napkin/config.json   # defaults to ~/.config/napkin/config.json
+```
+
+```json
+{
+  "vault": "~/projects/my-vault"
+}
+```
+
+The `vault` field is resolved against the config directory (or `~` for home).
+It is only used to locate a vault when no `.napkin/` is discoverable upward
+from the working directory.

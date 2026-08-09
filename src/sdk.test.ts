@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { Napkin } from "./sdk.js";
 import { createTempVault } from "./utils/test-helpers.js";
 
@@ -378,15 +378,20 @@ describe("static", () => {
     }
   });
 
-  test("constructor auto-creates vault", () => {
-    const os = require("node:os");
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-sdk-"));
+  test("constructor does not auto-create vault (finds nearest ancestor)", () => {
+    const vault = createTempVault();
     try {
-      const n = new Napkin(tmpDir);
-      expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(true);
-      expect(n.vault.contentPath).toBe(tmpDir);
+      // Create a deeply nested dir inside the vault parent so findVault
+      // must walk up to find .napkin/ rather than creating a new one.
+      const nested = path.join(vault.path, "a", "b", "c");
+      fs.mkdirSync(nested, { recursive: true });
+
+      const n = new Napkin(nested);
+      // Should resolve to the existing vault, not create a new one at nested.
+      expect(n.vault.contentPath).toBe(vault.vaultPath);
+      expect(n.vault.contentPath).not.toBe(nested);
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      vault.cleanup();
     }
   });
 });

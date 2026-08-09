@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
 import matter from "gray-matter";
+import { describe, expect, test } from "vitest";
 import { createTempVault } from "../../utils/test-helpers.js";
 import { _stripNoise, _termCounts, getOverview } from "../overview.js";
 import {

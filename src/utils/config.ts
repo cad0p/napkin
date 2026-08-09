@@ -1,6 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+/**
+ * Default number of search results per page.
+ *
+ * Balances token budget (10 results × ~80 tokens/snippet ≈ 800 tokens per
+ * page) with enough context for AI agents to make follow-up decisions.
+ */
+export const DEFAULT_SEARCH_RESULTS_PER_PAGE = 10;
+
 export interface VaultLayout {
   /** Content root relative to .napkin/ dir (e.g. ".." for sibling layout) */
   root: string;
@@ -15,10 +23,15 @@ export interface NapkinConfig {
     keywords: number;
     /** Roll up numerous, lexically homogeneous sibling folders into one row. */
     collapse: boolean;
+    /** Collapse targets must be at least this deep; 1 = only the vault root is protected (upstream default). */
+    collapseDepth: number;
+    /** Max rows in the overview listing; 0 = unlimited. */
+    maxRows: number;
   };
   search: {
     limit: number;
-    snippetLines: number;
+    contextLines: number;
+    resultsPerPage: number;
   };
   daily: {
     folder: string;
@@ -37,10 +50,13 @@ export const DEFAULT_CONFIG: NapkinConfig = {
     depth: 3,
     keywords: 8,
     collapse: true,
+    collapseDepth: 1,
+    maxRows: 0,
   },
   search: {
     limit: 30,
-    snippetLines: 0,
+    contextLines: 5,
+    resultsPerPage: DEFAULT_SEARCH_RESULTS_PER_PAGE,
   },
   daily: {
     folder: "daily",

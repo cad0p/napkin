@@ -152,7 +152,7 @@ export async function open(
       fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef));
       process.exit(EXIT_NOT_FOUND);
     }
-    const encodedFile = encodeURIComponent(resolved.replace(/\.md$/, ""));
+    const encodedFile = encodeURIComponent(resolved.path.replace(/\.md$/, ""));
     uri = `obsidian://open?vault=${vaultName}&file=${encodedFile}`;
   } else {
     uri = `obsidian://open?vault=${vaultName}`;

@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
+import { Napkin } from "../sdk.js";
+import { DEFAULT_CONFIG, saveConfig } from "../utils/config.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import { overview } from "./overview.js";
 
@@ -25,6 +27,81 @@ async function runOverviewJson(
   return JSON.parse(captured[0] as string);
 }
 
+// six near-identical converted-contract subfolders — heavy shared
+// boilerplate, rotated so no sentence is in every folder
+function documentsFan(parent: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const boilerplate = [
+    "Lease agreement between landlord and tenant with signature page attached.",
+    "Rent schedule and lease term apply as stated in the appendix.",
+    "Bank guarantee and insurance certificate are required before occupancy.",
+  ];
+  for (let i = 0; i < 6; i++) {
+    const shared = boilerplate.filter((_, j) => j !== i % 3).join("\n");
+    files[`${parent}/tenant-${i}/contract.md`] =
+      `# Converted document ${i}\n${shared}\nSuite ${100 + i} on floor ${i}.`;
+  }
+  return files;
+}
+
+function documentsFixture(): Record<string, string> {
+  return {
+    "procedures/deploy.md":
+      "# Deploy checklist\nRun the smoke tests, then promote the build.",
+    ...documentsFan("imports/documents"),
+  };
+}
+
+// amazon/ is a curated depth-1 namespace with a direct note, five depth-2
+// children (each with its own direct note), and five homogeneous depth-3
+// report folders under each child. Without collapseDepth, each depth-3 fan
+// merges into its depth-2 parent and the near-identical depth-2 parents then
+// cascade up into amazon; collapseDepth 2 stops after the first hop so the
+// depth-2 rows survive with their own fans rolled in.
+function amazonCascadeFixture(): Record<string, string> {
+  const files: Record<string, string> = {
+    "amazon/overview.md": "# Amazon namespace\nCurated top-level namespace.",
+  };
+  const children = [
+    "architecture",
+    "changelog",
+    "decisions",
+    "features",
+    "guides",
+  ];
+  for (const child of children) {
+    files[`amazon/${child}/readme.md`] =
+      `# ${child} namespace\nCurated ${child} notes.`;
+  }
+  const boilerplate = [
+    "Quarterly report covering the regional office with attached budget summary.",
+    "Annual headcount plan with hiring forecasts for the coming year.",
+    "Monthly compliance audit with a sign-off checklist appended.",
+  ];
+  for (const child of children) {
+    for (let i = 0; i < 5; i++) {
+      const shared = boilerplate.filter((_, j) => j !== i % 3).join("\n");
+      files[`amazon/${child}/report-${i}/note.md`] =
+        `# Report ${i}\n${shared}\nSuite ${100 + i} on floor ${i}.`;
+    }
+  }
+  return files;
+}
+
+// 110 heterogeneous top-level folders; the last three hold 3 notes each.
+// Parents are the vault root (depth 0), which is never a collapse target.
+function topicFanFixture(): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 110; i++) {
+    const count = i >= 107 ? 3 : 1;
+    for (let n = 0; n < count; n++) {
+      files[`topic-${String(i).padStart(3, "0")}/note-${n}.md`] =
+        `# Topic ${i}\nNotes about topic number ${i}.`;
+    }
+  }
+  return files;
+}
+
 describe("overview", () => {
   test("generates overview for vault with folders", async () => {
     const vault = createTempVault({
@@ -38,7 +115,7 @@ describe("overview", () => {
     const result = (await runOverviewJson(vault.path)) as {
       overview: Array<{ path: string; notes: number; tags: string[] }>;
     };
-    expect(result.overview).toBeArray();
+    expect(Array.isArray(result.overview)).toBe(true);
     expect(result.overview.length).toBeGreaterThanOrEqual(3);
 
     const projectsFolder = result.overview.find((f) => f.path === "projects");
@@ -309,6 +386,242 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
       overview: Array<{ path: string }>;
     };
     expect(flat.overview.map((f) => f.path)).toContain("imports/tenant-0");
+
+    vault.cleanup();
+  });
+
+  test("collapses homogeneous siblings under a depth-2 parent", async () => {
+    const vault = createTempVault(documentsFixture());
+
+    const result = (await runOverviewJson(vault.path)) as {
+      overview: Array<{
+        path: string;
+        notes: number;
+        collapsedFolders?: number;
+      }>;
+    };
+    const paths = result.overview.map((f) => f.path);
+    expect(paths).toContain("imports/documents");
+    expect(paths).not.toContain("imports/documents/tenant-0");
+    const imports = result.overview.find((f) => f.path === "imports/documents");
+    expect(imports?.collapsedFolders).toBe(6);
+    expect(imports?.notes).toBe(6);
+    // curated folder untouched
+    expect(paths).toContain("procedures");
+
+    vault.cleanup();
+  });
+
+  test("does not collapse depth-1 parents when collapseDepth is 2", async () => {
+    const files: Record<string, string> = {
+      "top/overview.md": "# Top namespace\nCurated top-level namespace.",
+    };
+    // five identical-content subfolders — enough to collapse (>= 5 children,
+    // cosine ~1) if depth-1 parents were allowed as merge targets
+    for (let i = 0; i < 5; i++) {
+      files[`top/a-${i}/note.md`] =
+        "# Report\nQuarterly report for the regional office with attached budget summary.";
+    }
+    const vault = createTempVault(files);
+
+    const result = (await runOverviewJson(vault.path, {
+      collapseDepth: 2,
+    })) as {
+      overview: Array<{ path: string; collapsedFolders?: number }>;
+    };
+    const paths = result.overview.map((f) => f.path);
+    for (let i = 0; i < 5; i++) {
+      expect(paths).toContain(`top/a-${i}`);
+    }
+    const top = result.overview.find((f) => f.path === "top");
+    expect(top).toBeDefined();
+    expect(top?.collapsedFolders).toBeUndefined();
+
+    vault.cleanup();
+  });
+
+  test("collapseDepth 2: depth-2 fans merge, cascade stops at depth 1", async () => {
+    const vault = createTempVault(amazonCascadeFixture());
+
+    const result = (await runOverviewJson(vault.path, {
+      collapseDepth: 2,
+    })) as {
+      overview: Array<{
+        path: string;
+        notes: number;
+        collapsedFolders?: number;
+      }>;
+    };
+    const paths = result.overview.map((f) => f.path);
+
+    // each depth-2 child survives as its own row, its depth-3 fan merged in
+    for (const child of [
+      "architecture",
+      "changelog",
+      "decisions",
+      "features",
+      "guides",
+    ]) {
+      const row = result.overview.find((f) => f.path === `amazon/${child}`);
+      expect(row).toBeDefined();
+      expect(row?.notes).toBe(6);
+      expect(row?.collapsedFolders).toBe(5);
+      expect(paths).not.toContain(`amazon/${child}/report-0`);
+    }
+
+    // the depth-1 parent never collapses: children stay out of its row
+    const amazon = result.overview.find((f) => f.path === "amazon");
+    expect(amazon).toBeDefined();
+    expect(amazon?.collapsedFolders).toBeUndefined();
+    expect(amazon?.notes).toBe(1);
+
+    vault.cleanup();
+  });
+
+  test("overview opts override config for collapseDepth and maxRows", async () => {
+    // SDK wiring: collapseDepth 1 restores the depth-1 cascade collapse
+    const cascade = createTempVault(amazonCascadeFixture());
+    const collapsed = new Napkin(cascade.path).overview({ collapseDepth: 1 });
+    const amazon = collapsed.overview.find((f) => f.path === "amazon");
+    expect(amazon).toBeDefined();
+    // 5 depth-2 children, each carrying 5 collapsed depth-3 subfolders
+    expect(amazon?.collapsedFolders).toBe(30);
+    expect(amazon?.notes).toBe(31);
+    expect(collapsed.overview.map((f) => f.path)).not.toContain(
+      "amazon/architecture",
+    );
+    cascade.cleanup();
+
+    // command wiring: maxRows passthrough caps the listing
+    const fan = createTempVault(topicFanFixture());
+    const capped = (await runOverviewJson(fan.path, { maxRows: 50 })) as {
+      overview: unknown[];
+      truncated?: { rows: number; notes: number };
+    };
+    expect(capped.overview.length).toBe(50);
+    expect(capped.truncated).toEqual({ rows: 60, notes: 60 });
+    fan.cleanup();
+  });
+
+  test("sorts by depth then notes desc when capped", async () => {
+    const vault = createTempVault({
+      "readme.md": "# Welcome\nRoot note.",
+      "big/01.md":
+        "# Kubernetes\nIngress routing and pod autoscaling policies.",
+      "big/02.md": "# Service mesh\nMutual TLS and traffic splitting.",
+      "big/03.md": "# Cluster ops\nNode draining and backup schedules.",
+      "big/04.md": "# Observability\nPrometheus scraping and alert rules.",
+      "big/05.md": "# Storage\nPersistent volumes and snapshots.",
+      "medium/01.md": "# Payroll\nTax withholding tables for contractors.",
+      "medium/02.md": "# Benefits\nHealth insurance enrollment windows.",
+      "medium/03.md": "# Compliance\nLabor law reporting requirements.",
+      "small/01.md":
+        "# Sourdough\nFermentation schedules and hydration ratios.",
+      "nested/deep/01.md":
+        "# Telescope\nCollimation steps for reflector optics.",
+      "nested/deep/02.md": "# Mount\nPolar alignment and tracking calibration.",
+    });
+
+    const result = (await runOverviewJson(vault.path, {
+      maxRows: 100,
+    })) as {
+      overview: Array<{ path: string; notes: number }>;
+    };
+    expect(result.overview.map((f) => `${f.path}:${f.notes}`)).toEqual([
+      "/:1",
+      "big:5",
+      "medium:3",
+      "small:1",
+      "nested/deep:2",
+    ]);
+
+    vault.cleanup();
+  });
+
+  test("caps rows and reports truncation", async () => {
+    const vault = createTempVault(topicFanFixture());
+    saveConfig(vault.vaultPath, {
+      ...DEFAULT_CONFIG,
+      overview: { ...DEFAULT_CONFIG.overview, maxRows: 100 },
+    });
+
+    const result = (await runOverviewJson(vault.path)) as {
+      overview: Array<{ path: string; notes: number }>;
+      truncated?: { rows: number; notes: number };
+    };
+    expect(result.overview.length).toBe(100);
+    expect(result.truncated).toEqual({ rows: 10, notes: 10 });
+    const paths = result.overview.map((f) => f.path);
+    // notes-desc beats alphabetical: the 3-note folders sort first despite
+    // being alphabetically last, and one-note folders like topic-097 drop
+    expect(paths).toContain("topic-107");
+    expect(paths).toContain("topic-109");
+    expect(paths).not.toContain("topic-097");
+
+    vault.cleanup();
+  });
+
+  test("maxRows 0 disables the cap", async () => {
+    const vault = createTempVault(topicFanFixture());
+    saveConfig(vault.vaultPath, {
+      ...DEFAULT_CONFIG,
+      overview: { ...DEFAULT_CONFIG.overview, maxRows: 0 },
+    });
+
+    const result = (await runOverviewJson(vault.path)) as {
+      overview: Array<{ path: string; notes: number }>;
+      truncated?: { rows: number; notes: number };
+    };
+    expect(result.overview.length).toBe(110);
+    expect(result.truncated).toBeUndefined();
+
+    vault.cleanup();
+  });
+
+  test("maxRows counts collapsed rows once and drops after the cut", async () => {
+    // two identical 6-child fans collapse into imports/documents and
+    // vendor/documents; eight heterogeneous one-note depth-2 rows follow.
+    // With maxRows 2 the lexically-earlier fan survives the cut as a single
+    // row while the second fan drops with all six of its merged children's
+    // notes counted exactly once in truncated.notes.
+    const files: Record<string, string> = {
+      ...documentsFixture(),
+      ...documentsFan("vendor/documents"),
+    };
+    const topics = [
+      "Kubernetes ingress routing and pod autoscaling policies.",
+      "Payroll tax withholding tables for hourly contractors.",
+      "Sourdough fermentation schedules and hydration ratios.",
+      "Telescope collimation steps for reflector optics.",
+      "Beehive winterization and varroa mite treatment.",
+      "Marathon training splits and lactate threshold pacing.",
+      "Canal lock maintenance and water level monitoring.",
+      "Greenhouse climate control and irrigation scheduling.",
+    ];
+    for (let i = 0; i < topics.length; i++) {
+      files[`filler-${i}/area/note.md`] = `# Area ${i}\n${topics[i]}`;
+    }
+    const vault = createTempVault(files);
+
+    const result = (await runOverviewJson(vault.path, { maxRows: 2 })) as {
+      overview: Array<{
+        path: string;
+        notes: number;
+        collapsedFolders?: number;
+      }>;
+      truncated?: { rows: number; notes: number };
+    };
+    const paths = result.overview.map((f) => f.path);
+    // the merged fan occupies one row toward the cap and sorts before the
+    // lexically-later vendor fan, so it survives the cut
+    expect(result.overview.length).toBe(2);
+    expect(paths).toContain("imports/documents");
+    const docs = result.overview.find((f) => f.path === "imports/documents");
+    expect(docs?.collapsedFolders).toBe(6);
+    expect(docs?.notes).toBe(6);
+    // dropped: vendor/documents (6 merged children notes) + 8 fillers
+    expect(paths).not.toContain("vendor/documents");
+    expect(result.truncated).toEqual({ rows: 9, notes: 14 });
 
     vault.cleanup();
   });

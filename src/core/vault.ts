@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { listFiles, listFolders } from "../utils/files.js";
+import { listFiles, listFolders, walkDir } from "../utils/files.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 export interface VaultMetadata {
@@ -13,21 +12,16 @@ export interface VaultMetadata {
 
 function getVaultSize(vaultPath: string): number {
   let total = 0;
-  function walk(dir: string) {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (
-        entry.name === ".git" ||
-        entry.name === ".obsidian" ||
-        entry.name === ".napkin"
-      )
-        continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else total += fs.statSync(full).size;
-    }
-  }
-  walk(vaultPath);
+  walkDir(vaultPath, {
+    onEntry: (fullPath, _entry, kind) => {
+      if (kind !== "file") return;
+      try {
+        total += fs.statSync(fullPath).size;
+      } catch {
+        // Entry disappeared between readdir and stat — skip.
+      }
+    },
+  });
   return total;
 }
 

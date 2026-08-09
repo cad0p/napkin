@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "vitest";
 import { createTempVault } from "../utils/test-helpers.js";
 import { getOverview } from "./overview.js";
 

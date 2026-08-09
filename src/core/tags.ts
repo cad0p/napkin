@@ -22,7 +22,7 @@ export function collectTags(vaultPath: string, fileFilter?: string): TagData {
   const files = fileFilter
     ? (() => {
         const r = resolveFile(vaultPath, fileFilter);
-        return r ? [r] : [];
+        return r ? [r.path] : [];
       })()
     : listFiles(vaultPath, { ext: "md" });
 

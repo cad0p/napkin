@@ -68,7 +68,7 @@ function createTempVault(q: HotpotQuestion): string {
 
   fs.writeFileSync(
     path.join(napkinDir, "config.json"),
-    JSON.stringify({ search: { limit: 10, snippetLines: 3 } }),
+    JSON.stringify({ search: { limit: 10, contextLines: 3 } }),
   );
 
   const allTitles = q.context.map(([t]) => t);

@@ -20,7 +20,7 @@ Google shows snippets with surrounding context because humans skim. They need la
 
 Agents don't skim. They read every token, and every irrelevant token costs money and dilutes attention. A `## Goal` heading pulled in as context around a match is noise to an agent — it processes it, it contributes to the context window, and it provides zero signal.
 
-Match-only lines (context = 0) are denser and cheaper. The agent can always opt into more context with `--snippet-lines 2`, or just `napkin read` the file.
+Match-only lines (context = 0) are denser and cheaper. The agent can always opt into more context with `--context-lines 2`, or just `napkin read` the file.
 
 **Principle: default to minimal output. Let the agent ask for more, not filter out less.**
 

@@ -93,7 +93,11 @@ Examples:
   $ napkin init --template coding    Create a vault with coding structure
   $ napkin overview                  See what's in the vault
   $ napkin search "auth"             Find content about auth
+  $ napkin search "auth" --page 2   Next page of search results
   $ napkin read "Architecture"       Read a specific file
+  $ napkin read file.md --section "## Heading"  Read a section
+  $ napkin read '[[file#Heading]]'   Read via wikilink syntax
+  $ napkin outline file.md           Show document structure
   $ napkin update                    Update the napkin CLI
 
 Workflow: init → overview → search → read
@@ -104,11 +108,12 @@ Getting started:
   vault                Show vault info (path, file count, size)
   config               Vault configuration (show, get, set)
   graph                Interactive vault graph visualization
-  update               Update the napkin CLI via npm
+  update               Update the napkin CLI via pnpm (or npm fallback)
 
 Reading:
-  read <file>          Read a file
-  search <query>       Search vault (BM25 + backlinks + recency)
+  read <file>          Read a file (--section, --page)
+  outline <file>       Show headings for a file (--format, --total)
+  search <query>       Search vault (BM25 + backlinks + recency) (--page, --context-lines)
 
 Writing:
   create <name>        Create a new file (--template, --content)
@@ -140,7 +145,7 @@ Options:
 
 All commands support --json for structured output.
 More help: napkin <command> --help
-Docs: https://github.com/Michaelliv/napkin`);
+Docs: https://github.com/cad0p/napkin`);
 }
 
 // ── Getting started ─────────────────────────────────────────────────
@@ -200,9 +205,24 @@ program
 program
   .command("read <file>")
   .description("Read a file")
-  .action(async (fileRef, _opts, cmd) => {
-    const root = cmd.optsWithGlobals();
+  .option("--section <heading>", "Extract a specific section by heading")
+  .option("--page <n>", "Page number for paginated output")
+  .option("--page-size <n>", "Page size in characters (default: 50000)")
+  .action(async (fileRef, opts, cmd) => {
+    const root = { ...cmd.optsWithGlobals(), ...opts };
     await read(fileRef, root);
+  });
+
+program
+  .command("outline [file]")
+  .description("Show headings for a file")
+  .option("--file <name>", "File name (alternative to positional)")
+  .option("--format <type>", "Output format: tree, md, json")
+  .option("--total", "Return heading count")
+  .action(async (file, opts, cmd) => {
+    const root = { ...cmd.optsWithGlobals(), ...opts };
+    root.file = root.file || file;
+    await outline(root);
   });
 
 program
@@ -211,8 +231,12 @@ program
   .option("--query <text>", "Search query")
   .option("--path <folder>", "Limit to folder")
   .option("--limit <n>", "Max results (default: 30)")
+  .option(
+    "--page <n>",
+    "Page number (1-based, uses resultsPerPage from config)",
+  )
   .option("--total", "Return match count")
-  .option("--snippet-lines <n>", "Context lines around matches (default: 0)")
+  .option("--context-lines <n>", "Context lines around matches (default: 5)")
   .option("--no-snippets", "Return files only, no snippets")
   .option("--score", "Include relevance score in output")
   .action(async (queryWords, opts, cmd) => {

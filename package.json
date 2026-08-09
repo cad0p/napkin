@@ -1,40 +1,41 @@
 {
-  "name": "napkin-ai",
-  "version": "0.9.2",
+  "name": "@cad0p/napkin",
+  "version": "0.12.1",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "description": "🧻 Knowledge system for agents. Local-first, file-based, progressively disclosed.",
   "type": "module",
-  "main": "dist/index.js",
+  "packageManager": "pnpm@11.15.0",
+  "main": "src/index.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./src/index.ts"
   },
   "bin": {
-    "napkin": "./dist/main.js"
+    "napkin": "./bin/napkin.js"
   },
   "files": [
-    "dist",
+    "src",
+    "bin",
     "skills"
   ],
   "scripts": {
-    "build": "tsc",
-    "prepare": "npm run build",
-    "prepublishOnly": "npm run build",
-    "dev": "bun run src/main.ts",
-    "build:bun": "bun build --compile src/main.ts --outfile napkin",
-    "build:bun-linux": "bun build --compile --target=bun-linux-x64 src/main.ts --outfile napkin-linux-x64",
-    "build:bun-mac-arm": "bun build --compile --target=bun-darwin-arm64 src/main.ts --outfile napkin-darwin-arm64",
-    "build:bun-mac-x64": "bun build --compile --target=bun-darwin-x64 src/main.ts --outfile napkin-darwin-x64",
-    "test": "bun test",
-    "format": "bunx biome format --write src/",
-    "lint": "bunx biome lint src/",
-    "check": "bunx biome check src/"
+    "typecheck": "tsc --noEmit",
+    "dev": "node --import tsx src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "biome format --write src/",
+    "lint": "biome lint src/",
+    "check": "biome check src/"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Michaelliv/napkin.git"
+    "url": "git+https://github.com/cad0p/napkin.git"
   },
-  "homepage": "https://github.com/Michaelliv/napkin#readme",
+  "homepage": "https://github.com/cad0p/napkin#readme",
   "bugs": {
-    "url": "https://github.com/Michaelliv/napkin/issues"
+    "url": "https://github.com/cad0p/napkin/issues"
   },
   "keywords": [
     "obsidian",
@@ -50,24 +51,25 @@
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
-    "@types/bun": "latest",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.6.0",
-    "minisearch": "^7.2.0",
-    "typescript": "^5.8.0"
+    "pkg-pr-new": "^0.0.75",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^2.1.0",
+    "minisearch": "^7.2.0"
   },
   "dependencies": {
-    "@shift-labs/ferrosearch": "^0.1.1",
+    "jiti": "^2.6.0",
     "chalk": "^5.6.2",
     "commander": "^14.0.3",
     "gray-matter": "^4.0.3",
     "jexl": "^2.3.0",
-    "sql.js": "^1.14.0"
+    "js-yaml": "^4.1.0",
+    "sql.js": "^1.14.0",
+    "@shift-labs/ferrosearch": "^0.1.1"
   },
   "optionalDependencies": {
     "glimpseui": "^0.3.7"
-  },
-  "trustedDependencies": [
-    "glimpseui"
-  ]
+  }
 }

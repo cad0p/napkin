@@ -4,6 +4,74 @@ export interface Heading {
   line: number;
 }
 
+export class HeadingNotFoundError extends Error {
+  heading: string;
+  headings: Heading[];
+
+  constructor(heading: string, headings: Heading[]) {
+    if (headings.length === 0) {
+      super(`Heading "${heading}" not found. The file contains no headings.`);
+    } else {
+      const available = headings
+        .slice(0, 5)
+        .map((h) => `${"#".repeat(h.level)} ${h.text}`)
+        .join("\n");
+      super(
+        `Heading "${heading}" not found. Available headings:\n${available}${headings.length > 5 ? "\n..." : ""}`,
+      );
+    }
+    this.name = "HeadingNotFoundError";
+    this.heading = heading;
+    this.headings = headings;
+  }
+}
+
+/**
+ * Extract a specific section from markdown content by heading.
+ * Performs byte-for-byte exact match on the heading text (excluding the # prefix).
+ * Stops exactly at the next heading of the same or higher level.
+ * Throws an error if the heading is not found, listing up to 5 available headings.
+ */
+export function extractSection(content: string, heading: string): string {
+  // Strip leading # characters so --section "## Heading" matches heading text "Heading"
+  heading = heading.replace(/^#+\s*/, "");
+  const lines = content.split("\n");
+  let startLine = -1;
+  let headingLevel = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^(#{1,6})\s+(.+)$/);
+    if (match) {
+      const level = match[1].length;
+      const text = match[2].replace(/(\s)#+\s*$/, "$1").trimEnd();
+      if (text === heading) {
+        startLine = i;
+        headingLevel = level;
+        break;
+      }
+    }
+  }
+
+  if (startLine === -1) {
+    const headings = extractHeadings(content);
+    throw new HeadingNotFoundError(heading, headings);
+  }
+
+  let endLine = lines.length;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const match = lines[i].match(/^(#{1,6})\s+/);
+    if (match) {
+      const level = match[1].length;
+      if (level <= headingLevel) {
+        endLine = i;
+        break;
+      }
+    }
+  }
+
+  return lines.slice(startLine, endLine).join("\n");
+}
+
 export interface Task {
   line: number;
   status: string;
@@ -27,7 +95,7 @@ export function extractHeadings(content: string): Heading[] {
     if (match) {
       headings.push({
         level: match[1].length,
-        text: match[2].trim(),
+        text: match[2].replace(/(\s)#+\s*$/, "$1").trimEnd(),
         line: i + 1,
       });
     }

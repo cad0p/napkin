@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTempVault } from "../utils/test-helpers.js";
 import { vault } from "./vault.js";
 
@@ -30,5 +33,31 @@ describe("vault command", () => {
     expect(data.files).toBe(3);
     expect(data.folders).toBe(2);
     expect(data.size).toBeGreaterThan(0);
+  });
+
+  test("counts symlinked files and their bytes", async () => {
+    // External source directory that we'll symlink into the vault.
+    const tmpSrc = fs.mkdtempSync(
+      path.join(os.tmpdir(), "napkin-vault-symlink-"),
+    );
+    const extContent = `# External\n${"x".repeat(500)}`;
+    fs.writeFileSync(path.join(tmpSrc, "external.md"), extContent);
+    fs.symlinkSync(tmpSrc, path.join(v.vaultPath, "linked"));
+
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    try {
+      await vault({ json: true, vault: v.path });
+    } finally {
+      console.log = orig;
+      fs.rmSync(tmpSrc, { recursive: true, force: true });
+    }
+
+    const data = JSON.parse(logs.join(""));
+    // 3 original files + 1 reached via symlink = 4.
+    expect(data.files).toBe(4);
+    // Size should include the 500-byte external content.
+    expect(data.size).toBeGreaterThanOrEqual(extContent.length);
   });
 });

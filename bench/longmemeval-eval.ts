@@ -99,7 +99,7 @@ function createQuestionVault(instance: LongMemInstance): { tmpDir: string; sessi
 
   fs.writeFileSync(
     path.join(napkinDir, "config.json"),
-    JSON.stringify({ search: { limit: 15, snippetLines: 5 } }),
+    JSON.stringify({ search: { limit: 15, contextLines: 5 } }),
   );
 
   const sessionNoteNames = new Map<number, string>();

@@ -1,8 +1,19 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { EXIT_ERROR } from "../utils/exit-codes.js";
-import { type CommandRunner, update } from "./update.js";
+import {
+  type CommandRunner,
+  type PackageManagerResolver,
+  update,
+} from "./update.js";
 
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+
+/** Fixed npm resolver so tests are deterministic regardless of host PATH. */
+const npmOnly: PackageManagerResolver = () => ({
+  command: npmCommand,
+  args: ["install", "-g", "@cad0p/napkin@latest"],
+});
+
 const originalLog = console.log;
 const originalError = console.error;
 let logs: string[];
@@ -11,8 +22,8 @@ let errors: string[];
 beforeEach(() => {
   logs = [];
   errors = [];
-  console.log = (...args) => logs.push(args.join(" "));
-  console.error = (...args) => errors.push(args.join(" "));
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.join(" "));
 });
 
 afterEach(() => {
@@ -47,34 +58,42 @@ describe("update command", () => {
       options: { silent: boolean };
     }> = [];
 
-    await update({}, async (command, args, options) => {
-      calls.push({ command, args, options });
-      return 0;
-    });
+    await update(
+      {},
+      async (command, args, options) => {
+        calls.push({ command, args, options });
+        return 0;
+      },
+      npmOnly,
+    );
 
     expect(calls).toEqual([
       {
         command: npmCommand,
-        args: ["install", "-g", "napkin-ai@latest"],
+        args: ["install", "-g", "@cad0p/napkin@latest"],
         options: { silent: false },
       },
     ]);
-    expect(logs.join("\n")).toContain("Updated napkin-ai@latest");
+    expect(logs.join("\n")).toContain("Updated @cad0p/napkin@latest");
   });
 
   test("returns structured JSON and silences npm output", async () => {
     let silent = false;
 
-    await update({ json: true }, async (_command, _args, options) => {
-      silent = options.silent;
-      return 0;
-    });
+    await update(
+      { json: true },
+      async (_command, _args, options) => {
+        silent = options.silent;
+        return 0;
+      },
+      npmOnly,
+    );
 
     expect(silent).toBe(true);
     expect(logs).toHaveLength(1);
     expect(JSON.parse(logs[0] ?? "")).toEqual({
       updated: true,
-      target: "napkin-ai@latest",
+      target: "@cad0p/napkin@latest",
     });
     expect(errors).toEqual([]);
   });
@@ -82,10 +101,14 @@ describe("update command", () => {
   test("suppresses command and npm output in quiet mode", async () => {
     let silent = false;
 
-    await update({ quiet: true }, async (_command, _args, options) => {
-      silent = options.silent;
-      return 0;
-    });
+    await update(
+      { quiet: true },
+      async (_command, _args, options) => {
+        silent = options.silent;
+        return 0;
+      },
+      npmOnly,
+    );
 
     expect(silent).toBe(true);
     expect(logs).toEqual([]);
@@ -93,7 +116,9 @@ describe("update command", () => {
   });
 
   test("reports a non-zero npm exit status", async () => {
-    const exitCode = await captureExit(() => update({}, async () => 7));
+    const exitCode = await captureExit(() =>
+      update({}, async () => 7, npmOnly),
+    );
 
     expect(exitCode).toBe(EXIT_ERROR);
     expect(errors.join("\n")).toContain("exited with status 7");
@@ -101,15 +126,15 @@ describe("update command", () => {
 
   test("returns structured JSON for a failed update", async () => {
     const exitCode = await captureExit(() =>
-      update({ json: true }, async () => 2),
+      update({ json: true }, async () => 2, npmOnly),
     );
 
     expect(exitCode).toBe(EXIT_ERROR);
     expect(logs).toHaveLength(1);
     expect(JSON.parse(logs[0] ?? "")).toEqual({
       updated: false,
-      target: "napkin-ai@latest",
-      error: `${npmCommand} install -g napkin-ai@latest exited with status 2`,
+      target: "@cad0p/napkin@latest",
+      error: `${npmCommand} install -g @cad0p/napkin@latest exited with status 2`,
     });
     expect(errors).toEqual([]);
   });
@@ -118,11 +143,36 @@ describe("update command", () => {
     const runner: CommandRunner = async () => {
       throw new Error("not found");
     };
-    const exitCode = await captureExit(() => update({}, runner));
+    const exitCode = await captureExit(() => update({}, runner, npmOnly));
 
     expect(exitCode).toBe(EXIT_ERROR);
     expect(errors.join("\n")).toContain(
       `Update failed: Could not run ${npmCommand}: not found`,
     );
+  });
+
+  test("prefers pnpm when available on PATH", async () => {
+    const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+    const pnpmResolver: PackageManagerResolver = () => ({
+      command: pnpmCommand,
+      args: ["add", "-g", "@cad0p/napkin@latest"],
+    });
+    const calls: Array<{ command: string; args: string[] }> = [];
+
+    await update(
+      {},
+      async (command, args) => {
+        calls.push({ command, args });
+        return 0;
+      },
+      pnpmResolver,
+    );
+
+    expect(calls).toEqual([
+      {
+        command: pnpmCommand,
+        args: ["add", "-g", "@cad0p/napkin@latest"],
+      },
+    ]);
   });
 });
