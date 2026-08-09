@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 💼 Other
+
+- Upstream v0.9.1–v0.9.2 minus search engine swap — keeps Approach G search, gains overview cache + gray-matter fix (bench-verified) ([#43](https://github.com/cad0p/napkin/pull/43))
+
+
 ## [0.12.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
