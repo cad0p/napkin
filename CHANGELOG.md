@@ -23,10 +23,6 @@ divergent defaults. Now:
 - pi-napkin follow-up: drop its divergent extension fallback (0.6.3)
 <!-- USER-EDITABLE SECTION END -->
 
-<!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
-<!-- USER-EDITABLE SECTION END -->
-
 ### 🐛 Bug Fixes
 
 - *(overview)* Restore fork defaults collapseDepth 2 / maxRows 100 ([#46](https://github.com/cad0p/napkin/pull/46))
