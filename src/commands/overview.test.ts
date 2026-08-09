@@ -362,7 +362,10 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     }
     const vault = createTempVault(files);
 
-    const result = (await runOverviewJson(vault.path)) as {
+    // collapseDepth 1 = upstream-equivalent collapse semantics: this test pins
+    // the collapse MECHANISM; the fork's default (collapseDepth 2) protects
+    // depth-1 folders and is pinned by the golden snapshot + the defaults test.
+    const result = (await runOverviewJson(vault.path, { collapseDepth: 1 })) as {
       overview: Array<{
         path: string;
         notes: number;
@@ -476,6 +479,41 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     expect(amazon?.notes).toBe(1);
 
     vault.cleanup();
+  });
+
+  test("fork defaults: maxRows 100 caps + collapseDepth 2 protects depth-1 (config contract)", async () => {
+    // The fork ships collapseDepth 2 / maxRows 100 as DEFAULT_CONFIG (restored
+    // in 0.12.3). The golden "default options" snapshot pins the rendering;
+    // this test pins the contract consumers rely on: pi-napkin's session
+    // context bloat protection (100-row cap) and the curated top-level
+    // taxonomy protection. Upstream-identical behavior (1/0) must be opt-in.
+    const cascade = createTempVault(amazonCascadeFixture());
+    const def = new Napkin(cascade.path).overview();
+    const paths = def.overview.map((f) => f.path);
+    // depth-1 amazon survives as a listed row and is NOT a collapse target at
+    // the default collapseDepth 2 (cascade stops at depth 1); its depth-2
+    // children keep their own rows with their depth-3 fans merged in:
+    expect(paths).toContain("amazon");
+    const amazon = def.overview.find((f) => f.path === "amazon");
+    expect(amazon?.collapsedFolders).toBeUndefined();
+    expect(amazon?.notes).toBe(1);
+    const arch = def.overview.find((f) => f.path === "amazon/architecture");
+    expect(arch).toBeDefined();
+    expect(arch?.collapsedFolders).toBe(5);
+    expect(arch?.notes).toBe(6);
+    cascade.cleanup();
+
+    const fan = createTempVault(topicFanFixture());
+    const capped = (await runOverviewJson(fan.path, {})) as {
+      overview: unknown[];
+      truncated?: { rows: number; notes: number };
+    };
+    // topicFanFixture has 110 single-note folders (3 of them with 3 notes):
+    // default maxRows 100 caps the listing and reports the dropped tail (the
+    // 10 path-last 1-note folders).
+    expect(capped.overview.length).toBe(100);
+    expect(capped.truncated).toEqual({ rows: 10, notes: 10 });
+    fan.cleanup();
   });
 
   test("overview opts override config for collapseDepth and maxRows", async () => {

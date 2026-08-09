@@ -138,14 +138,23 @@ afterAll(() => vault.cleanup());
 
 describe("getOverview golden", () => {
   test("default options", () => {
+    // CHARACTERIZES THE FORK'S SHIPPED DEFAULTS (collapseDepth 2, maxRows 100
+    // — upstream-identical defaults are pinned by the equivalence oracle and
+    // the other two sets below, which pass upstream-equivalent options
+    // explicitly). Regenerated on 2026-08-09 when the fork defaults were
+    // restored after the upstream sync had temporarily shipped 1/0.
     const result = getOverview(vault.vaultPath, vault.vaultPath);
     expect(result).toMatchSnapshot();
   });
 
   test("depth 3, keywords 8", () => {
+    // Upstream-equivalent listing options: this set pins the depth/keywords
+    // pipeline characterization, not the fork's config defaults.
     const result = getOverview(vault.vaultPath, vault.vaultPath, {
       depth: 3,
       keywords: 8,
+      collapseDepth: 1,
+      maxRows: 0,
     });
     expect(result).toMatchSnapshot();
   });
@@ -154,6 +163,8 @@ describe("getOverview golden", () => {
     const result = getOverview(vault.vaultPath, vault.vaultPath, {
       collapse: false,
       depth: 3,
+      collapseDepth: 1,
+      maxRows: 0,
     });
     expect(result).toMatchSnapshot();
   });
