@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.2] - 2026-08-09
+
+<!-- USER-EDITABLE SECTION START -->
+Sync with upstream Michaelliv/napkin v0.9.1–v0.9.2, **minus the search engine
+swap** (keeps the fork's Approach G search — the ferrosearch variant regressed
+in the 3-way benchmark: cold +149%, warm +33% with 6.3s outliers, RSS +35%,
+disk +55%, and hub-file relevance losses; see PR #42 for the experiment and the
+benchmark table in the PR #43 body).
+
+Adopted from upstream:
+- **Overview 3.7× perf rewrite + mtime-fingerprint cache** — new
+  `.napkin/overview-cache.json`; warm overview ~80ms on Goldmine (was ~1755ms),
+  CLI warm 1865ms vs 3800ms (was cache-less). Default output byte-identical
+  (proven by upstream's golden + equivalence oracle suites, vitest-migrated).
+- **gray-matter cache-poisoning fix** (`safeMatter`) — malformed YAML no longer
+  leaks raw frontmatter into tags after a failed parse.
+- **`file outline` subcommand** (the CLI previously lacked what README shipped)
+  + static package.json import (bun-binary-safe, works under jiti/tsx too).
+- **Agent skills** `distill` + `tend` now shipped in the package (`files`).
+- Docs: overview keyword-extraction catch-up, configuration.md cache +
+  engine sections, README skills/update sections.
+
+Fork changes preserved (re-applied on top of upstream): collapseDepth/maxRows
+option-gated (defaults unchanged), incremental search cache, pagination/page
+hints/outline nudge, pnpm+vitest stack, fork-only workflows/bench/scripts.
+<!-- USER-EDITABLE SECTION END -->
+
+### 💼 Other
+
+- Upstream v0.9.1–v0.9.2 minus search engine swap — keeps Approach G search, gains overview cache + gray-matter fix (bench-verified) ([#43](https://github.com/cad0p/napkin/pull/43))
+
+
 ## [0.12.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
