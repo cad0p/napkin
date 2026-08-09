@@ -51,13 +51,9 @@ napkin config set --key search.limit --value 50
 
 ### distill
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `distill.enabled` | `false` | Enable auto-distill after conversations |
-| `distill.intervalMinutes` | `60` | Min interval between distill runs |
-| `distill.model.provider` | `"anthropic"` | Model provider |
-| `distill.model.id` | `"claude-sonnet-4-6"` | Model ID |
-| `distill.templates` | `[]` | Note templates to use during distill |
+The `distill.*` keys are consumed by the **pi-napkin distill extension**, not by
+this CLI — see [docs/distill.md](distill.md) for the full key reference. The
+CLI itself ignores them (they are safe to keep in the vault config).
 
 ## Precedence
 

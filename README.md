@@ -12,10 +12,11 @@ pnpm add -g @cad0p/napkin
 npm install -g @cad0p/napkin
 ```
 
-Search runs on [ferrosearch](https://github.com/shift-labs-ai/ferrosearch),
-a native MiniSearch-compatible engine with prebuilt binaries for macOS
-(arm64, x64) and Linux (x64, arm64, glibc and musl). Other platforms build
-it from source with Rust installed.
+Search indexes filenames with [MiniSearch](https://github.com/lucaong/minisearch)
+(BM25) and scans note contents in memory for substring matches, ranking by a
+composite of basename BM25, content term frequency, backlink count, and
+recency. Results are cached with incremental invalidation (`.napkin/search-cache.json`),
+so repeat searches stay fast even on large vaults.
 
 ---
 
@@ -50,7 +51,7 @@ napkin daily append "- [ ] Review PR"
 napkin is also a library. No CLI, no stdout - just data:
 
 ```typescript
-import { Napkin } from "napkin-ai";
+import { Napkin } from "@cad0p/napkin";
 
 // Always works - creates bare vault if needed
 const n = new Napkin("/path/to/project");
@@ -110,7 +111,7 @@ napkin includes agentic retrieval benchmarks in `bench/`. The headline result is
 | S | ~40 | **91.0%** | 86% | 64% |
 | M | ~500 | **83.0%** | 72% | n/a |
 
-Zero preprocessing. No embeddings, no graphs, no summaries. Just BM25 search on markdown files.
+Zero preprocessing. No embeddings, no graphs, no summaries. Just BM25 on filenames plus a substring content scan, ranked with backlink and recency boosts.
 
 See [`bench/README.md`](bench/README.md) for details and usage.
 

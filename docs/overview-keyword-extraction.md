@@ -79,7 +79,7 @@ When a bigram is selected (e.g., "knowledge base"), its constituent unigrams ("k
 The final result is cached in `.napkin/overview-cache.json`, keyed by a
 whole-vault fingerprint (file paths + mtimes) plus the resolved options.
 Any file add, remove, or touch — including `NAPKIN.md` — invalidates it;
-so does changing `depth`, `keywords`, or `collapse`. A cache hit costs one
+so does changing `depth`, `keywords`, `collapse`, `collapseDepth`, `maxRows`, or `templates.folder`. A cache hit costs one
 stat pass instead of reading and tokenizing every note (~25ms vs ~1s on a
 5,000-note vault). Corrupt cache files are ignored and rebuilt.
 

@@ -113,7 +113,7 @@ Getting started:
 Reading:
   read <file>          Read a file (--section, --page)
   outline <file>       Show headings for a file (--format, --total)
-  search <query>       Search vault (BM25 + backlinks + recency) (--page, --context-lines)
+  search <query>       Search vault (basename BM25 + content scan + backlinks + recency) (--page, --context-lines)
 
 Writing:
   create <name>        Create a new file (--template, --content)
@@ -227,7 +227,9 @@ program
 
 program
   .command("search [query...]")
-  .description("Search vault (ranked by BM25 + backlinks + recency)")
+  .description(
+    "Search vault (ranked by basename BM25 + content scan + backlinks + recency)",
+  )
   .option("--query <text>", "Search query")
   .option("--path <folder>", "Limit to folder")
   .option("--limit <n>", "Max results (default: 30)")
