@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### ⚙️ Miscellaneous Tasks
+
+- Drop packageManager field — unblocks release action publish ([#55](https://github.com/cad0p/napkin/pull/55))
+
+
 ## [0.13.1] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
