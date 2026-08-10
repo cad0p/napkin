@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(update)* Detect the actual package manager instead of guessing from PATH ([#53](https://github.com/cad0p/napkin/pull/53))
+
+
 ## [0.13.0] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
