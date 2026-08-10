@@ -49,6 +49,63 @@ napkin config set --key search.limit --value 50
 |-----|---------|-------------|
 | `graph.renderer` | `"auto"` | How to render the graph. `auto` uses Glimpse on macOS, browser elsewhere. `glimpse` forces native window. `browser` forces browser |
 
+### ignore
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ignore.respectGitignore` | `true` | Honor `.gitignore` at the vault root (gitignore-style patterns) |
+| `ignore.dotfiles` | `true` | Exclude dot-prefixed files and folders (Obsidian "hidden files" parity) |
+
+## Ignore rules
+
+napkin can exclude files and directories from enumeration (search, overview,
+links, tags, tasks, templates, graph, file listings, …) and from
+basename/wikilink resolution. Three sources are unioned — a path is ignored
+when **any** of them matches, all evaluated on **vault-relative** paths:
+
+1. **`.napkinignore`** — a gitignore-style pattern file at the vault root,
+   always honored when present (an empty file is a no-op). No config flag;
+   presence-based.
+2. **`.gitignore`** — the vault-root file, honored when
+   `ignore.respectGitignore: true` (default). Only the vault root is
+   consulted: nested `.gitignore` files and monorepo roots above the vault
+   do **not** apply.
+3. **Dotfiles rule** — `ignore.dotfiles: true` (default) excludes
+   dot-prefixed entries, files **and** folders. When `false`, dotfiles and
+   dotdirs surface everywhere.
+
+Pattern semantics are gitignore's: `*`, `**`, trailing-slash dir-only
+patterns, comments, and negation (`!`). Negation works **within** each
+source — a `.napkinignore` line cannot un-ignore a file matched by
+`.gitignore` (and neither can un-ignore the dotfiles rule).
+
+```bash
+# .napkinignore at the vault root
+# Ignore a file
+private-notes.md
+
+# Ignore a directory (and everything under it)
+build/
+
+# Ignore by extension anywhere
+*.tmp
+
+# Keep something matched above
+!important.tmp
+```
+
+### Read semantics
+
+Ignore is **index-only**: ignored files are excluded from enumeration and from
+basename/wikilink resolution, so `napkin read "Note"` on an ignored note says
+not found. The escape hatch is an **exact path** — `napkin read <path>` works
+regardless of ignore state (an explicit path is an explicit intent).
+`linksBack` and backlinks treat ignored files as nonexistent.
+
+Changing the config or either ignore file invalidates the search cache (the
+cache embeds an ignore fingerprint), so results reflect the new state without
+manual invalidation.
+
 ### distill
 
 The `distill.*` keys are consumed by the **pi-napkin distill extension**, not by
@@ -68,6 +125,8 @@ project/
     search-cache.json      # Search index cache (auto-managed)
     overview-cache.json    # Overview result cache (auto-managed)
     .obsidian/             # Auto-synced from config.json
+  .napkinignore            # Optional: gitignore-style ignore patterns
+  .gitignore               # Optional: respected when ignore.respectGitignore is on
 ```
 
 The cache files are keyed by a fingerprint of vault file mtimes and rebuild

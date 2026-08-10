@@ -18,6 +18,13 @@ composite of basename BM25, content term frequency, backlink count, and
 recency. Results are cached with incremental invalidation (`.napkin/search-cache.json`),
 so repeat searches stay fast even on large vaults.
 
+Vault content can be excluded with a `.napkinignore` file at the vault root
+(gitignore-style patterns), by respecting the vault-root `.gitignore`, and via
+a dotfiles rule (all on by default, tunable under the `ignore` config section)
+— see [docs/configuration.md](docs/configuration.md). Ignored files are hidden
+from enumeration and basename resolution, but `napkin read <exact-path>` still
+works.
+
 ---
 
 ## Quick Start
