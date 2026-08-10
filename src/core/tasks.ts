@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { listFiles, resolveFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import { extractTasks, type Task } from "../utils/markdown.js";
 import type { VaultInfo } from "../utils/vault.js";
 import { getDailyPath } from "./daily.js";
@@ -21,16 +22,17 @@ export function collectTasks(
   vault: VaultInfo,
   opts: { file?: string; daily?: boolean },
 ): TaskWithFile[] {
+  const ignore = loadIgnorer(vault.contentPath, vault.configPath);
   let files: string[];
 
   if (opts.daily) {
     const dp = getDailyPath(vault.configPath);
     files = fs.existsSync(path.join(vault.contentPath, dp)) ? [dp] : [];
   } else if (opts.file) {
-    const r = resolveFile(vault.contentPath, opts.file);
+    const r = resolveFile(vault.contentPath, opts.file, ignore);
     files = r ? [r.path] : [];
   } else {
-    files = listFiles(vault.contentPath, { ext: "md" });
+    files = listFiles(vault.contentPath, { ext: "md", ignore });
   }
 
   const results: TaskWithFile[] = [];
@@ -67,12 +69,13 @@ export function resolveTaskLocation(
     daily?: boolean;
   },
 ): { filePath: string; lineNum: number } {
+  const ignore = loadIgnorer(vault.contentPath, vault.configPath);
   if (opts.ref) {
     const parts = opts.ref.split(":");
     if (parts.length !== 2) {
       throw new Error("Invalid ref format. Use --ref <path:line>");
     }
-    const resolved = resolveFile(vault.contentPath, parts[0]);
+    const resolved = resolveFile(vault.contentPath, parts[0], ignore);
     if (!resolved) {
       throw new Error(`File not found: ${parts[0]}`);
     }
@@ -90,7 +93,7 @@ export function resolveTaskLocation(
     throw new Error("Specify --file and --line, or --ref <path:line>");
   }
 
-  const resolved = resolveFile(vault.contentPath, opts.file);
+  const resolved = resolveFile(vault.contentPath, opts.file, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${opts.file}`);
   }

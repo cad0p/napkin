@@ -1,6 +1,7 @@
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import {
   dim,
   error,
@@ -18,6 +19,7 @@ export async function backlinks(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -29,7 +31,10 @@ export async function backlinks(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -48,6 +53,7 @@ export async function links(
   opts: OutputOptions & { vault?: string; file?: string; total?: boolean },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -59,7 +65,10 @@ export async function links(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;

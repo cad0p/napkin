@@ -102,6 +102,7 @@ import { getVaultMetadata, type VaultMetadata } from "./core/vault.js";
 import { getWordCount, type WordCount } from "./core/wordcount.js";
 import { registerTemplate } from "./templates/index.js";
 import type { VaultTemplate } from "./templates/types.js";
+import { type Ignorer, loadIgnorer } from "./utils/ignore.js";
 import type { Heading } from "./utils/markdown.js";
 import { findVault, type VaultInfo } from "./utils/vault.js";
 
@@ -110,6 +111,11 @@ export class Napkin {
 
   constructor(path: string) {
     this.vault = findVault(path);
+  }
+
+  /** Ignorer for this vault (memoized by fingerprint — cheap on repeat). */
+  private ignorer(): Ignorer {
+    return loadIgnorer(this.vault.contentPath, this.vault.configPath);
   }
 
   // ── Vault ───────────────────────────────────────────────────────
@@ -151,7 +157,7 @@ export class Napkin {
   // ── CRUD ────────────────────────────────────────────────────────
 
   read(file: string, opts?: ReadOptions): ReadResult {
-    return readFile(this.vault.contentPath, file, opts);
+    return readFile(this.vault.contentPath, file, opts, this.ignorer());
   }
 
   create(opts: CreateOptions): CreateResult {
@@ -159,49 +165,61 @@ export class Napkin {
   }
 
   append(file: string, content: string, inline?: boolean): string {
-    return appendFile(this.vault.contentPath, file, content, inline);
+    return appendFile(
+      this.vault.contentPath,
+      file,
+      content,
+      inline,
+      this.ignorer(),
+    );
   }
 
   prepend(file: string, content: string, inline?: boolean): string {
-    return prependFile(this.vault.contentPath, file, content, inline);
+    return prependFile(
+      this.vault.contentPath,
+      file,
+      content,
+      inline,
+      this.ignorer(),
+    );
   }
 
   move(file: string, destination: string): MoveResult {
-    return moveFile(this.vault.contentPath, file, destination);
+    return moveFile(this.vault.contentPath, file, destination, this.ignorer());
   }
 
   rename(file: string, newName: string): MoveResult {
-    return renameFile(this.vault.contentPath, file, newName);
+    return renameFile(this.vault.contentPath, file, newName, this.ignorer());
   }
 
   delete(file: string, permanent?: boolean): DeleteResult {
-    return deleteFile(this.vault.contentPath, file, permanent);
+    return deleteFile(this.vault.contentPath, file, permanent, this.ignorer());
   }
 
   // ── Files ───────────────────────────────────────────────────────
 
   fileInfo(file: string): FileInfo {
-    return getFileInfoResolved(this.vault.contentPath, file);
+    return getFileInfoResolved(this.vault.contentPath, file, this.ignorer());
   }
 
   fileList(opts?: { folder?: string; ext?: string }): string[] {
-    return getFileList(this.vault.contentPath, opts);
+    return getFileList(this.vault.contentPath, opts, this.ignorer());
   }
 
   folders(parentFolder?: string): string[] {
-    return getFolderList(this.vault.contentPath, parentFolder);
+    return getFolderList(this.vault.contentPath, parentFolder, this.ignorer());
   }
 
   folderInfo(folderPath: string): FolderInfo {
-    return getFolderInfo(this.vault.contentPath, folderPath);
+    return getFolderInfo(this.vault.contentPath, folderPath, this.ignorer());
   }
 
   outline(file: string): Heading[] {
-    return getOutline(this.vault.contentPath, file);
+    return getOutline(this.vault.contentPath, file, this.ignorer());
   }
 
   wordcount(file: string): WordCount {
-    return getWordCount(this.vault.contentPath, file);
+    return getWordCount(this.vault.contentPath, file, this.ignorer());
   }
 
   // ── Daily ───────────────────────────────────────────────────────
@@ -232,30 +250,34 @@ export class Napkin {
     tagCounts: Map<string, number>;
     tagFiles: Map<string, string[]>;
   } {
-    return collectTags(this.vault.contentPath, fileFilter);
+    return collectTags(this.vault.contentPath, fileFilter, this.ignorer());
   }
 
   tagInfo(tagName: string): TagInfo {
-    return getTagInfo(this.vault.contentPath, tagName);
+    return getTagInfo(this.vault.contentPath, tagName, this.ignorer());
   }
 
   // ── Aliases ─────────────────────────────────────────────────────
 
   aliases(fileFilter?: string): AliasEntry[] {
-    return collectAliases(this.vault.contentPath, fileFilter);
+    return collectAliases(this.vault.contentPath, fileFilter, this.ignorer());
   }
 
   // ── Properties ──────────────────────────────────────────────────
 
   properties(fileFilter?: string): Map<string, number> {
-    return collectProperties(this.vault.contentPath, fileFilter);
+    return collectProperties(
+      this.vault.contentPath,
+      fileFilter,
+      this.ignorer(),
+    );
   }
 
   propertyGet(
     file: string,
     name: string,
   ): { property: string; value: unknown } {
-    return readProperty(this.vault.contentPath, file, name);
+    return readProperty(this.vault.contentPath, file, name, this.ignorer());
   }
 
   propertySet(
@@ -263,14 +285,20 @@ export class Napkin {
     name: string,
     value: string,
   ): { path: string; property: string; value: unknown } {
-    return setProperty(this.vault.contentPath, file, name, value);
+    return setProperty(
+      this.vault.contentPath,
+      file,
+      name,
+      value,
+      this.ignorer(),
+    );
   }
 
   propertyRemove(
     file: string,
     name: string,
   ): { path: string; removed: string } {
-    return removeProperty(this.vault.contentPath, file, name);
+    return removeProperty(this.vault.contentPath, file, name, this.ignorer());
   }
 
   // ── Tasks ───────────────────────────────────────────────────────
@@ -307,23 +335,23 @@ export class Napkin {
   // ── Links ───────────────────────────────────────────────────────
 
   linksOut(file: string): string[] {
-    return getOutgoingLinks(this.vault.contentPath, file);
+    return getOutgoingLinks(this.vault.contentPath, file, this.ignorer());
   }
 
   linksBack(file: string): string[] {
-    return getBacklinks(this.vault.contentPath, file);
+    return getBacklinks(this.vault.contentPath, file, this.ignorer());
   }
 
   linksUnresolved(): [string, string[]][] {
-    return getUnresolvedLinks(this.vault.contentPath);
+    return getUnresolvedLinks(this.vault.contentPath, this.ignorer());
   }
 
   orphans(): string[] {
-    return getOrphans(this.vault.contentPath);
+    return getOrphans(this.vault.contentPath, this.ignorer());
   }
 
   deadends(): string[] {
-    return getDeadends(this.vault.contentPath);
+    return getDeadends(this.vault.contentPath, this.ignorer());
   }
 
   // ── Templates ───────────────────────────────────────────────────
@@ -380,11 +408,15 @@ export class Napkin {
   // ── Bases ───────────────────────────────────────────────────────
 
   bases(): string[] {
-    return listBases(this.vault.contentPath);
+    return listBases(this.vault.contentPath, this.ignorer());
   }
 
   baseViews(opts: { file?: string; path?: string }): BaseView[] {
-    const baseFile = resolveBaseFile(this.vault.contentPath, opts);
+    const baseFile = resolveBaseFile(
+      this.vault.contentPath,
+      opts,
+      this.ignorer(),
+    );
     if (!baseFile) throw new Error("Base file not found");
     return getBaseViews(this.vault.contentPath, baseFile);
   }
@@ -393,9 +425,18 @@ export class Napkin {
     opts: { file?: string; path?: string },
     viewName?: string,
   ): Promise<BaseQueryResult> {
-    const baseFile = resolveBaseFile(this.vault.contentPath, opts);
+    const baseFile = resolveBaseFile(
+      this.vault.contentPath,
+      opts,
+      this.ignorer(),
+    );
     if (!baseFile) throw new Error("Base file not found");
-    return queryBaseFile(this.vault.contentPath, baseFile, viewName);
+    return queryBaseFile(
+      this.vault.contentPath,
+      baseFile,
+      viewName,
+      this.ignorer(),
+    );
   }
 
   baseCreate(opts: { name: string; path?: string; content?: string }): {
@@ -408,11 +449,11 @@ export class Napkin {
   // ── Canvas ──────────────────────────────────────────────────────
 
   canvases(): string[] {
-    return listCanvases(this.vault.contentPath);
+    return listCanvases(this.vault.contentPath, this.ignorer());
   }
 
   canvasRead(file: string): { canvas: Canvas; filePath: string } {
-    return resolveCanvas(this.vault.contentPath, file);
+    return resolveCanvas(this.vault.contentPath, file, this.ignorer());
   }
 
   canvasCreate(
@@ -438,7 +479,7 @@ export class Napkin {
       color?: string;
     },
   ): { id: string; type: string; added: boolean } {
-    return addCanvasNode(this.vault.contentPath, file, opts);
+    return addCanvasNode(this.vault.contentPath, file, opts, this.ignorer());
   }
 
   canvasAddEdge(
@@ -452,14 +493,19 @@ export class Napkin {
       color?: string;
     },
   ): { id: string; from: string; to: string; added: boolean } {
-    return addCanvasEdge(this.vault.contentPath, file, opts);
+    return addCanvasEdge(this.vault.contentPath, file, opts, this.ignorer());
   }
 
   canvasRemoveNode(
     file: string,
     nodeId: string,
   ): { id: string; removed: boolean } {
-    return removeCanvasNode(this.vault.contentPath, file, nodeId);
+    return removeCanvasNode(
+      this.vault.contentPath,
+      file,
+      nodeId,
+      this.ignorer(),
+    );
   }
 
   // ── Init (static) ──────────────────────────────────────────────

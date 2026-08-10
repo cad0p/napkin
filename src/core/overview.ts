@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
 import { listFiles } from "../utils/files.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
+import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import { extractHeadings, extractTags } from "../utils/markdown.js";
 import {
   loadOverviewCache,
@@ -659,8 +660,9 @@ function buildOverviewFolders(
   collapse: boolean,
   collapseDepth: number,
   maxRows: number,
+  ignore?: Ignorer,
 ): { folders: OverviewFolder[]; warnings: string[] } {
-  const files = listFiles(vaultPath, { ext: "md" });
+  const files = listFiles(vaultPath, { ext: "md", ignore });
   const warnings: string[] = [];
   const folderFiles = groupFilesByFolder(files, templatesFolder);
   let folderData = new Map<string, FolderData>();
@@ -735,9 +737,9 @@ function buildOverviewFolders(
  * cache must treat a frozen-mtime content rewrite as invisible, so it
  * fingerprints independently.
  */
-function overviewFingerprint(contentPath: string): string {
+function overviewFingerprint(contentPath: string, ignore?: Ignorer): string {
   const entries: string[] = [];
-  for (const file of listFiles(contentPath, { ext: "md" })) {
+  for (const file of listFiles(contentPath, { ext: "md", ignore })) {
     const stat = fs.statSync(path.join(contentPath, file));
     entries.push(`${file}:${stat.mtimeMs}`);
   }
@@ -756,6 +758,7 @@ export function getOverview(
   },
 ): VaultOverview {
   const config = loadConfig(configPath);
+  const ignorer = loadIgnorer(contentPath, configPath);
   const maxDepth = opts?.depth ?? config.overview.depth;
   const maxKeywords = opts?.keywords ?? config.overview.keywords;
   const collapse = opts?.collapse ?? config.overview.collapse;
@@ -766,7 +769,7 @@ export function getOverview(
   // note. Any file add/remove/touch changes the fingerprint; NAPKIN.md is a
   // vault .md file, so context changes invalidate too. Resolved options are
   // part of the key because they change the result.
-  const fingerprint = overviewFingerprint(contentPath);
+  const fingerprint = overviewFingerprint(contentPath, ignorer);
   const optionsKey = `${maxDepth}|${maxKeywords}|${collapse}|${collapseDepth}|${maxRows}|${config.templates.folder}`;
   const cached = loadOverviewCache<VaultOverview>(
     configPath,
@@ -783,6 +786,7 @@ export function getOverview(
     collapse,
     collapseDepth,
     maxRows,
+    ignorer,
   );
 
   const contextPath = path.join(contentPath, "NAPKIN.md");

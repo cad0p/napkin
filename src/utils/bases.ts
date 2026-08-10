@@ -5,6 +5,7 @@ import initSqlJs, { type Database } from "sql.js";
 import { listFiles } from "./files.js";
 import { createFormulaEngine, evaluateFormulas } from "./formula.js";
 import { parseFrontmatter } from "./frontmatter.js";
+import type { Ignorer } from "./ignore.js";
 import { extractLinks, extractTags } from "./markdown.js";
 
 export interface BaseView {
@@ -36,11 +37,14 @@ export function parseBaseFile(content: string): BaseConfig {
  * Build an in-memory SQLite database from vault files.
  * Creates a `files` table with columns for file metadata and all frontmatter properties.
  */
-export async function buildDatabase(vaultPath: string): Promise<Database> {
+export async function buildDatabase(
+  vaultPath: string,
+  ignore?: Ignorer,
+): Promise<Database> {
   const SQL = await initSqlJs();
   const db = new SQL.Database();
 
-  const files = listFiles(vaultPath, { ext: "md" });
+  const files = listFiles(vaultPath, { ext: "md", ignore });
 
   // First pass: collect all property names across the vault
   const allProps = new Set<string>();

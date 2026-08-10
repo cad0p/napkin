@@ -3,6 +3,7 @@ import type { FileInfo, FolderInfo } from "../core/files.js";
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND } from "../utils/exit-codes.js";
 import { resolveFile, suggestFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import {
   bold,
   dim,
@@ -17,6 +18,7 @@ export async function file(
   opts: OutputOptions & { vault?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   if (!fileRef) {
     error("No file specified. Usage: obsidian-cli file <name>");
     process.exit(EXIT_NOT_FOUND);
@@ -28,7 +30,7 @@ export async function file(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef));
+      fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef, ignore));
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -143,13 +145,14 @@ export async function open(
   opts: OutputOptions & { vault?: string; newtab?: boolean },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   const vaultName = encodeURIComponent(n.vault.name);
 
   let uri: string;
   if (fileRef) {
-    const resolved = resolveFile(n.vault.contentPath, fileRef);
+    const resolved = resolveFile(n.vault.contentPath, fileRef, ignore);
     if (!resolved) {
-      fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef));
+      fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef, ignore));
       process.exit(EXIT_NOT_FOUND);
     }
     const encodedFile = encodeURIComponent(resolved.path.replace(/\.md$/, ""));

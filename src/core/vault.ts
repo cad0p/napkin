@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import { listFiles, listFolders, walkDir } from "../utils/files.js";
+import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 export interface VaultMetadata {
@@ -10,7 +11,7 @@ export interface VaultMetadata {
   size: number;
 }
 
-function getVaultSize(vaultPath: string): number {
+function getVaultSize(vaultPath: string, ignore?: Ignorer): number {
   let total = 0;
   walkDir(vaultPath, {
     onEntry: (fullPath, _entry, kind) => {
@@ -21,6 +22,12 @@ function getVaultSize(vaultPath: string): number {
         // Entry disappeared between readdir and stat — skip.
       }
     },
+    // Direct walkDir call: root === vaultPath, so relToRoot IS vault-relative.
+    // Dirs get a trailing "/" so dir-only gitignore patterns match them.
+    ignore: ignore
+      ? (relToRoot, kind) =>
+          ignore.ignores(kind === "dir" ? `${relToRoot}/` : relToRoot)
+      : undefined,
   });
   return total;
 }
@@ -32,9 +39,10 @@ export function formatSize(bytes: number): string {
 }
 
 export function getVaultMetadata(v: VaultInfo): VaultMetadata {
-  const files = listFiles(v.contentPath);
-  const folders = listFolders(v.contentPath);
-  const size = getVaultSize(v.contentPath);
+  const ignore = loadIgnorer(v.contentPath, v.configPath);
+  const files = listFiles(v.contentPath, { ignore });
+  const folders = listFolders(v.contentPath, undefined, ignore);
+  const size = getVaultSize(v.contentPath, ignore);
 
   return {
     name: v.name,

@@ -1,6 +1,7 @@
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import {
   error,
   fileNotFound,
@@ -55,6 +56,7 @@ export async function propertySet(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   if (!opts.name || opts.value === undefined) {
     error("Usage: property:set --name <name> --value <value> --file <file>");
     process.exit(EXIT_USER_ERROR);
@@ -70,7 +72,10 @@ export async function propertySet(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -87,6 +92,7 @@ export async function propertyRemove(
   opts: OutputOptions & { vault?: string; file?: string; name?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   if (!opts.name) {
     error("No property name specified. Use --name <name>");
     process.exit(EXIT_USER_ERROR);
@@ -102,7 +108,10 @@ export async function propertyRemove(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -118,6 +127,7 @@ export async function propertyRead(
   opts: OutputOptions & { vault?: string; file?: string; name?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
   if (!opts.name) {
     error("No property name specified. Use --name <name>");
     process.exit(EXIT_USER_ERROR);
@@ -133,7 +143,10 @@ export async function propertyRead(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;

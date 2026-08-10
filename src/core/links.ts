@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { listFiles, resolveFile } from "../utils/files.js";
+import type { Ignorer } from "../utils/ignore.js";
 import { extractLinks } from "../utils/markdown.js";
 
 export interface VaultLinks {
@@ -9,8 +10,11 @@ export interface VaultLinks {
   unresolved: Map<string, string[]>;
 }
 
-export function buildLinkIndex(vaultPath: string): VaultLinks {
-  const files = listFiles(vaultPath, { ext: "md" });
+export function buildLinkIndex(
+  vaultPath: string,
+  ignore?: Ignorer,
+): VaultLinks {
+  const files = listFiles(vaultPath, { ext: "md", ignore });
   const outgoing = new Map<string, string[]>();
   const incoming = new Map<string, string[]>();
   const unresolved = new Map<string, string[]>();
@@ -23,7 +27,7 @@ export function buildLinkIndex(vaultPath: string): VaultLinks {
     outgoing.set(file, links.outgoing);
 
     for (const target of links.wikilinks) {
-      const resolved = resolveFile(vaultPath, target);
+      const resolved = resolveFile(vaultPath, target, ignore);
       if (resolved) {
         if (!incoming.has(resolved.path)) incoming.set(resolved.path, []);
         incoming.get(resolved.path)?.push(file);
@@ -37,17 +41,25 @@ export function buildLinkIndex(vaultPath: string): VaultLinks {
   return { outgoing, incoming, unresolved };
 }
 
-export function getBacklinks(vaultPath: string, fileRef: string): string[] {
-  const resolved = resolveFile(vaultPath, fileRef);
+export function getBacklinks(
+  vaultPath: string,
+  fileRef: string,
+  ignore?: Ignorer,
+): string[] {
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
-  const { incoming } = buildLinkIndex(vaultPath);
+  const { incoming } = buildLinkIndex(vaultPath, ignore);
   return incoming.get(resolved.path) || [];
 }
 
-export function getOutgoingLinks(vaultPath: string, fileRef: string): string[] {
-  const resolved = resolveFile(vaultPath, fileRef);
+export function getOutgoingLinks(
+  vaultPath: string,
+  fileRef: string,
+  ignore?: Ignorer,
+): string[] {
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
@@ -56,21 +68,24 @@ export function getOutgoingLinks(vaultPath: string, fileRef: string): string[] {
   return outgoing;
 }
 
-export function getUnresolvedLinks(vaultPath: string): [string, string[]][] {
-  const { unresolved } = buildLinkIndex(vaultPath);
+export function getUnresolvedLinks(
+  vaultPath: string,
+  ignore?: Ignorer,
+): [string, string[]][] {
+  const { unresolved } = buildLinkIndex(vaultPath, ignore);
   return [...unresolved.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 }
 
-export function getOrphans(vaultPath: string): string[] {
-  const { incoming } = buildLinkIndex(vaultPath);
+export function getOrphans(vaultPath: string, ignore?: Ignorer): string[] {
+  const { incoming } = buildLinkIndex(vaultPath, ignore);
   return [...incoming.entries()]
     .filter(([_, links]) => links.length === 0)
     .map(([file]) => file)
     .sort();
 }
 
-export function getDeadends(vaultPath: string): string[] {
-  const { outgoing } = buildLinkIndex(vaultPath);
+export function getDeadends(vaultPath: string, ignore?: Ignorer): string[] {
+  const { outgoing } = buildLinkIndex(vaultPath, ignore);
   return [...outgoing.entries()]
     .filter(([_, links]) => links.length === 0)
     .map(([file]) => file)
