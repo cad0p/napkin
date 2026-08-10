@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-08-10
+
+<!-- USER-EDITABLE SECTION START -->
+- **Ignore support** (upstream [#20](https://github.com/Michaelliv/napkin/issues/20), fork-first): napkin now excludes files and directories from indexing and basename resolution via three unioned sources:
+  - `.napkinignore` at the vault root — gitignore-style patterns, honored whenever present (no config needed)
+  - `.gitignore` at the vault root — honored by default (`ignore.respectGitignore: true`)
+  - dot-prefixed entries (files and folders) — Obsidian "hidden files" parity (`ignore.dotfiles: true`, opt-out)
+  - Scope: vault root only (no nested `.gitignore`/`.napkinignore`, no walking above the vault); negation (`!`) works within each file; union across sources
+  - Index-only semantics: ignored files are hidden from search/overview/links/templates/graph but `napkin read <exact-path>` still works (basename resolution of ignored files fails) — documented in `docs/configuration.md`
+  - Search-cache invalidation: ignore state is fingerprinted into `search-cache.json`, so any ignore change (config toggle, `.napkinignore`, or `.gitignore` edit) triggers a cold rebuild — no manual cache clearing
+  - New dependency: `ignore` (gitignore matcher)
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Ignore support — .napkinignore + .gitignore + dotfiles (upstream #20) ([#51](https://github.com/cad0p/napkin/pull/51))
+
+
 ## [0.12.4] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
