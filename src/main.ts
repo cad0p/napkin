@@ -108,7 +108,7 @@ Getting started:
   vault                Show vault info (path, file count, size)
   config               Vault configuration (show, get, set)
   graph                Interactive vault graph visualization
-  update               Update the napkin CLI via pnpm (or npm fallback)
+  update               Update the napkin CLI via its original package manager
 
 Reading:
   read <file>          Read a file (--section, --page)
