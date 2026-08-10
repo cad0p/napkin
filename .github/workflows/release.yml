@@ -3,12 +3,6 @@ name: Auto Release
 on:
   push:
     branches: [main, 'release/*']
-  workflow_dispatch:
-    inputs:
-      publish_version:
-        description: 'Manually publish this version to npm (e.g. v0.13.1). Escapes the base-version publish when the tag already exists (calver path).'
-        required: false
-        default: ''
 
 permissions:
   contents: write
@@ -29,9 +23,7 @@ jobs:
 
   publish:
     needs: release
-    if: >
-      github.ref == 'refs/heads/main' &&
-      (needs.release.outputs.has_changes == 'true' || inputs.publish_version != '')
+    if: github.ref == 'refs/heads/main' && needs.release.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -39,4 +31,4 @@ jobs:
     steps:
       - uses: cad0p/semver-calver-release/npm-publish@v1
         with:
-          tag: ${{ inputs.publish_version != '' && inputs.publish_version || format('v{0}', needs.release.outputs.version) }}
+          tag: v${{ needs.release.outputs.version }}
