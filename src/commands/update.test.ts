@@ -13,6 +13,7 @@ import {
 
 const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const yarnCommand = process.platform === "win32" ? "yarn.cmd" : "yarn";
 
 /** Fixed npm resolver so tests are deterministic regardless of host PATH. */
 const npmOnly: PackageManagerResolver = () => ({
@@ -184,6 +185,28 @@ describe("resolvePackageManager", () => {
       command: npmCommand,
       args: ["install", "-g", "@cad0p/napkin@latest"],
       method: "npm",
+    });
+  });
+
+  test("reuses yarn when the running module sits under yarn's global dir", () => {
+    const root = join(base, ".config", "yarn", "global");
+    const modulePath = moduleUnder(".config/yarn/global/node_modules/@cad0p/napkin");
+    expect(
+      resolvePackageManager(modulePath, () => [root, join(root, "node_modules")]),
+    ).toEqual({
+      command: yarnCommand,
+      args: ["global", "add", "@cad0p/napkin@latest"],
+      method: "yarn",
+    });
+  });
+
+  test("reuses bun when the running module sits under bun's global root", () => {
+    const root = join(base, ".bun", "install", "global", "node_modules");
+    const modulePath = moduleUnder(".bun/install/global/node_modules/@cad0p/napkin");
+    expect(resolvePackageManager(modulePath, () => [root])).toEqual({
+      command: "bun",
+      args: ["add", "-g", "@cad0p/napkin@latest"],
+      method: "bun",
     });
   });
 
