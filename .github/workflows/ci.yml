@@ -13,12 +13,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
         with:
-          # Pinned explicitly (was previously read from the dropped
-          # `packageManager` field — which conflicts with the release
-          # action's own pnpm pin, see #160). Keep in sync with the
-          # lockfile; a pnpm release regression can't break CI without
-          # an explicit bump here.
-          version: 11.15.0
+          # Major-only pin: resolves the latest 11.x. Previously read from
+          # the `packageManager` field — dropped because it conflicts with
+          # the release action's own pnpm pin (see #160). Same style as the
+          # release action's `version: 11`.
+          version: 11
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
