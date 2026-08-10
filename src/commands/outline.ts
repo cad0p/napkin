@@ -19,7 +19,10 @@ export async function outline(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);

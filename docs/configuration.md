@@ -102,6 +102,15 @@ not found. The escape hatch is an **exact path** — `napkin read <path>` works
 regardless of ignore state (an explicit path is an explicit intent).
 `linksBack` and backlinks treat ignored files as nonexistent.
 
+Templates resolve via the constructed exact path `Templates/<name>` (the
+configured `templates.folder`), so an ignored template is still readable and
+insertable by bare name while staying hidden from `napkin template list`.
+
+With `ignore.dotfiles: false`, `.gitignore` appears in `napkin file list` and
+vault size — it is a user file like any other. `.napkinignore`, by contrast,
+is napkin-internal and stays hidden from listings regardless of the dotfiles
+rule.
+
 Changing the config or either ignore file invalidates the search cache (the
 cache embeds an ignore fingerprint), so results reflect the new state without
 manual invalidation.

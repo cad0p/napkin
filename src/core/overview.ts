@@ -758,7 +758,7 @@ export function getOverview(
   },
 ): VaultOverview {
   const config = loadConfig(configPath);
-  const ignorer = loadIgnorer(contentPath, configPath);
+  const { ignorer } = loadIgnorer(contentPath, configPath);
   const maxDepth = opts?.depth ?? config.overview.depth;
   const maxKeywords = opts?.keywords ?? config.overview.keywords;
   const collapse = opts?.collapse ?? config.overview.collapse;

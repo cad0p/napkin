@@ -64,7 +64,10 @@ export async function templateInsert(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   const templateName = opts.name;
   const targetFile = opts.file;
   if (!templateName) {

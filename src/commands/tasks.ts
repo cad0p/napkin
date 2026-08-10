@@ -73,7 +73,10 @@ export async function task(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
 
   let filePath: string;
   let lineNum: number;

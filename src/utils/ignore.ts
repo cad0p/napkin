@@ -23,6 +23,17 @@ export interface Ignorer {
 /** Shared no-op ignorer used when nothing is configured to ignore. */
 const NEVER_IGNORE: Ignorer = { ignores: () => false };
 
+/**
+ * A vault's ignore state: the compiled ignorer plus the fingerprint of the
+ * ignore-relevant inputs it was built from. Returning both lets callers that
+ * persist caches (search) reuse the single fingerprint computation instead of
+ * re-hashing the ignore files.
+ */
+export interface IgnoreState {
+  ignorer: Ignorer;
+  fingerprint: string;
+}
+
 // loadIgnorer is memoized per (contentPath, configPath, fingerprint) so
 // repeat callers (every command/core function holding VaultInfo) pay the
 // stat+hash cost once per ignore-state change instead of once per call.
@@ -55,21 +66,32 @@ function memoKey(
  *
  * Memoized by fingerprint — repeated calls are cheap; a change to the config
  * or either ignore file produces a new fingerprint and a fresh ignorer.
+ *
+ * Returns `{ ignorer, fingerprint }`: the fingerprint is the memo key's
+ * basis, so it is computed exactly once per call and handed back to callers
+ * that need it (e.g. search's disk-cache validity check).
  */
-export function loadIgnorer(contentPath: string, configPath: string): Ignorer {
+export function loadIgnorer(
+  contentPath: string,
+  configPath: string,
+): IgnoreState {
   const fingerprint = ignoreFingerprint(contentPath, configPath);
   const key = memoKey(contentPath, configPath, fingerprint);
   const cached = memo.get(key);
-  if (cached) return cached;
+  if (cached) return { ignorer: cached, fingerprint };
   const ignorer = buildIgnorer(contentPath, configPath);
   memo.set(key, ignorer);
-  return ignorer;
+  return { ignorer, fingerprint };
 }
 
 /**
  * md5 fingerprint of the ignore-relevant state: the `ignore.*` config values
- * plus both ignore files' {mtime, size} (absent file = "none" marker). The
+ * plus the ignore files' {mtime, size} (absent file = "none" marker). The
  * search cache folds this in so any ignore change triggers a cold rebuild.
+ *
+ * `.gitignore` is only hashed when `respectGitignore` is true — when the
+ * flag is off the file has no effect on ignore state, so editing it must not
+ * invalidate the cache.
  */
 export function ignoreFingerprint(
   contentPath: string,
@@ -81,7 +103,9 @@ export function ignoreFingerprint(
     `respectGitignore=${config.ignore.respectGitignore}\ndotfiles=${config.ignore.dotfiles}\n`,
   );
   hash.update(fileSig(path.join(contentPath, NAPKINIGNORE_FILE)));
-  hash.update(fileSig(path.join(contentPath, GITIGNORE_FILE)));
+  if (config.ignore.respectGitignore) {
+    hash.update(fileSig(path.join(contentPath, GITIGNORE_FILE)));
+  }
   return hash.digest("hex");
 }
 

@@ -144,7 +144,7 @@ export function readFile(
 }
 
 export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
-  const ignore = loadIgnorer(v.contentPath, v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   let targetPath: string;
   if (opts.path) {
     targetPath = opts.path.endsWith(".md") ? opts.path : `${opts.path}.md`;

@@ -12,7 +12,7 @@ function getTemplateFolder(configPath: string): string {
 
 export function listTemplates(v: VaultInfo): string[] {
   const folder = getTemplateFolder(v.configPath);
-  const ignore = loadIgnorer(v.contentPath, v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   return listFiles(v.contentPath, { folder, ext: "md", ignore }).map((f) =>
     path.basename(f, ".md"),
   );
@@ -34,7 +34,7 @@ export function readTemplate(
   opts?: { resolve?: boolean; title?: string },
 ): { template: string; content: string } {
   const folder = getTemplateFolder(v.configPath);
-  const ignore = loadIgnorer(v.contentPath, v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   const resolved =
     resolveFile(v.contentPath, `${folder}/${name}`, ignore) ||
     resolveFile(v.contentPath, name, ignore);
@@ -67,7 +67,7 @@ export function insertTemplate(
   fileRef: string,
 ): { file: string; template: string; inserted: boolean } {
   const folder = getTemplateFolder(v.configPath);
-  const ignore = loadIgnorer(v.contentPath, v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   const templateResolved =
     resolveFile(v.contentPath, `${folder}/${templateName}`, ignore) ||
     resolveFile(v.contentPath, templateName, ignore);

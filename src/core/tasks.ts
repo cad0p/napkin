@@ -22,7 +22,7 @@ export function collectTasks(
   vault: VaultInfo,
   opts: { file?: string; daily?: boolean },
 ): TaskWithFile[] {
-  const ignore = loadIgnorer(vault.contentPath, vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(vault.contentPath, vault.configPath);
   let files: string[];
 
   if (opts.daily) {
@@ -69,7 +69,7 @@ export function resolveTaskLocation(
     daily?: boolean;
   },
 ): { filePath: string; lineNum: number } {
-  const ignore = loadIgnorer(vault.contentPath, vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(vault.contentPath, vault.configPath);
   if (opts.ref) {
     const parts = opts.ref.split(":");
     if (parts.length !== 2) {

@@ -21,7 +21,10 @@ export async function read(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!fileRef) {
     error("No file specified. Usage: napkin read <file>");
     process.exit(EXIT_USER_ERROR);
@@ -110,7 +113,10 @@ export async function append(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use: napkin append <file> [content]");
     process.exit(EXIT_USER_ERROR);
@@ -153,7 +159,10 @@ export async function prepend(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use: napkin prepend <file> [content]");
     process.exit(EXIT_USER_ERROR);
@@ -191,7 +200,10 @@ export async function move(
   opts: OutputOptions & { vault?: string; file?: string; to?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -226,7 +238,10 @@ export async function rename(
   opts: OutputOptions & { vault?: string; file?: string; name?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -261,7 +276,10 @@ export async function del(
   opts: OutputOptions & { vault?: string; file?: string; permanent?: boolean },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);

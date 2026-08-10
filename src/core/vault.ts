@@ -39,7 +39,7 @@ export function formatSize(bytes: number): string {
 }
 
 export function getVaultMetadata(v: VaultInfo): VaultMetadata {
-  const ignore = loadIgnorer(v.contentPath, v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   const files = listFiles(v.contentPath, { ignore });
   const folders = listFolders(v.contentPath, undefined, ignore);
   const size = getVaultSize(v.contentPath, ignore);

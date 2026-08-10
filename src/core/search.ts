@@ -3,11 +3,7 @@ import * as path from "node:path";
 import MiniSearch from "minisearch";
 import { loadConfig } from "../utils/config.js";
 import { listFiles } from "../utils/files.js";
-import {
-  type Ignorer,
-  ignoreFingerprint,
-  loadIgnorer,
-} from "../utils/ignore.js";
+import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
   diffFileMtimes,
@@ -582,8 +578,13 @@ export function searchVault(
 ): SearchResult[] {
   const config = loadConfig(configPath);
   const folder = opts?.path;
-  const ignorer = loadIgnorer(contentPath, configPath);
-  const ignoreFp = ignoreFingerprint(contentPath, configPath);
+  // Single fingerprint computation: loadIgnorer computes it for its memo key
+  // and returns it, so the disk-cache validity check, memoryCacheKey, and
+  // persist all reuse the same value instead of re-hashing ignore files.
+  const { ignorer, fingerprint: ignoreFp } = loadIgnorer(
+    contentPath,
+    configPath,
+  );
 
   const { basenameIndex, docs, backlinkCounts } = resolveVaultIndex(
     contentPath,

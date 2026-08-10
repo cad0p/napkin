@@ -115,7 +115,7 @@ export class Napkin {
 
   /** Ignorer for this vault (memoized by fingerprint — cheap on repeat). */
   private ignorer(): Ignorer {
-    return loadIgnorer(this.vault.contentPath, this.vault.configPath);
+    return loadIgnorer(this.vault.contentPath, this.vault.configPath).ignorer;
   }
 
   // ── Vault ───────────────────────────────────────────────────────

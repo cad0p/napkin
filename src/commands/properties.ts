@@ -56,7 +56,10 @@ export async function propertySet(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.name || opts.value === undefined) {
     error("Usage: property:set --name <name> --value <value> --file <file>");
     process.exit(EXIT_USER_ERROR);
@@ -92,7 +95,10 @@ export async function propertyRemove(
   opts: OutputOptions & { vault?: string; file?: string; name?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.name) {
     error("No property name specified. Use --name <name>");
     process.exit(EXIT_USER_ERROR);
@@ -127,7 +133,10 @@ export async function propertyRead(
   opts: OutputOptions & { vault?: string; file?: string; name?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.name) {
     error("No property name specified. Use --name <name>");
     process.exit(EXIT_USER_ERROR);

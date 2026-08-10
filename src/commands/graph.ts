@@ -23,18 +23,24 @@ interface GraphLink {
 function walkMd(root: string, ignore?: Ignorer): string[] {
   const files: string[] = [];
   walkDir(root, {
-    onEntry: (fullPath, _entry, kind) => {
+    onEntry: (fullPath, entry, kind) => {
       if (kind !== "file") return;
+      // Legacy default (no ignorer): exclude dotfiles at report time.
+      if (!ignore && entry.name.startsWith(".")) return;
       if (extname(fullPath) === ".md") files.push(fullPath);
     },
     // Direct walkDir call: root === vaultPath, so relToRoot IS vault-relative.
-    // The ignorer replaces walkMd's previous hardcoded dotdir (shouldEnter)
-    // + dotfile (onEntry) pruning — identical under the default dotfiles
-    // rule, and consistent when ignore.dotfiles: false surfaces them.
+    // With an ignorer, its dotfiles rule + matchers decide (dotfiles: false
+    // surfaces dotfiles/dotdirs). Without one, the legacy hardcoded pruning
+    // holds: every dotdir is excluded at descent time so dotdir descendants
+    // (e.g. .drafts/secret.md) never reach the graph.
     ignore: ignore
       ? (relToRoot, kind) =>
           ignore.ignores(kind === "dir" ? `${relToRoot}/` : relToRoot)
       : undefined,
+    shouldEnter: ignore
+      ? undefined
+      : (_fullPath, entry) => !entry.name.startsWith("."),
   });
   return files;
 }
@@ -482,7 +488,7 @@ export async function graph(
 
   const { loadConfig } = await import("../utils/config.js");
   const config = loadConfig(vaultInfo.configPath);
-  const ignorer = loadIgnorer(vaultInfo.contentPath, vaultInfo.configPath);
+  const { ignorer } = loadIgnorer(vaultInfo.contentPath, vaultInfo.configPath);
   const renderer = config.graph?.renderer ?? "auto";
 
   const { nodes, links } = buildGraphData(vault, ignorer);

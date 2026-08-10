@@ -18,7 +18,10 @@ export async function file(
   opts: OutputOptions & { vault?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!fileRef) {
     error("No file specified. Usage: obsidian-cli file <name>");
     process.exit(EXIT_NOT_FOUND);
@@ -145,7 +148,10 @@ export async function open(
   opts: OutputOptions & { vault?: string; newtab?: boolean },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
-  const ignore = loadIgnorer(n.vault.contentPath, n.vault.configPath);
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   const vaultName = encodeURIComponent(n.vault.name);
 
   let uri: string;
