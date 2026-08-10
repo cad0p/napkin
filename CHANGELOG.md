@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Ignore support — .napkinignore + .gitignore + dotfiles (upstream #20) ([#51](https://github.com/cad0p/napkin/pull/51))
+
+
 ## [0.12.4] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
