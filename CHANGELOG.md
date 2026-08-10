@@ -2,10 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.13.1] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+- **`napkin update` now uses the package manager that actually installed napkin** — fixes the EEXIST failure when pnpm's shim owns the global bin but the updater fell back to npm:
+  - Install-method detection from the running module's on-disk location (pnpm / npm / yarn / bun layouts), cross-verified against the package manager's real global root (`npm root -g`, `pnpm root -g`, `yarn global dir`, `bun pm bin -g`) — no more PATH guessing, no more duplicate global installs
+  - Unknown or non-global installs (dev checkout, local project dependency, npx) now print an instruction instead of blindly running `npm install -g`
+  - Also fixed `command -v` probing that exec'd a binary absent on some systems, which silently defaulted the updater to npm even when pnpm had installed napkin
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes
