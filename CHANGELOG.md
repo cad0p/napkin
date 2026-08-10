@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.13.0] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
 - **Ignore support** (upstream [#20](https://github.com/Michaelliv/napkin/issues/20), fork-first): napkin now excludes files and directories from indexing and basename resolution via three unioned sources:
