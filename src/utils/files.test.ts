@@ -463,7 +463,7 @@ describe("ignore support", () => {
       path.join(v.vaultPath, ".napkinignore"),
       "Projects/beta.md\ngenerated/\n",
     );
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
     const files = listFiles(v.vaultPath, { ext: "md", ignore });
     expect(files).toContain("README.md");
     expect(files).toContain("keep.md");
@@ -481,14 +481,39 @@ describe("ignore support", () => {
       path.join(v.vaultPath, ".napkinignore"),
       "Projects/beta.md\n",
     );
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
     // Walk root is vaultPath/Projects, but the pattern is vault-anchored.
     const files = listFiles(v.vaultPath, { folder: "Projects", ignore });
     expect(files).toEqual(["Projects/alpha.md"]);
   });
 
+  test("folder-scoped listFolders matches vault-relative patterns", () => {
+    // Mirror of the listFiles folder-scoped case: the walk root is
+    // vaultPath/Projects, but ignore patterns are vault-anchored, so a
+    // nested dir pruned by a vault-relative pattern must not surface.
+    const scoped = createTempVault({
+      "Projects/Active/one.md": "# One",
+      "Projects/Archive/two.md": "# Two",
+      "Other/three.md": "# Three",
+    });
+    try {
+      fs.writeFileSync(
+        path.join(scoped.vaultPath, ".napkinignore"),
+        "Projects/Archive/\n",
+      );
+      const { ignorer: ignore } = loadIgnorer(
+        scoped.vaultPath,
+        scoped.vaultPath,
+      );
+      const folders = listFolders(scoped.vaultPath, "Projects", ignore);
+      expect(folders).toEqual(["Projects/Active"]);
+    } finally {
+      scoped.cleanup();
+    }
+  });
+
   test("listFolders prunes dotdirs by default and surfaces them when dotfiles: false", () => {
-    const ignoreDefault = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignoreDefault } = loadIgnorer(v.vaultPath, v.vaultPath);
     const folders = listFolders(v.vaultPath, undefined, ignoreDefault);
     expect(folders).toContain("Projects");
     expect(folders.some((f) => f.startsWith("."))).toBe(false);
@@ -498,7 +523,7 @@ describe("ignore support", () => {
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     config.ignore = { ...config.ignore, dotfiles: false };
     fs.writeFileSync(configPath, JSON.stringify(config));
-    const ignoreAll = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignoreAll } = loadIgnorer(v.vaultPath, v.vaultPath);
     const foldersAll = listFolders(v.vaultPath, undefined, ignoreAll);
     expect(foldersAll).toContain(".dotdir");
     expect(foldersAll).toContain("Projects");
@@ -506,7 +531,7 @@ describe("ignore support", () => {
 
   test("listFiles filters ignored dirs when dotfiles: false keeps dotdirs walkable", () => {
     fs.writeFileSync(path.join(v.vaultPath, ".napkinignore"), ".dotdir/\n");
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
     const files = listFiles(v.vaultPath, { ext: "md", ignore });
     expect(files).not.toContain(".dotdir/inner.md");
   });
@@ -517,7 +542,7 @@ describe("ignore support", () => {
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     config.ignore = { ...config.ignore, dotfiles: false };
     fs.writeFileSync(configPath, JSON.stringify(config));
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
 
     const files = listFiles(v.vaultPath, { ignore });
     expect(files).not.toContain(".napkinignore");
@@ -531,7 +556,7 @@ describe("ignore support", () => {
       path.join(v.vaultPath, ".napkinignore"),
       "Projects/beta.md\n",
     );
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
 
     // Wikilink-style basename resolution honors the ignorer.
     expect(resolveFile(v.vaultPath, "beta", ignore)).toBeNull();
@@ -550,7 +575,7 @@ describe("ignore support", () => {
       path.join(v.vaultPath, ".napkinignore"),
       "Projects/beta.md\n",
     );
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
     const suggestions = suggestFile(v.vaultPath, "bet", ignore);
     expect(suggestions).not.toContain("Projects/beta.md");
     // Non-ignored names still surface.
@@ -563,7 +588,7 @@ describe("ignore support", () => {
       path.join(v.vaultPath, ".napkinignore"),
       "Projects/beta.md\n",
     );
-    const ignore = loadIgnorer(v.vaultPath, v.vaultPath);
+    const { ignorer: ignore } = loadIgnorer(v.vaultPath, v.vaultPath);
     expect(() => readFile(v.vaultPath, "beta", ignore)).toThrow(
       "File not found",
     );
