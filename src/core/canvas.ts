@@ -2,6 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { listFiles } from "../utils/files.js";
+import type { Ignorer } from "../utils/ignore.js";
 
 export interface CanvasNode {
   id: string;
@@ -44,13 +45,16 @@ function genId(): string {
 export function resolveCanvas(
   vaultPath: string,
   fileRef: string,
+  ignore?: Ignorer,
 ): { canvas: Canvas; filePath: string } {
   let filePath = fileRef;
   if (!filePath.endsWith(".canvas")) filePath = `${filePath}.canvas`;
 
   const fullPath = path.join(vaultPath, filePath);
   if (!fs.existsSync(fullPath)) {
-    const all = listFiles(vaultPath).filter((f) => f.endsWith(".canvas"));
+    const all = listFiles(vaultPath, { ignore }).filter((f) =>
+      f.endsWith(".canvas"),
+    );
     const target = fileRef.toLowerCase().replace(/\.canvas$/, "");
     const found = all.find(
       (f) => path.basename(f, ".canvas").toLowerCase() === target,
@@ -79,8 +83,8 @@ function writeCanvas(
   );
 }
 
-export function listCanvases(vaultPath: string): string[] {
-  return listFiles(vaultPath).filter((f) => f.endsWith(".canvas"));
+export function listCanvases(vaultPath: string, ignore?: Ignorer): string[] {
+  return listFiles(vaultPath, { ignore }).filter((f) => f.endsWith(".canvas"));
 }
 
 export function createCanvas(
@@ -119,13 +123,14 @@ export function addCanvasNode(
     height?: string;
     color?: string;
   },
+  ignore?: Ignorer,
 ): { id: string; type: string; added: boolean } {
   const nodeType = (opts.type || "text") as CanvasNode["type"];
   if (!["text", "file", "link", "group"].includes(nodeType)) {
     throw new Error("Invalid node type. Use: text, file, link, or group");
   }
 
-  const { canvas, filePath } = resolveCanvas(vaultPath, fileRef);
+  const { canvas, filePath } = resolveCanvas(vaultPath, fileRef, ignore);
 
   const maxX = canvas.nodes.reduce((max, n) => Math.max(max, n.x + n.width), 0);
 
@@ -176,8 +181,9 @@ export function addCanvasEdge(
     label?: string;
     color?: string;
   },
+  ignore?: Ignorer,
 ): { id: string; from: string; to: string; added: boolean } {
-  const { canvas, filePath } = resolveCanvas(vaultPath, fileRef);
+  const { canvas, filePath } = resolveCanvas(vaultPath, fileRef, ignore);
 
   const findNode = (ref: string) =>
     canvas.nodes.find((n) => n.id === ref || n.id.startsWith(ref));
@@ -208,8 +214,9 @@ export function removeCanvasNode(
   vaultPath: string,
   fileRef: string,
   nodeId: string,
+  ignore?: Ignorer,
 ): { id: string; removed: boolean } {
-  const { canvas, filePath } = resolveCanvas(vaultPath, fileRef);
+  const { canvas, filePath } = resolveCanvas(vaultPath, fileRef, ignore);
 
   const node = canvas.nodes.find(
     (n) => n.id === nodeId || n.id.startsWith(nodeId),

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { EXIT_NOT_FOUND } from "../utils/exit-codes.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import { append, create, del, move, prepend, read, rename } from "./crud.js";
 
@@ -15,6 +16,23 @@ async function captureJson(
   await fn();
   console.log = orig;
   return JSON.parse(logs.join(""));
+}
+
+/** Capture the exit code from a command that calls process.exit. */
+async function captureExit(fn: () => Promise<void>): Promise<number> {
+  const orig = process.exit;
+  let exitCode = -1;
+  (process as unknown as Record<string, unknown>).exit = (code: number) => {
+    exitCode = code;
+    throw new Error("exit");
+  };
+  try {
+    await fn();
+  } catch {
+    // expected — process.exit throws
+  }
+  (process as unknown as Record<string, unknown>).exit = orig;
+  return exitCode;
 }
 
 beforeEach(() => {
@@ -35,6 +53,29 @@ describe("read", () => {
       read("README", { json: true, vault: v.path }),
     );
     expect(data.content).toContain("Welcome");
+  });
+
+  test("basename of an ignored file is not found; exact path still works", async () => {
+    fs.writeFileSync(
+      path.join(v.vaultPath, ".napkinignore"),
+      "IgnoredNote.md\n",
+    );
+    fs.writeFileSync(
+      path.join(v.vaultPath, "IgnoredNote.md"),
+      "# Ignored\nignored-read-marker\n",
+    );
+
+    // Wikilink-style basename resolution honors the ignorer → not found.
+    const code = await captureExit(() =>
+      read("IgnoredNote", { json: true, vault: v.path }),
+    );
+    expect(code).toBe(EXIT_NOT_FOUND);
+
+    // Exact path is the escape hatch → still readable.
+    const data = await captureJson(() =>
+      read("IgnoredNote.md", { json: true, vault: v.path }),
+    );
+    expect(data.content).toContain("ignored-read-marker");
   });
 });
 

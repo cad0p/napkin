@@ -1,6 +1,7 @@
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import {
   error,
   fileNotFound,
@@ -63,6 +64,10 @@ export async function templateInsert(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   const templateName = opts.name;
   const targetFile = opts.file;
   if (!templateName) {
@@ -79,7 +84,10 @@ export async function templateInsert(
     result = n.templateInsert(templateName, targetFile);
   } catch (e: unknown) {
     if ((e as Error).message.includes("File not found")) {
-      fileNotFound(targetFile, suggestFile(n.vault.contentPath, targetFile));
+      fileNotFound(
+        targetFile,
+        suggestFile(n.vault.contentPath, targetFile, ignore),
+      );
     } else {
       error((e as Error).message);
     }

@@ -604,6 +604,10 @@ function buildOverviewFolders(
   templatesFolder: string,
   collapse: boolean,
 ): { folders: OverviewFolder[]; warnings: string[] } {
+  // NOTE: The oracle intentionally applies no ignorer. It predates the fork's
+  // ignore feature, and its randomVault never emits dot-prefixed files, so the
+  // dotfiles rule (and .napkinignore/.gitignore patterns) would be a no-op
+  // here anyway — the equivalence contract is about overview math, not ignore.
   const files = listFiles(vaultPath, { ext: "md" });
   const warnings: string[] = [];
   const folderFiles = groupFilesByFolder(files, templatesFolder);

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { basename, extname, relative } from "node:path";
 import { platform } from "node:process";
 import { walkDir } from "../utils/files.js";
+import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import type { OutputOptions } from "../utils/output.js";
 import { error, info } from "../utils/output.js";
 
@@ -19,29 +20,39 @@ interface GraphLink {
   target: string;
 }
 
-function walkMd(root: string): string[] {
+function walkMd(root: string, ignore?: Ignorer): string[] {
   const files: string[] = [];
   walkDir(root, {
     onEntry: (fullPath, entry, kind) => {
       if (kind !== "file") return;
-      // Exclude dotfiles (dotdirs are already pruned via shouldEnter).
-      if (entry.name.startsWith(".")) return;
+      // Legacy default (no ignorer): exclude dotfiles at report time.
+      if (!ignore && entry.name.startsWith(".")) return;
       if (extname(fullPath) === ".md") files.push(fullPath);
     },
-    // walkMd is stricter than listFiles: it excludes every dotdir,
-    // matching its pre-consolidation behavior. Pruning at descent
-    // time prevents dotdir descendants (e.g. .drafts/secret.md) from
-    // appearing in the graph.
-    shouldEnter: (_fullPath, entry) => !entry.name.startsWith("."),
+    // Direct walkDir call: root === vaultPath, so relToRoot IS vault-relative.
+    // With an ignorer, its dotfiles rule + matchers decide (dotfiles: false
+    // surfaces dotfiles/dotdirs). Without one, the legacy hardcoded pruning
+    // holds: every dotdir is excluded at descent time so dotdir descendants
+    // (e.g. .drafts/secret.md) never reach the graph.
+    ignore: ignore
+      ? (relToRoot, kind) =>
+          ignore.ignores(kind === "dir" ? `${relToRoot}/` : relToRoot)
+      : undefined,
+    shouldEnter: ignore
+      ? undefined
+      : (_fullPath, entry) => !entry.name.startsWith("."),
   });
   return files;
 }
 
-function buildGraphData(vaultPath: string): {
+function buildGraphData(
+  vaultPath: string,
+  ignore?: Ignorer,
+): {
   nodes: GraphNode[];
   links: GraphLink[];
 } {
-  const mdFiles = walkMd(vaultPath).filter((f) => {
+  const mdFiles = walkMd(vaultPath, ignore).filter((f) => {
     const rel = relative(vaultPath, f);
     return !rel.startsWith("Templates/") && basename(f) !== "index.md";
   });
@@ -477,9 +488,10 @@ export async function graph(
 
   const { loadConfig } = await import("../utils/config.js");
   const config = loadConfig(vaultInfo.configPath);
+  const { ignorer } = loadIgnorer(vaultInfo.contentPath, vaultInfo.configPath);
   const renderer = config.graph?.renderer ?? "auto";
 
-  const { nodes, links } = buildGraphData(vault);
+  const { nodes, links } = buildGraphData(vault, ignorer);
   const graphDataB64 = Buffer.from(JSON.stringify({ nodes, links })).toString(
     "base64",
   );

@@ -1,6 +1,7 @@
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import { HeadingNotFoundError } from "../utils/markdown.js";
 import {
   error,
@@ -20,6 +21,10 @@ export async function read(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!fileRef) {
     error("No file specified. Usage: napkin read <file>");
     process.exit(EXIT_USER_ERROR);
@@ -40,7 +45,7 @@ export async function read(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef));
+      fileNotFound(fileRef, suggestFile(n.vault.contentPath, fileRef, ignore));
       process.exit(EXIT_NOT_FOUND);
     }
     if (e instanceof HeadingNotFoundError) {
@@ -108,6 +113,10 @@ export async function append(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use: napkin append <file> [content]");
     process.exit(EXIT_USER_ERROR);
@@ -126,7 +135,10 @@ export async function append(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -147,6 +159,10 @@ export async function prepend(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use: napkin prepend <file> [content]");
     process.exit(EXIT_USER_ERROR);
@@ -165,7 +181,10 @@ export async function prepend(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -181,6 +200,10 @@ export async function move(
   opts: OutputOptions & { vault?: string; file?: string; to?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -196,7 +219,10 @@ export async function move(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -212,6 +238,10 @@ export async function rename(
   opts: OutputOptions & { vault?: string; file?: string; name?: string },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -227,7 +257,10 @@ export async function rename(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;
@@ -243,6 +276,10 @@ export async function del(
   opts: OutputOptions & { vault?: string; file?: string; permanent?: boolean },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
   if (!opts.file) {
     error("No file specified. Use --file <name>");
     process.exit(EXIT_USER_ERROR);
@@ -254,7 +291,10 @@ export async function del(
   } catch (e: unknown) {
     const msg = (e as Error).message;
     if (msg.startsWith("File not found:")) {
-      fileNotFound(opts.file, suggestFile(n.vault.contentPath, opts.file));
+      fileNotFound(
+        opts.file,
+        suggestFile(n.vault.contentPath, opts.file, ignore),
+      );
       process.exit(EXIT_NOT_FOUND);
     }
     throw e;

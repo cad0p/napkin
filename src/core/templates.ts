@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
 import { listFiles, resolveFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 function getTemplateFolder(configPath: string): string {
@@ -11,7 +12,8 @@ function getTemplateFolder(configPath: string): string {
 
 export function listTemplates(v: VaultInfo): string[] {
   const folder = getTemplateFolder(v.configPath);
-  return listFiles(v.contentPath, { folder, ext: "md" }).map((f) =>
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
+  return listFiles(v.contentPath, { folder, ext: "md", ignore }).map((f) =>
     path.basename(f, ".md"),
   );
 }
@@ -32,13 +34,16 @@ export function readTemplate(
   opts?: { resolve?: boolean; title?: string },
 ): { template: string; content: string } {
   const folder = getTemplateFolder(v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   const resolved =
-    resolveFile(v.contentPath, `${folder}/${name}`) ||
-    resolveFile(v.contentPath, name);
+    resolveFile(v.contentPath, `${folder}/${name}`, ignore) ||
+    resolveFile(v.contentPath, name, ignore);
   if (!resolved) {
-    const templateFiles = listFiles(v.contentPath, { folder, ext: "md" }).map(
-      (f) => path.basename(f, ".md"),
-    );
+    const templateFiles = listFiles(v.contentPath, {
+      folder,
+      ext: "md",
+      ignore,
+    }).map((f) => path.basename(f, ".md"));
     throw new Error(
       `Template not found: ${name}. Available: ${templateFiles.slice(0, 3).join(", ")}`,
     );
@@ -62,19 +67,22 @@ export function insertTemplate(
   fileRef: string,
 ): { file: string; template: string; inserted: boolean } {
   const folder = getTemplateFolder(v.configPath);
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   const templateResolved =
-    resolveFile(v.contentPath, `${folder}/${templateName}`) ||
-    resolveFile(v.contentPath, templateName);
+    resolveFile(v.contentPath, `${folder}/${templateName}`, ignore) ||
+    resolveFile(v.contentPath, templateName, ignore);
   if (!templateResolved) {
-    const templateFiles = listFiles(v.contentPath, { folder, ext: "md" }).map(
-      (f) => path.basename(f, ".md"),
-    );
+    const templateFiles = listFiles(v.contentPath, {
+      folder,
+      ext: "md",
+      ignore,
+    }).map((f) => path.basename(f, ".md"));
     throw new Error(
       `Template not found: ${templateName}. Available: ${templateFiles.slice(0, 3).join(", ")}`,
     );
   }
 
-  const targetResolved = resolveFile(v.contentPath, fileRef);
+  const targetResolved = resolveFile(v.contentPath, fileRef, ignore);
   if (!targetResolved) {
     throw new Error(`File not found: ${fileRef}`);
   }

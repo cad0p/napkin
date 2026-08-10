@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { listFiles, resolveFile } from "../utils/files.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
+import type { Ignorer } from "../utils/ignore.js";
 
 export interface AliasEntry {
   alias: string;
@@ -11,13 +12,14 @@ export interface AliasEntry {
 export function collectAliases(
   vaultPath: string,
   fileFilter?: string,
+  ignore?: Ignorer,
 ): AliasEntry[] {
   const files = fileFilter
     ? (() => {
-        const r = resolveFile(vaultPath, fileFilter);
+        const r = resolveFile(vaultPath, fileFilter, ignore);
         return r ? [r.path] : [];
       })()
-    : listFiles(vaultPath, { ext: "md" });
+    : listFiles(vaultPath, { ext: "md", ignore });
 
   const results: AliasEntry[] = [];
   for (const file of files) {

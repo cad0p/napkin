@@ -2,6 +2,7 @@ import { resolveTaskLocation, type TaskWithFile } from "../core/tasks.js";
 import { Napkin } from "../sdk.js";
 import { EXIT_NOT_FOUND, EXIT_USER_ERROR } from "../utils/exit-codes.js";
 import { suggestFile } from "../utils/files.js";
+import { loadIgnorer } from "../utils/ignore.js";
 import {
   bold,
   dim,
@@ -72,6 +73,10 @@ export async function task(
   },
 ) {
   const n = new Napkin(opts.vault || process.cwd());
+  const { ignorer: ignore } = loadIgnorer(
+    n.vault.contentPath,
+    n.vault.configPath,
+  );
 
   let filePath: string;
   let lineNum: number;
@@ -81,7 +86,7 @@ export async function task(
     const msg = (e as Error).message;
     if (msg.includes("File not found")) {
       const ref = opts.ref?.split(":")[0] || opts.file || "";
-      fileNotFound(ref, suggestFile(n.vault.contentPath, ref));
+      fileNotFound(ref, suggestFile(n.vault.contentPath, ref, ignore));
       process.exit(EXIT_NOT_FOUND);
     }
     error(msg);

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Ignorer } from "./ignore.js";
 
 export interface FileInfo {
   path: string;
@@ -47,6 +48,8 @@ export function parseFileRef(fileRef: string): FileRef {
 export interface ListFilesOptions {
   folder?: string;
   ext?: string;
+  /** When supplied, ignored files/dirs are excluded from the listing. */
+  ignore?: Ignorer;
 }
 
 /**
@@ -128,6 +131,15 @@ export interface WalkDirOptions {
    * listFolders prune all dot-prefixed directories).
    */
   shouldEnter?: (fullPath: string, entry: fs.Dirent) => boolean;
+  /**
+   * Optional ignore predicate. Receives the entry path RELATIVE TO THE
+   * WALK ROOT plus its kind. Dirs for which it returns true are pruned
+   * (neither reported nor walked, composed with shouldEnter); files for
+   * which it returns true are filtered out before onEntry. Callers whose
+   * patterns are anchored elsewhere (e.g. vault-relative) must wrap this
+   * with their own relative-path computation.
+   */
+  ignore?: (relToRoot: string, kind: "dir" | "file") => boolean;
 }
 
 /**
@@ -140,6 +152,10 @@ export interface WalkDirOptions {
  *   subtrees (e.g. dotdirs) symmetrically with SKIP_DIRS — filtering
  *   inside onEntry would only hide the report while still walking the
  *   subtree.
+ * - If ignore is provided, directories for which it returns true are
+ *   pruned the same way, and files for which it returns true are dropped
+ *   before onEntry. When neither shouldEnter nor ignore is supplied,
+ *   behavior is exactly SKIP_DIRS-only.
  *
  * Symlink semantics:
  * - Symlinks to regular files/directories are classified via direntKind
@@ -190,9 +206,11 @@ export function walkDir(root: string, opts: WalkDirOptions): void {
           // directory is neither emitted nor walked, matching the
           // pre-consolidation semantics of listFolders/walkMd.
           if (opts.shouldEnter && !opts.shouldEnter(fullPath, entry)) continue;
+          if (opts.ignore?.(path.relative(root, fullPath), "dir")) continue;
           opts.onEntry(fullPath, entry, kind);
           walk(fullPath, viaSymlink || entry.isSymbolicLink());
         } else {
+          if (opts.ignore?.(path.relative(root, fullPath), "file")) continue;
           opts.onEntry(fullPath, entry, kind);
         }
       }
@@ -224,12 +242,20 @@ export function listFiles(
   opts?: ListFilesOptions,
 ): string[] {
   const results: string[] = [];
-  // Internal napkin files that shouldn't appear in vault content listings
-  const skipFiles = new Set(["config.json", "search-cache.json"]);
+  // Internal napkin files that shouldn't appear in vault content listings.
+  // .napkinignore is napkin's own ignore config file — same class as
+  // config.json/search-cache.json — and must not leak into listings even
+  // when the dotfiles rule is disabled (ignore.dotfiles: false).
+  const skipFiles = new Set([
+    "config.json",
+    "search-cache.json",
+    ".napkinignore",
+  ]);
 
   const baseDir = opts?.folder ? path.join(vaultPath, opts.folder) : vaultPath;
   if (!fs.existsSync(baseDir)) return results;
 
+  const ignore = opts?.ignore;
   walkDir(baseDir, {
     onEntry: (fullPath, _entry, kind) => {
       if (kind !== "file") return;
@@ -248,16 +274,34 @@ export function listFiles(
         results.push(rel);
       }
     },
+    // When an ignorer is supplied, prune ignored dirs at descent and drop
+    // ignored files before onEntry. relToRoot is relative to the walk root
+    // (baseDir), which may be vaultPath/folder for folder-scoped calls —
+    // patterns are vault-anchored, so re-relative to vaultPath here. Dirs
+    // get a trailing "/" so dir-only gitignore patterns (e.g. `build/`)
+    // match them.
+    ignore: ignore
+      ? (relToRoot, kind) => {
+          const rel = path.relative(vaultPath, path.join(baseDir, relToRoot));
+          return ignore.ignores(kind === "dir" ? `${rel}/` : rel);
+        }
+      : undefined,
   });
   return results.sort();
 }
 
 /**
  * List folders in a vault. Same symlink semantics as listFiles.
+ *
+ * When an ignorer is supplied, its dotfiles rule and ignore-file patterns
+ * decide what is pruned (replacing the hardcoded dotdir prune). Without one,
+ * the legacy behavior is retained: all dot-prefixed directories are pruned
+ * at descent time.
  */
 export function listFolders(
   vaultPath: string,
   parentFolder?: string,
+  ignore?: Ignorer,
 ): string[] {
   const results: string[] = [];
 
@@ -269,18 +313,38 @@ export function listFolders(
       if (kind !== "dir") return;
       results.push(path.relative(vaultPath, fullPath));
     },
-    // Prune dotdirs at descent time so their subtree is not walked
-    // (matches pre-consolidation listFolders behavior). walkDir already
-    // filters SKIP_DIRS; this is the additional dotdir policy.
-    shouldEnter: (_fullPath, entry) => !entry.name.startsWith("."),
+    // Legacy default: prune dotdirs at descent time so their subtree is not
+    // walked (matches pre-consolidation listFolders behavior). walkDir
+    // already filters SKIP_DIRS; this is the additional dotdir policy. When
+    // an ignorer IS supplied it decides instead (dotfiles rule + patterns;
+    // ignore.dotfiles: false surfaces dotdirs, consistent with listFiles).
+    ...(ignore
+      ? {
+          ignore: (relToRoot: string, kind: "dir" | "file") => {
+            const rel = path.relative(vaultPath, path.join(baseDir, relToRoot));
+            return ignore.ignores(kind === "dir" ? `${rel}/` : rel);
+          },
+        }
+      : {
+          shouldEnter: (_fullPath: string, entry: fs.Dirent) =>
+            !entry.name.startsWith("."),
+        }),
   });
   return results.sort();
 }
 
 /**
  * Find all .md files matching a wikilink-style name or exact path.
+ *
+ * Exact paths bypass the ignorer (an explicit path is an explicit intent —
+ * the escape hatch for reading ignored files); basename resolution honors
+ * it, so ignored files are invisible to wikilink-style references.
  */
-function findMatches(vaultPath: string, fileRef: string): string[] {
+function findMatches(
+  vaultPath: string,
+  fileRef: string,
+  ignore?: Ignorer,
+): string[] {
   // Exact path
   if (fileRef.includes("/") || fileRef.endsWith(".md")) {
     const ref = fileRef.endsWith(".md") ? fileRef : `${fileRef}.md`;
@@ -290,7 +354,7 @@ function findMatches(vaultPath: string, fileRef: string): string[] {
 
   // Wikilink-style: search by basename
   const target = fileRef.toLowerCase();
-  const allFiles = listFiles(vaultPath, { ext: "md" });
+  const allFiles = listFiles(vaultPath, { ext: "md", ignore });
   return allFiles.filter(
     (file) => path.basename(file, ".md").toLowerCase() === target,
   );
@@ -303,9 +367,10 @@ function findMatches(vaultPath: string, fileRef: string): string[] {
 export function resolveFile(
   vaultPath: string,
   fileRef: string,
+  ignore?: Ignorer,
 ): FileRef | null {
   const parsed = parseFileRef(fileRef);
-  const matches = findMatches(vaultPath, parsed.path);
+  const matches = findMatches(vaultPath, parsed.path, ignore);
   if (matches.length > 1) {
     throw new Error(
       `Ambiguous file reference "${fileRef}" matches ${matches.length} files: ${matches.join(", ")}. Use the full path to disambiguate.`,
@@ -321,9 +386,10 @@ export function resolveFile(
 export function resolveFileLoose(
   vaultPath: string,
   fileRef: string,
+  ignore?: Ignorer,
 ): FileRef | null {
   const parsed = parseFileRef(fileRef);
-  const matches = findMatches(vaultPath, parsed.path);
+  const matches = findMatches(vaultPath, parsed.path, ignore);
   if (matches.length > 1) {
     matches.sort((a, b) => a.split("/").length - b.split("/").length);
   }
@@ -334,9 +400,13 @@ export function resolveFileLoose(
  * Suggest similar filenames when a file isn't found.
  * Returns up to 3 suggestions sorted by similarity.
  */
-export function suggestFile(vaultPath: string, fileRef: string): string[] {
+export function suggestFile(
+  vaultPath: string,
+  fileRef: string,
+  ignore?: Ignorer,
+): string[] {
   const target = fileRef.toLowerCase();
-  const allFiles = listFiles(vaultPath, { ext: "md" });
+  const allFiles = listFiles(vaultPath, { ext: "md", ignore });
   const scored = allFiles
     .map((f) => {
       const basename = path.basename(f, ".md").toLowerCase();
@@ -366,8 +436,9 @@ export function suggestFile(vaultPath: string, fileRef: string): string[] {
 export function readFile(
   vaultPath: string,
   fileRef: string,
+  ignore?: Ignorer,
 ): { path: string; content: string } {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
 import { listFiles, resolveFile } from "../utils/files.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
+import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import { extractSection } from "../utils/markdown.js";
 import type { VaultInfo } from "../utils/vault.js";
 
@@ -57,8 +58,9 @@ export function readFile(
   vaultPath: string,
   fileRef: string,
   opts?: ReadOptions,
+  ignore?: Ignorer,
 ): ReadResult {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
@@ -142,6 +144,7 @@ export function readFile(
 }
 
 export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
+  const { ignorer: ignore } = loadIgnorer(v.contentPath, v.configPath);
   let targetPath: string;
   if (opts.path) {
     targetPath = opts.path.endsWith(".md") ? opts.path : `${opts.path}.md`;
@@ -163,8 +166,12 @@ export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
   if (opts.template) {
     const config = loadConfig(v.configPath);
     const templateRef =
-      resolveFile(v.contentPath, opts.template) ||
-      resolveFile(v.contentPath, `${config.templates.folder}/${opts.template}`);
+      resolveFile(v.contentPath, opts.template, ignore) ||
+      resolveFile(
+        v.contentPath,
+        `${config.templates.folder}/${opts.template}`,
+        ignore,
+      );
     if (templateRef) {
       content = fs.readFileSync(
         path.join(v.contentPath, templateRef.path),
@@ -174,6 +181,7 @@ export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
       const tmplFiles = listFiles(v.contentPath, {
         folder: config.templates.folder,
         ext: "md",
+        ignore,
       }).map((f: string) => path.basename(f, ".md"));
       throw new Error(
         `Template not found: ${opts.template}. Available: ${tmplFiles.slice(0, 3).join(", ")}`,
@@ -192,8 +200,9 @@ export function appendFile(
   fileRef: string,
   content: string,
   inline?: boolean,
+  ignore?: Ignorer,
 ): string {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
@@ -211,8 +220,9 @@ export function prependFile(
   fileRef: string,
   content: string,
   inline?: boolean,
+  ignore?: Ignorer,
 ): string {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
@@ -236,8 +246,9 @@ export function moveFile(
   vaultPath: string,
   fileRef: string,
   destination: string,
+  ignore?: Ignorer,
 ): MoveResult {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
@@ -259,8 +270,9 @@ export function renameFile(
   vaultPath: string,
   fileRef: string,
   newName: string,
+  ignore?: Ignorer,
 ): MoveResult {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }
@@ -278,8 +290,9 @@ export function deleteFile(
   vaultPath: string,
   fileRef: string,
   permanent?: boolean,
+  ignore?: Ignorer,
 ): DeleteResult {
-  const resolved = resolveFile(vaultPath, fileRef);
+  const resolved = resolveFile(vaultPath, fileRef, ignore);
   if (!resolved) {
     throw new Error(`File not found: ${fileRef}`);
   }

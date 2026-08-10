@@ -205,7 +205,37 @@ describe("search", () => {
     expect(results).toEqual([]);
   });
 
-  test("currently indexes Markdown files matched by .gitignore", async () => {
+  test("excludes Markdown files matched by .gitignore (respectGitignore default)", async () => {
+    fs.writeFileSync(path.join(v.vaultPath, ".gitignore"), "generated/\n");
+    fs.mkdirSync(path.join(v.vaultPath, "generated"), { recursive: true });
+    fs.writeFileSync(
+      path.join(v.vaultPath, "generated", "ignored.md"),
+      "# Generated\nignored-markdown-marker\n",
+    );
+
+    const data = await captureJson(() =>
+      search({
+        json: true,
+        vault: v.path,
+        query: "ignored-markdown-marker",
+      }),
+    );
+    const results = data.results as { file: string }[];
+    expect(results.map((result) => result.file)).not.toContain(
+      "generated/ignored.md",
+    );
+  });
+
+  test("indexes .gitignore-matched files when respectGitignore is false", async () => {
+    const config = JSON.parse(
+      fs.readFileSync(path.join(v.vaultPath, "config.json"), "utf-8"),
+    );
+    config.ignore = { ...config.ignore, respectGitignore: false };
+    fs.writeFileSync(
+      path.join(v.vaultPath, "config.json"),
+      JSON.stringify(config),
+    );
+
     fs.writeFileSync(path.join(v.vaultPath, ".gitignore"), "generated/\n");
     fs.mkdirSync(path.join(v.vaultPath, "generated"), { recursive: true });
     fs.writeFileSync(
@@ -223,6 +253,69 @@ describe("search", () => {
     const results = data.results as { file: string }[];
     expect(results.map((result) => result.file)).toContain(
       "generated/ignored.md",
+    );
+  });
+
+  test("excludes files matched by .napkinignore", async () => {
+    fs.writeFileSync(
+      path.join(v.vaultPath, ".napkinignore"),
+      "Projects/beta.md\n",
+    );
+
+    const data = await captureJson(() =>
+      search({ json: true, vault: v.path, query: "beta" }),
+    );
+    const results = data.results as { file: string }[];
+    expect(results.map((result) => result.file)).not.toContain(
+      "Projects/beta.md",
+    );
+  });
+
+  test("excludes dotfiles and dotdirs by default", async () => {
+    fs.mkdirSync(path.join(v.vaultPath, ".hidden-dir"), { recursive: true });
+    fs.writeFileSync(
+      path.join(v.vaultPath, ".hidden-dir", "secret.md"),
+      "# Secret\nsecret-dotdir-marker\n",
+    );
+    fs.writeFileSync(
+      path.join(v.vaultPath, ".hidden-note.md"),
+      "# Hidden\nhidden-dotfile-marker\n",
+    );
+
+    const data = await captureJson(() =>
+      search({ json: true, vault: v.path, query: "marker" }),
+    );
+    const results = data.results as { file: string }[];
+    expect(results.map((result) => result.file)).not.toContain(
+      ".hidden-dir/secret.md",
+    );
+    expect(results.map((result) => result.file)).not.toContain(
+      ".hidden-note.md",
+    );
+  });
+
+  test("indexes dotfiles and dotdirs when ignore.dotfiles is false", async () => {
+    const config = JSON.parse(
+      fs.readFileSync(path.join(v.vaultPath, "config.json"), "utf-8"),
+    );
+    config.ignore = { ...config.ignore, dotfiles: false };
+    fs.writeFileSync(
+      path.join(v.vaultPath, "config.json"),
+      JSON.stringify(config),
+    );
+
+    fs.mkdirSync(path.join(v.vaultPath, ".hidden-dir"), { recursive: true });
+    fs.writeFileSync(
+      path.join(v.vaultPath, ".hidden-dir", "secret.md"),
+      "# Secret\nsecret-dotdir-marker\n",
+    );
+
+    const data = await captureJson(() =>
+      search({ json: true, vault: v.path, query: "secret-dotdir-marker" }),
+    );
+    const results = data.results as { file: string }[];
+    expect(results.map((result) => result.file)).toContain(
+      ".hidden-dir/secret.md",
     );
   });
 
