@@ -7,7 +7,6 @@
   },
   "description": "\ud83d\udcdc Knowledge system for agents. Local-first, file-based, progressively disclosed.",
   "type": "module",
-  "packageManager": "pnpm@11.15.0",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
