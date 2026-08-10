@@ -3,6 +3,11 @@ import * as path from "node:path";
 import MiniSearch from "minisearch";
 import { loadConfig } from "../utils/config.js";
 import { listFiles } from "../utils/files.js";
+import {
+  type Ignorer,
+  ignoreFingerprint,
+  loadIgnorer,
+} from "../utils/ignore.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
   diffFileMtimes,
@@ -97,8 +102,12 @@ interface CachedVaultIndex {
 
 const memoryCache = new Map<string, CachedVaultIndex>();
 
-function memoryCacheKey(contentPath: string, folder?: string): string {
-  return `${contentPath}\0${folder ?? ""}`;
+function memoryCacheKey(
+  contentPath: string,
+  folder: string | undefined,
+  ignoreFp: string,
+): string {
+  return `${contentPath}\0${folder ?? ""}\0${ignoreFp}`;
 }
 
 // ── Index building (cold path) ────────────────────────────────────
@@ -142,8 +151,9 @@ function readDoc(vaultPath: string, file: string): DocRecord {
 function buildDocsAndBacklinks(
   vaultPath: string,
   folder?: string,
+  ignore?: Ignorer,
 ): BuildResult {
-  const files = listFiles(vaultPath, { folder, ext: "md" });
+  const files = listFiles(vaultPath, { folder, ext: "md", ignore });
 
   const basenameMap = new Map<string, string[]>();
   const docsArr: DocRecord[] = [];
@@ -346,14 +356,16 @@ interface ResolvedIndex {
 function resolveVaultIndex(
   contentPath: string,
   configPath: string,
-  folder?: string,
+  folder: string | undefined,
+  ignorer: Ignorer,
+  ignoreFp: string,
 ): ResolvedIndex {
-  const memKey = memoryCacheKey(contentPath, folder);
+  const memKey = memoryCacheKey(contentPath, folder, ignoreFp);
 
   const cached = memoryCache.get(memKey);
   if (cached) {
     return (
-      applyIncrementalDiff(contentPath, cached, folder) ?? {
+      applyIncrementalDiff(contentPath, cached, folder, ignorer) ?? {
         basenameIndex: cached.basenameIndex,
         docs: cached.docs,
         backlinkCounts: cached.backlinkCounts,
@@ -363,12 +375,19 @@ function resolveVaultIndex(
 
   const diskCache = loadSearchCache(configPath);
   const folderNorm = folder ?? null;
-  if (diskCache && diskCache.folder === folderNorm) {
+  // The disk cache is only valid when the ignore state matches the current
+  // fingerprint — an ignore change can hide/unhide files that incremental
+  // diffing against fileMtimes would miss.
+  if (
+    diskCache &&
+    diskCache.folder === folderNorm &&
+    diskCache.ignoreFingerprint === ignoreFp
+  ) {
     const loaded = loadFromDiskCache(diskCache);
     if (loaded) {
       memoryCache.set(memKey, loaded);
       return (
-        applyIncrementalDiff(contentPath, loaded, folder) ?? {
+        applyIncrementalDiff(contentPath, loaded, folder, ignorer) ?? {
           basenameIndex: loaded.basenameIndex,
           docs: loaded.docs,
           backlinkCounts: loaded.backlinkCounts,
@@ -378,8 +397,8 @@ function resolveVaultIndex(
   }
 
   // Cold path — build from scratch and persist.
-  const built = buildDocsAndBacklinks(contentPath, folder);
-  persistCache(configPath, folder, built);
+  const built = buildDocsAndBacklinks(contentPath, folder, ignorer);
+  persistCache(configPath, folder, built, ignoreFp);
   const cached2: CachedVaultIndex = {
     basenameIndex: built.basenameIndex,
     docs: built.docs,
@@ -448,8 +467,9 @@ function applyIncrementalDiff(
   vaultPath: string,
   cache: CachedVaultIndex,
   folder?: string,
+  ignore?: Ignorer,
 ): ResolvedIndex | null {
-  const current = statAllFiles(vaultPath, folder);
+  const current = statAllFiles(vaultPath, folder, ignore);
   const diff = diffFileMtimes(Object.fromEntries(cache.fileMtimes), current);
   if (diff.unchanged) {
     return null;
@@ -526,6 +546,7 @@ function persistCache(
   configPath: string,
   folder: string | null | undefined,
   built: BuildResult,
+  ignoreFp: string,
 ): void {
   const docsArr = [...built.docs.values()];
   const outgoingLinks: Record<string, string[]> = {};
@@ -544,6 +565,7 @@ function persistCache(
       })),
       backlinkCounts: Object.fromEntries(built.backlinkCounts),
       outgoingLinks,
+      ignoreFingerprint: ignoreFp,
     });
   } catch {
     // Best-effort persistence — search still works without it.
@@ -560,11 +582,15 @@ export function searchVault(
 ): SearchResult[] {
   const config = loadConfig(configPath);
   const folder = opts?.path;
+  const ignorer = loadIgnorer(contentPath, configPath);
+  const ignoreFp = ignoreFingerprint(contentPath, configPath);
 
   const { basenameIndex, docs, backlinkCounts } = resolveVaultIndex(
     contentPath,
     configPath,
     folder,
+    ignorer,
+    ignoreFp,
   );
 
   // Basename BM25 search (fast).

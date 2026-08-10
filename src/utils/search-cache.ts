@@ -2,6 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { listFiles } from "./files.js";
+import type { Ignorer } from "./ignore.js";
 
 const CACHE_FILE = "search-cache.json";
 
@@ -30,6 +31,13 @@ export interface SearchCacheData {
   backlinkCounts: Record<string, number>;
   /** file → raw wikilink targets (for incremental backlink recompute). */
   outgoingLinks: Record<string, string[]>;
+  /**
+   * Fingerprint of the ignore-relevant state (config `ignore.*` + both
+   * ignore files' {mtime,size}). A mismatch forces a cold rebuild — an
+   * ignore change can hide/unhide files that incremental diffing would
+   * miss.
+   */
+  ignoreFingerprint: string;
 }
 
 export interface FileMtimeEntry {
@@ -54,8 +62,9 @@ export interface FileMtimeEntry {
 export function statAllFiles(
   contentPath: string,
   folder?: string,
+  ignore?: Ignorer,
 ): FileMtimeEntry[] {
-  const files = listFiles(contentPath, { folder, ext: "md" });
+  const files = listFiles(contentPath, { folder, ext: "md", ignore });
   const entries: FileMtimeEntry[] = [];
   for (const file of files) {
     const stat = fs.statSync(path.join(contentPath, file));
@@ -159,7 +168,8 @@ export function loadSearchCache(configPath: string): SearchCacheData | null {
       !data.index ||
       !Array.isArray(data.docs) ||
       !data.backlinkCounts ||
-      !data.outgoingLinks
+      !data.outgoingLinks ||
+      typeof data.ignoreFingerprint !== "string"
     ) {
       return null;
     }

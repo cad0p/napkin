@@ -43,6 +43,12 @@ export interface NapkinConfig {
   graph: {
     renderer: "auto" | "glimpse" | "browser";
   };
+  ignore: {
+    /** Respect .gitignore at the vault root (gitignore-style patterns). */
+    respectGitignore: boolean;
+    /** Exclude dot-prefixed files and folders (Obsidian "hidden files" parity). */
+    dotfiles: boolean;
+  };
 }
 
 export const DEFAULT_CONFIG: NapkinConfig = {
@@ -72,6 +78,10 @@ export const DEFAULT_CONFIG: NapkinConfig = {
   },
   graph: {
     renderer: "auto",
+  },
+  ignore: {
+    respectGitignore: true,
+    dotfiles: true,
   },
 };
 
