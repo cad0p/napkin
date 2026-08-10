@@ -119,6 +119,7 @@ describe("saveSearchCache / loadSearchCache", () => {
       ],
       backlinkCounts: { "README.md": 2 },
       outgoingLinks: { "README.md": [] },
+      ignoreFingerprint: "fp-test",
     };
 
     saveSearchCache(vault.vaultPath, data);
@@ -130,6 +131,32 @@ describe("saveSearchCache / loadSearchCache", () => {
     expect(loaded?.backlinkCounts).toEqual(data.backlinkCounts);
     expect(loaded?.fileMtimes).toEqual(data.fileMtimes);
     expect(loaded?.folder).toBeNull();
+    expect(loaded?.ignoreFingerprint).toBe("fp-test");
+  });
+
+  test("rejects caches without ignoreFingerprint (pre-ignore format) so cold-rebuild applies ignores", () => {
+    // Caches written before the ignore feature have no ignoreFingerprint.
+    // Rejecting them forces a cold rebuild so the ignore state is applied
+    // (files matched by .napkinignore/.gitignore/dotfiles must not linger).
+    const data = {
+      folder: null,
+      fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
+      index: '{"serialized":"index"}',
+      docs: [
+        {
+          file: "README.md",
+          basename: "README",
+          content: "# readme body",
+          mtime: 1000,
+          size: 42,
+        },
+      ],
+      backlinkCounts: { "README.md": 2 },
+      outgoingLinks: { "README.md": [] },
+    };
+
+    saveSearchCache(vault.vaultPath, data);
+    expect(loadSearchCache(vault.vaultPath)).toBeNull();
   });
 
   test("rejects content-less caches (legacy format) so cold-rebuild restores recall", () => {
@@ -144,6 +171,7 @@ describe("saveSearchCache / loadSearchCache", () => {
       docs: [{ file: "README.md", basename: "README", mtime: 1000, size: 42 }],
       backlinkCounts: { "README.md": 2 },
       outgoingLinks: { "README.md": [] },
+      ignoreFingerprint: "fp-test",
     };
 
     saveSearchCache(vault.vaultPath, data);
