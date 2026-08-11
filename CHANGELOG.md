@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.2] - 2026-08-11
+
+<!-- USER-EDITABLE SECTION START -->
+- **`napkin overview` now exposes the vault's absolute root** — fixes sessions (agent or CLI) that didn't know where the vault lives:
+  - `Napkin.overview()` returns a `root` field (the vault content root, attached fresh at the SDK layer after the core result — never cached, so a moved vault can never serve a stale path)
+  - The CLI prints `Vault root: <path> (napkin vault --json | jq -r .path)` in human output; `napkin overview --json` carries `root` too
+  - pi-napkin's agent context starts with the same line — injected sessions always know the vault path without discovery commands
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(ci)* Manual npm publish via workflow_dispatch ([#58](https://github.com/cad0p/napkin/pull/58))
+- *(overview)* Attach vault root at SDK layer — CLI + consumers share ([#60](https://github.com/cad0p/napkin/pull/60))
+
+### 🧪 Testing
+
+- *(update)* Managed-resolution coverage for yarn and bun global installs ([#57](https://github.com/cad0p/napkin/pull/57))
+
+### ⚙️ Miscellaneous Tasks
+
+- Drop packageManager field — unblocks release action publish ([#55](https://github.com/cad0p/napkin/pull/55))
+
+### ◀️ Revert
+
+- *(ci)* Remove workflow_dispatch manual publish (breakglass) ([#59](https://github.com/cad0p/napkin/pull/59))
+
+
 ## [0.13.1] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
