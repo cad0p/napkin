@@ -184,6 +184,28 @@ print an honest footer.
 - *(release)* From v0.11.1 (TBD) ([#36](https://github.com/cad0p/napkin/pull/36))
 
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+The vault overview now protects the top-level taxonomy: `overview.collapseDepth`
+(default 2) restricts homogeneous-sibling collapse to merge targets at depth ≥ 2,
+so curated namespaces (e.g. `amazon/`, `open-source/`) always render their real
+children instead of one rolled-up row. A new `overview.maxRows` (default 100,
+0 = unlimited) caps the listing at the most relevant folders — rows sort by
+depth, then note count desc, then path — and truncated listings report exactly
+how many rows/notes were dropped (`VaultOverview.truncated`), so consumers can
+print an honest footer.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Overview collapseDepth + maxRows — taxonomy-safe collapse and row cap ([#37](https://github.com/cad0p/napkin/pull/37))
+
+### 📚 Documentation
+
+- Point AGENTS.md kanban check at gh project ([#35](https://github.com/cad0p/napkin/pull/35))
+
+
 ## [0.11.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
