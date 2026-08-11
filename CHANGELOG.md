@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 📚 Documentation
+
+- Port AGENTS.md from pi-napkin (drop goldmine vault line — mandate via system prompt) ([#65](https://github.com/cad0p/napkin/pull/65))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(changelog)* Drop stale duplicate [calver-released] block + temp validator disable ([#63](https://github.com/cad0p/napkin/pull/63))
+- Re-enable validate-package-version ([#64](https://github.com/cad0p/napkin/pull/64))
+
+
 ## [0.13.2] - 2026-08-11
 
 <!-- USER-EDITABLE SECTION START -->
