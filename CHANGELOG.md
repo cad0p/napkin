@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(ci)* Manual npm publish via workflow_dispatch ([#58](https://github.com/cad0p/napkin/pull/58))
+- *(overview)* Attach vault root at SDK layer — CLI + consumers share ([#60](https://github.com/cad0p/napkin/pull/60))
+
+### 🧪 Testing
+
+- *(update)* Managed-resolution coverage for yarn and bun global installs ([#57](https://github.com/cad0p/napkin/pull/57))
+
+### ⚙️ Miscellaneous Tasks
+
+- Drop packageManager field — unblocks release action publish ([#55](https://github.com/cad0p/napkin/pull/55))
+
+### ◀️ Revert
+
+- *(ci)* Remove workflow_dispatch manual publish (breakglass) ([#59](https://github.com/cad0p/napkin/pull/59))
+
+
 ## [0.13.1] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
