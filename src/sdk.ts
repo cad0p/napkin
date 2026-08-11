@@ -130,8 +130,14 @@ export class Napkin {
     collapse?: boolean;
     collapseDepth?: number;
     maxRows?: number;
-  }): VaultOverview {
-    return getOverview(this.vault.contentPath, this.vault.configPath, opts);
+  }): VaultOverview & { root: string } {
+    // Root is attached fresh at the SDK layer, after the (possibly cached)
+    // core result — it must never be persisted into the overview cache, or a
+    // moved vault would serve a stale root.
+    return {
+      ...getOverview(this.vault.contentPath, this.vault.configPath, opts),
+      root: this.vault.contentPath,
+    };
   }
 
   // ── Search ──────────────────────────────────────────────────────
