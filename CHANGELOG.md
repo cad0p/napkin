@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.13.2] - 2026-08-11
 
 <!-- USER-EDITABLE SECTION START -->
 - **`napkin overview` now exposes the vault's absolute root** — fixes sessions (agent or CLI) that didn't know where the vault lives:
