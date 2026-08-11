@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+- **`napkin overview` now exposes the vault's absolute root** — fixes sessions (agent or CLI) that didn't know where the vault lives:
+  - `Napkin.overview()` returns a `root` field (the vault content root, attached fresh at the SDK layer after the core result — never cached, so a moved vault can never serve a stale path)
+  - The CLI prints `Vault root: <path> (napkin vault --json | jq -r .path)` in human output; `napkin overview --json` carries `root` too
+  - pi-napkin's agent context starts with the same line — injected sessions always know the vault path without discovery commands
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🚀 Features
