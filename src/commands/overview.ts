@@ -37,6 +37,10 @@ export async function overview(
         dim("WORKFLOW: overview (you are here) → search <query> → read <file>"),
       );
       console.log("");
+      console.log(
+        dim(`Vault root: ${result.root} (napkin vault --json | jq -r .path)`),
+      );
+      console.log("");
       if (result.context) {
         console.log(bold("CONTEXT"));
         console.log(result.context);

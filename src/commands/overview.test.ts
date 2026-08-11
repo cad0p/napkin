@@ -113,8 +113,11 @@ describe("overview", () => {
     });
 
     const result = (await runOverviewJson(vault.path)) as {
+      root: string;
       overview: Array<{ path: string; notes: number; tags: string[] }>;
     };
+    // contentPath resolves to the .napkin/ dir (embedded layout fixture)
+    expect(result.root).toBe(vault.vaultPath);
     expect(Array.isArray(result.overview)).toBe(true);
     expect(result.overview.length).toBeGreaterThanOrEqual(3);
 
