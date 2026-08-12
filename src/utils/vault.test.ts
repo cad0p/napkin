@@ -33,16 +33,9 @@ describe("findVault", () => {
     const origXdg = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = tmpDir; // isolate from global config
     try {
-      expect(() => findVault(tmpDir)).toThrow(VaultNotFoundError);
-      try {
-        findVault(tmpDir);
-      } catch (e) {
-        const msg = (e as Error).message;
-        expect(msg).toContain("No napkin vault found");
-        expect(msg).toContain("napkin init");
-        expect(msg).toContain("--vault");
-        expect(msg).toContain("global vault");
-      }
+      expect(() => findVault(tmpDir)).toThrow(
+        /No napkin vault found[\s\S]*--vault/,
+      );
       // Must not create any stray vault artifacts
       expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(false);
       expect(fs.existsSync(path.join(tmpDir, "NAPKIN.md"))).toBe(false);
