@@ -58,9 +58,11 @@ napkin daily append "- [ ] Review PR"
 napkin is also a library. No CLI, no stdout - just data:
 
 ```typescript
-import { Napkin } from "@cad0p/napkin";
+import { Napkin, VaultNotFoundError } from "@cad0p/napkin";
 
-// Always works - creates bare vault if needed
+// Resolves the vault at or above the path (or the global vault from
+// ~/.config/napkin/config.json). Throws VaultNotFoundError when there is
+// no vault — it never silently creates one. Use Napkin.scaffold() first.
 const n = new Napkin("/path/to/project");
 
 // Progressive disclosure
@@ -86,11 +88,18 @@ n.bookmarks();
 n.config();
 ```
 
-Scaffold with a template:
+Scaffold with a template (the only API that creates a vault):
 
 ```typescript
 Napkin.scaffold("/path/to/project", { template: "coding" });
 Napkin.vaultTemplates(); // list available templates
+```
+
+Set a **global vault** (used when no `.napkin/` exists at or above the
+working directory) in `~/.config/napkin/config.json`:
+
+```json
+{ "vault": "/path/to/vault" }
 ```
 
 All SDK methods return typed data and throw errors on failure. No `console.log`, no `process.exit`.

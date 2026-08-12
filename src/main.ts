@@ -62,6 +62,7 @@ import {
 import { update } from "./commands/update.js";
 import { vault } from "./commands/vault.js";
 import { wordcount } from "./commands/wordcount.js";
+import { VaultNotFoundError } from "./utils/vault.js";
 
 const { version } = packageJson;
 
@@ -886,6 +887,11 @@ program
     }
   })
   .catch((err) => {
+    if (err instanceof VaultNotFoundError) {
+      console.error(err.message);
+      process.exit(err.exitCode);
+      return;
+    }
     console.error("Fatal error:", err.message);
     process.exit(1);
   });
