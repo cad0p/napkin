@@ -10,7 +10,12 @@ import * as path from "node:path";
 export const DEFAULT_SEARCH_RESULTS_PER_PAGE = 10;
 
 export interface VaultLayout {
-  /** Content root relative to .napkin/ dir (e.g. ".." for sibling layout) */
+  /**
+   * Content root relative to the .napkin/ dir. REQUIRED — a `.napkin/`
+   * whose config lacks it is the refused legacy embedded layout. ".." for
+   * the sibling layout (content alongside `.napkin/`, the init/goldmine
+   * standard), "." to keep content inside `.napkin/`.
+   */
   root: string;
   /**
    * .obsidian/ dir relative to .napkin/ dir (e.g. "../.obsidian" for
@@ -118,7 +123,9 @@ export function saveConfig(
     obsidianDir ||
     (config.vault?.obsidian
       ? path.resolve(napkinDir, config.vault.obsidian)
-      : path.join(napkinDir, ".obsidian"));
+      : config.vault?.root
+        ? path.join(path.resolve(napkinDir, config.vault.root), ".obsidian")
+        : path.join(napkinDir, ".obsidian"));
   syncObsidianConfig(resolvedObsidian, config);
 }
 

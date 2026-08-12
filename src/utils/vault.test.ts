@@ -167,6 +167,39 @@ describe("findVault", () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    test("nested layout gets a sibling-root hint pointing two levels up", () => {
+      // Legacy vault in the nested position: <dir>/.obsidian/.napkin/
+      const tmpDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "napkin-existing-test-"),
+      );
+      const napkinDir = path.join(tmpDir, ".obsidian", ".napkin");
+      fs.mkdirSync(path.join(napkinDir, ".obsidian"), { recursive: true });
+      fs.writeFileSync(
+        path.join(napkinDir, "config.json"),
+        JSON.stringify({
+          overview: { depth: 3, keywords: 8 },
+          daily: { folder: "daily", format: "YYYY-MM-DD" },
+        }),
+      );
+      fs.writeFileSync(path.join(napkinDir, "README.md"), "# Hello");
+
+      try {
+        try {
+          findVault(tmpDir);
+          expect.unreachable("expected VaultNotFoundError");
+        } catch (e) {
+          expect(e).toBeInstanceOf(VaultNotFoundError);
+          const msg = (e as Error).message;
+          expect(msg).toContain("legacy embedded layout");
+          expect(msg).toContain('"root": "../.."');
+          expect(msg).toContain('"root": "."');
+          expect(msg).toContain("missing, unreadable");
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("layout: sibling (.napkin/ alongside .obsidian/)", () => {
