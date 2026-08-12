@@ -12,8 +12,11 @@ export const DEFAULT_SEARCH_RESULTS_PER_PAGE = 10;
 export interface VaultLayout {
   /** Content root relative to .napkin/ dir (e.g. ".." for sibling layout) */
   root: string;
-  /** .obsidian/ dir relative to .napkin/ dir (e.g. "../.obsidian" for sibling layout) */
-  obsidian: string;
+  /**
+   * .obsidian/ dir relative to .napkin/ dir (e.g. "../.obsidian" for
+   * sibling layout). Optional — defaults to `<contentRoot>/.obsidian`.
+   */
+  obsidian?: string;
 }
 
 export interface NapkinConfig {
