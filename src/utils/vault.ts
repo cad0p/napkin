@@ -15,20 +15,42 @@ export interface VaultInfo {
 }
 
 /**
- * Thrown when no vault can be found — neither a walk-up hit (`.napkin/` at or
- * above the starting directory) nor a global vault from the user config.
+ * Thrown when no usable vault can be found — neither a walk-up hit (`.napkin/`
+ * at or above the starting directory) nor a global vault from the user config.
+ * Also thrown when a `.napkin/` exists but is unreadable (legacy embedded
+ * layout without an explicit `vault.root` in its config).
  */
 export class VaultNotFoundError extends Error {
   readonly exitCode = EXIT_NO_VAULT;
 
-  constructor(startDir: string, globalConfigPath: string) {
-    super(
-      `No napkin vault found (searched up from ${startDir}).\n` +
-        `  Run \`napkin init\` to create one here, pass --vault <path>, or set a` +
-        ` global vault in ${globalConfigPath} ({"vault": "/path/to/vault"}).`,
-    );
+  constructor(message: string) {
+    super(message);
     this.name = "VaultNotFoundError";
   }
+}
+
+function noVaultFoundMessage(
+  startDir: string,
+  globalConfigPath: string,
+): string {
+  return (
+    `No napkin vault found (searched up from ${startDir}).\n` +
+    `  Run \`napkin init\` to create one here, pass --vault <path>, or set a` +
+    ` global vault in ${globalConfigPath} ({"vault": "/path/to/vault"}).`
+  );
+}
+
+function legacyLayoutMessage(napkinDir: string, projectDir: string): string {
+  const siblingRoot = path.relative(napkinDir, projectDir).replace(/\\/g, "/");
+  return (
+    `Vault at ${projectDir} uses the legacy embedded layout: ` +
+    `${path.join(napkinDir, "config.json")} is missing, unreadable, or has` +
+    ` no "vault" section. ` +
+    `This layout is no longer supported.\n` +
+    `  Add "vault": {"root": "${siblingRoot}"} to adopt the sibling layout` +
+    ` (content in ${projectDir}/), or "vault": {"root": "."} to keep` +
+    ` content inside ${napkinDir}/.`
+  );
 }
 
 /**
@@ -81,7 +103,9 @@ export function findVault(startDir?: string): VaultInfo {
     "napkin",
     "config.json",
   );
-  throw new VaultNotFoundError(startingDir, globalConfigPath);
+  throw new VaultNotFoundError(
+    noVaultFoundMessage(startingDir, globalConfigPath),
+  );
 }
 
 /**
@@ -117,7 +141,9 @@ function getGlobalConfigVault(): string | null {
 
 /**
  * Resolve vault layout from .napkin/config.json vault paths.
- * If no vault config exists, defaults to sibling layout (content in project dir).
+ * Requires an explicit `vault.root` — a `.napkin/` whose config lacks a
+ * `vault` section is the legacy embedded layout and is refused with a
+ * migration hint.
  */
 function resolveVaultLayout(napkinDir: string, projectDir: string): VaultInfo {
   const configPath = path.join(napkinDir, "config.json");
@@ -127,28 +153,22 @@ function resolveVaultLayout(napkinDir: string, projectDir: string): VaultInfo {
     const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     vaultConfig = raw.vault;
   } catch {
-    // no config or invalid — use defaults
+    // no config or invalid — treat as legacy below
   }
 
-  if (vaultConfig?.root) {
-    const contentPath = path.resolve(napkinDir, vaultConfig.root);
-    const obsidianPath = vaultConfig.obsidian
-      ? path.resolve(napkinDir, vaultConfig.obsidian)
-      : path.join(contentPath, ".obsidian");
-    return {
-      name: path.basename(contentPath),
-      contentPath,
-      configPath: napkinDir,
-      obsidianPath,
-    };
+  if (!vaultConfig?.root) {
+    throw new VaultNotFoundError(legacyLayoutMessage(napkinDir, projectDir));
   }
 
-  // Legacy: embedded layout — .napkin/ is the vault root (no vault.root in config)
+  const contentPath = path.resolve(napkinDir, vaultConfig.root);
+  const obsidianPath = vaultConfig.obsidian
+    ? path.resolve(napkinDir, vaultConfig.obsidian)
+    : path.join(contentPath, ".obsidian");
   return {
-    name: path.basename(projectDir),
-    contentPath: napkinDir,
+    name: path.basename(contentPath),
+    contentPath,
     configPath: napkinDir,
-    obsidianPath: path.join(napkinDir, ".obsidian"),
+    obsidianPath,
   };
 }
 
