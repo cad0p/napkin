@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EXIT_NO_VAULT } from "./exit-codes.js";
 
 export interface VaultInfo {
   /** Vault display name (derived from content root directory) */
@@ -14,9 +15,27 @@ export interface VaultInfo {
 }
 
 /**
+ * Thrown when no vault can be found — neither a walk-up hit (`.napkin/` at or
+ * above the starting directory) nor a global vault from the user config.
+ */
+export class VaultNotFoundError extends Error {
+  readonly exitCode = EXIT_NO_VAULT;
+
+  constructor(startDir: string, globalConfigPath: string) {
+    super(
+      `No napkin vault found (searched up from ${startDir}).\n` +
+        `  Run \`napkin init\` to create one here, pass --vault <path>, or set a` +
+        ` global vault in ${globalConfigPath} ({"vault": "/path/to/vault"}).`,
+    );
+    this.name = "VaultNotFoundError";
+  }
+}
+
+/**
  * Walk up from startDir looking for .napkin/ (or .obsidian/.napkin/ for nested layout).
  * Falls back to the global vault configured in $XDG_CONFIG_HOME/napkin/config.json.
- * Creates a bare vault at the starting directory as a last resort.
+ * Throws {@link VaultNotFoundError} when no vault exists — never silently
+ * creates one in the user's cwd.
  */
 export function findVault(startDir?: string): VaultInfo {
   let dir = path.resolve(startDir || process.cwd());
@@ -53,8 +72,16 @@ export function findVault(startDir?: string): VaultInfo {
     return resolveVaultLayout(globalVault, path.dirname(globalVault));
   }
 
-  // No vault found — create a bare one at the starting directory
-  return createBareVault(startingDir);
+  // No vault found — fail loudly instead of creating a bare vault in the
+  // user's cwd. Silent auto-create produced stray .napkin/ + .obsidian/ +
+  // NAPKIN.md dirs in arbitrary directories (and in agent workspace dirs),
+  // which users consistently reported as surprising.
+  const globalConfigPath = path.join(
+    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+    "napkin",
+    "config.json",
+  );
+  throw new VaultNotFoundError(startingDir, globalConfigPath);
 }
 
 /**
@@ -86,49 +113,6 @@ function getGlobalConfigVault(): string | null {
   }
 
   return null;
-}
-
-/**
- * Create a bare vault at the given directory.
- * Sibling layout: .napkin/ (config) + .obsidian/ + NAPKIN.md all in projectDir.
- */
-function createBareVault(projectDir: string): VaultInfo {
-  const napkinDir = path.join(projectDir, ".napkin");
-  fs.mkdirSync(napkinDir, { recursive: true });
-
-  const configFile = path.join(napkinDir, "config.json");
-  if (!fs.existsSync(configFile)) {
-    fs.writeFileSync(
-      configFile,
-      JSON.stringify(
-        {
-          overview: { depth: 3, keywords: 8 },
-          search: { limit: 30, contextLines: 5 },
-          daily: { folder: "daily", format: "YYYY-MM-DD" },
-          vault: { root: "..", obsidian: "../.obsidian" },
-        },
-        null,
-        2,
-      ),
-    );
-  }
-
-  const napkinMd = path.join(projectDir, "NAPKIN.md");
-  if (!fs.existsSync(napkinMd)) {
-    fs.writeFileSync(napkinMd, "");
-  }
-
-  const obsidianDir = path.join(projectDir, ".obsidian");
-  if (!fs.existsSync(obsidianDir)) {
-    fs.mkdirSync(obsidianDir, { recursive: true });
-  }
-
-  return {
-    name: path.basename(projectDir),
-    contentPath: projectDir,
-    configPath: napkinDir,
-    obsidianPath: obsidianDir,
-  };
 }
 
 /**
