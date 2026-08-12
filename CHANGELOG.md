@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.14.0] - 2026-08-12
 
 <!-- USER-EDITABLE SECTION START -->
 **First-run experience overhaul** — napkin no longer does surprising things when it can't find a vault:
