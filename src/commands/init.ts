@@ -9,10 +9,7 @@ import {
   output,
   success,
 } from "../utils/output.js";
-import {
-  globalConfigPath,
-  setGlobalVaultIfUnset,
-} from "../utils/vault.js";
+import { findAncestorVault, setGlobalVaultIfUnset } from "../utils/vault.js";
 
 export interface InitOptions extends OutputOptions {
   path?: string;
@@ -20,9 +17,24 @@ export interface InitOptions extends OutputOptions {
 }
 
 export async function init(opts: InitOptions) {
+  const target = path.resolve(opts.path || process.cwd());
+
+  // Refuse to create a nested vault inside an existing vault tree — napkin
+  // init creates new vaults only. Check the PARENT of the target so a
+  // target that is itself already a vault is not refused.
+  const ancestorVault = findAncestorVault(path.dirname(target));
+  if (ancestorVault) {
+    error(
+      `Refusing to initialize: a napkin vault already exists at` +
+        ` ${ancestorVault}. napkin init creates new vaults only — run it in` +
+        ` the directory you want as the vault root.`,
+    );
+    process.exit(EXIT_ERROR);
+  }
+
   let result: ReturnType<typeof Napkin.scaffold>;
   try {
-    result = Napkin.scaffold(opts.path || process.cwd(), {
+    result = Napkin.scaffold(target, {
       template: opts.template,
     });
   } catch (e: unknown) {
@@ -58,7 +70,8 @@ export async function init(opts: InitOptions) {
         console.log(`${dim("Initialized vault at")} ${bold(result.path)}`);
         if (defaultVault?.set) {
           console.log(
-            `  ${dim("default vault")} ${bold(defaultVault.configPath)}`,
+            `  ${dim("default vault")} ${bold(path.dirname(result.path))}` +
+              ` (set in ${dim(defaultVault.configPath)})`,
           );
         }
       }

@@ -165,6 +165,10 @@ field, or a stale path) — so the first vault on a machine becomes the
 default, and commands work from any directory afterwards. An existing valid
 default is never overwritten: it's an explicit user choice.
 
+To unset the default, delete the `vault` field from this file (or the whole
+file). A global config that fails to parse as JSON is treated as absent —
+`napkin init` writes a fresh one on the next run.
+
 The `vault` field is resolved against the config directory (or `~` for home).
 It is only used to locate a vault when no `.napkin/` is discoverable upward
 from the working directory.

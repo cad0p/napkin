@@ -288,6 +288,115 @@ describe("init command", () => {
     expect(globalConfig.vault).toBe(tmpDir);
   });
 
+  test("replaces a global config that is invalid JSON", async () => {
+    const configDir = path.join(tmpDir, "xdg", "napkin");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, "config.json"), "{ not json !");
+
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.defaultVault.set).toBe(true);
+    const globalConfig = JSON.parse(
+      fs.readFileSync(path.join(configDir, "config.json"), "utf-8"),
+    );
+    expect(globalConfig.vault).toBe(tmpDir);
+  });
+
+  test("adds vault field to a global config without one, keeping other keys", async () => {
+    const configDir = path.join(tmpDir, "xdg", "napkin");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ theme: "dark" }),
+    );
+
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.defaultVault.set).toBe(true);
+    const globalConfig = JSON.parse(
+      fs.readFileSync(path.join(configDir, "config.json"), "utf-8"),
+    );
+    expect(globalConfig.vault).toBe(tmpDir);
+    expect(globalConfig.theme).toBe("dark");
+  });
+
+  test("reports set:false when a valid default exists elsewhere", async () => {
+    const defaultDir = path.join(tmpDir, "default-vault");
+    fs.mkdirSync(path.join(defaultDir, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(defaultDir, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+    const configDir = path.join(tmpDir, "xdg", "napkin");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ vault: defaultDir }),
+    );
+
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.created).toBe(true);
+    expect(data.defaultVault).toEqual({
+      set: false,
+      configPath: path.join(configDir, "config.json"),
+    });
+  });
+
+  test("refuses to initialize inside an existing vault tree", async () => {
+    const outer = path.join(tmpDir, "outer");
+    fs.mkdirSync(outer, { recursive: true });
+    await init({ quiet: true, path: outer });
+
+    const configPath = path.join(tmpDir, "xdg", "napkin", "config.json");
+    const before = fs.readFileSync(configPath, "utf-8");
+
+    const subdir = path.join(outer, "subdir");
+    fs.mkdirSync(subdir, { recursive: true });
+
+    const orig = process.exit;
+    let exitCode: number | undefined;
+    const origError = console.error;
+    let errMsg = "";
+    console.error = (...args: unknown[]) => {
+      errMsg = args.map(String).join(" ");
+    };
+    (process as any).exit = (code: number) => {
+      exitCode = code;
+      throw new Error("exit");
+    };
+    try {
+      await init({ json: true, path: subdir });
+    } catch {
+      // expected
+    }
+    (process as any).exit = orig;
+    console.error = origError;
+
+    expect(exitCode).toBe(1);
+    expect(errMsg).toContain("Refusing to initialize");
+    expect(errMsg).toContain(outer);
+    // No nested .napkin/ was created
+    expect(fs.existsSync(path.join(subdir, ".napkin"))).toBe(false);
+    // Global config untouched — still points at the outer vault
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
   test("does not write when the vault already existed", async () => {
     const configDir = path.join(tmpDir, "xdg", "napkin");
     await init({ quiet: true, path: tmpDir });
