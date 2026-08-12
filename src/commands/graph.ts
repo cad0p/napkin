@@ -6,7 +6,7 @@ import { platform } from "node:process";
 import { walkDir } from "../utils/files.js";
 import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import type { OutputOptions } from "../utils/output.js";
-import { error, info } from "../utils/output.js";
+import { info } from "../utils/output.js";
 
 interface GraphNode {
   id: string;
@@ -479,12 +479,7 @@ export async function graph(
 ): Promise<void> {
   const { findVault } = await import("../utils/vault.js");
   const vaultInfo = findVault(options.vault || process.cwd());
-  const vault = vaultInfo?.contentPath;
-
-  if (!vault) {
-    error("No vault found. Run napkin init or use --vault <path>");
-    process.exit(1);
-  }
+  const vault = vaultInfo.contentPath;
 
   const { loadConfig } = await import("../utils/config.js");
   const config = loadConfig(vaultInfo.configPath);
