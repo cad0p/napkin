@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(vault)* Never auto-create a vault in findVault ([#67](https://github.com/cad0p/napkin/pull/67))
+- *(vault)* Refuse the legacy embedded layout instead of guessing it ([#68](https://github.com/cad0p/napkin/pull/68))
 
 ### 📚 Documentation
 
