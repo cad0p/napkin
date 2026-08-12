@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+**First-run experience overhaul** — napkin no longer does surprising things when it can't find a vault:
+
+- **No more silent vault creation.** Commands run outside any vault now fail fast (exit code 4) with an actionable message: run `napkin init`, pass `--vault <path>`, or set a global vault in `~/.config/napkin/config.json`. Stray `.napkin/` dirs in random directories (including agent workspace dirs) are gone.
+- **The legacy embedded layout is refused with a migration hint** — a `.napkin/` whose config lacks an explicit `vault.root` is no longer guessed at. The layout is always explicit: `"vault": {"root": ".."}` (sibling layout — the init/goldmine standard) or `"root": "."` (keep content inside `.napkin/`).
+- **`napkin init` self-registers the vault as the machine default**: the first vault you create writes `~/.config/napkin/config.json` automatically, so commands (and pi's kb tools / distill) resolve it from any directory. An existing valid default is never overwritten, and init refuses to run inside an existing vault tree.
+- **Config sync fix**: when `vault.obsidian` is omitted, Obsidian files now sync to `<contentRoot>/.obsidian` — the directory napkin actually reads (goldmine's config shape).
+- SDK: `new Napkin()` throws `VaultNotFoundError` (exported from the package root) when no vault exists — `Napkin.scaffold()` remains the only creation API.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🚀 Features
