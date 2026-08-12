@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🚀 Features
+
+- *(init)* Register the created vault as global default when none exists ([#69](https://github.com/cad0p/napkin/pull/69))
+
 ### 🐛 Bug Fixes
 
 - *(vault)* Never auto-create a vault in findVault ([#67](https://github.com/cad0p/napkin/pull/67))
