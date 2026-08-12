@@ -1,11 +1,11 @@
 {
   "name": "@cad0p/napkin",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
   },
-  "description": "📜 Knowledge system for agents. Local-first, file-based, progressively disclosed.",
+  "description": "\ud83d\udcdc Knowledge system for agents. Local-first, file-based, progressively disclosed.",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
