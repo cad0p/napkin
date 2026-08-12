@@ -586,6 +586,7 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     saveConfig(vault.vaultPath, {
       ...DEFAULT_CONFIG,
       overview: { ...DEFAULT_CONFIG.overview, maxRows: 100 },
+      vault: { root: "." },
     });
 
     const result = (await runOverviewJson(vault.path)) as {
@@ -609,6 +610,7 @@ Reserved parking slots on level B2. Guarantee covers parking fees.`,
     saveConfig(vault.vaultPath, {
       ...DEFAULT_CONFIG,
       overview: { ...DEFAULT_CONFIG.overview, maxRows: 0 },
+      vault: { root: "." },
     });
 
     const result = (await runOverviewJson(vault.path)) as {

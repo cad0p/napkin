@@ -5,7 +5,9 @@ import { DEFAULT_CONFIG, saveConfig } from "./config.js";
 
 /**
  * Create a temporary vault for testing.
- * .napkin/ is the vault root — all content lives inside it.
+ * Embedded layout with an EXPLICIT root: .napkin/ is the vault root (content
+ * lives inside it), declared via vault.root = "." — never the implicit
+ * legacy fallback, which is refused.
  * Returns:
  *   - path: parent dir (pass to --vault for commands, findVault walks up from here)
  *   - vaultPath: the .napkin/ dir (pass directly to utility functions like listFiles)
@@ -18,7 +20,7 @@ export function createTempVault(files?: Record<string, string>): {
 } {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-test-"));
 
-  // .napkin/ IS the vault root
+  // .napkin/ IS the vault root, declared explicitly
   const napkinDir = path.join(tmpDir, ".napkin");
   fs.mkdirSync(napkinDir, { recursive: true });
 
@@ -29,6 +31,7 @@ export function createTempVault(files?: Record<string, string>): {
       ...DEFAULT_CONFIG.daily,
       folder: "Inbox/Daily",
     },
+    vault: { root: "." },
   };
   saveConfig(napkinDir, testConfig);
 

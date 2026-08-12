@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTempVault } from "./test-helpers.js";
-import { findVault, getVaultConfig } from "./vault.js";
+import { findVault, getVaultConfig, VaultNotFoundError } from "./vault.js";
 
 let vault: { path: string; vaultPath: string; cleanup: () => void };
 
@@ -28,20 +28,18 @@ describe("findVault", () => {
     expect(result.configPath).toBe(path.join(vault.path, ".napkin"));
   });
 
-  test("auto-creates vault when none found", () => {
+  test("throws VaultNotFoundError when none found", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-auto-"));
     const origXdg = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = tmpDir; // isolate from global config
     try {
-      const result = findVault(tmpDir);
-      expect(result.contentPath).toBe(tmpDir);
-      expect(result.configPath).toBe(path.join(tmpDir, ".napkin"));
-      expect(result.obsidianPath).toBe(path.join(tmpDir, ".obsidian"));
-      expect(fs.existsSync(path.join(tmpDir, ".napkin", "config.json"))).toBe(
-        true,
+      expect(() => findVault(tmpDir)).toThrow(
+        /No napkin vault found[\s\S]*--vault/,
       );
-      expect(fs.existsSync(path.join(tmpDir, "NAPKIN.md"))).toBe(true);
-      expect(fs.existsSync(path.join(tmpDir, ".obsidian"))).toBe(true);
+      // Must not create any stray vault artifacts
+      expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, "NAPKIN.md"))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, ".obsidian"))).toBe(false);
     } finally {
       if (origXdg !== undefined) process.env.XDG_CONFIG_HOME = origXdg;
       else delete process.env.XDG_CONFIG_HOME;
@@ -85,7 +83,7 @@ describe("findVault", () => {
     }
   });
 
-  test("ignores invalid global config", () => {
+  test("throws when global config is invalid", () => {
     const configDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "napkin-bad-config-"),
     );
@@ -96,9 +94,9 @@ describe("findVault", () => {
     const origXdg = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = configDir;
     try {
-      const result = findVault(tmpDir);
-      // Should fall through to createBareVault
-      expect(result.contentPath).toBe(tmpDir);
+      // No vault anywhere — must throw, never create one
+      expect(() => findVault(tmpDir)).toThrow(VaultNotFoundError);
+      expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(false);
     } finally {
       if (origXdg !== undefined) process.env.XDG_CONFIG_HOME = origXdg;
       else delete process.env.XDG_CONFIG_HOME;
@@ -107,12 +105,13 @@ describe("findVault", () => {
     }
   });
 
-  test("finds vault with .napkin/ directory", () => {
+  test("throws when .napkin/ exists but config lacks vault.root", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-only-test-"));
     fs.mkdirSync(path.join(tmpDir, ".napkin"));
     try {
-      const result = findVault(tmpDir);
-      expect(result.configPath).toBe(path.join(tmpDir, ".napkin"));
+      // A bare .napkin/ with no config is the legacy embedded layout —
+      // refused, not guessed.
+      expect(() => findVault(tmpDir)).toThrow(VaultNotFoundError);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -128,8 +127,10 @@ describe("findVault", () => {
       );
     });
 
-    test("existing config without vault field resolves as embedded", () => {
-      // Simulate a pre-existing vault: config.json has no vault field
+    test("config without vault field is refused with a migration hint", () => {
+      // Simulate a pre-layout vault: config.json has no vault field. The
+      // implicit embedded-layout fallback is gone — it must throw and tell
+      // the user how to migrate.
       const tmpDir = fs.mkdtempSync(
         path.join(os.tmpdir(), "napkin-existing-test-"),
       );
@@ -145,11 +146,49 @@ describe("findVault", () => {
       fs.writeFileSync(path.join(napkinDir, "README.md"), "# Hello");
 
       try {
-        const result = findVault(tmpDir);
-        expect(result.contentPath).toBe(napkinDir);
-        expect(result.configPath).toBe(napkinDir);
-        expect(result.obsidianPath).toBe(path.join(napkinDir, ".obsidian"));
-        expect(result.name).toBe(path.basename(tmpDir));
+        try {
+          findVault(tmpDir);
+          expect.unreachable("expected VaultNotFoundError");
+        } catch (e) {
+          expect(e).toBeInstanceOf(VaultNotFoundError);
+          const msg = (e as Error).message;
+          expect(msg).toContain("legacy embedded layout");
+          expect(msg).toContain('"root": ".."');
+          expect(msg).toContain('"root": "."');
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    test("nested layout gets a sibling-root hint pointing two levels up", () => {
+      // Legacy vault in the nested position: <dir>/.obsidian/.napkin/
+      const tmpDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "napkin-existing-test-"),
+      );
+      const napkinDir = path.join(tmpDir, ".obsidian", ".napkin");
+      fs.mkdirSync(path.join(napkinDir, ".obsidian"), { recursive: true });
+      fs.writeFileSync(
+        path.join(napkinDir, "config.json"),
+        JSON.stringify({
+          overview: { depth: 3, keywords: 8 },
+          daily: { folder: "daily", format: "YYYY-MM-DD" },
+        }),
+      );
+      fs.writeFileSync(path.join(napkinDir, "README.md"), "# Hello");
+
+      try {
+        try {
+          findVault(tmpDir);
+          expect.unreachable("expected VaultNotFoundError");
+        } catch (e) {
+          expect(e).toBeInstanceOf(VaultNotFoundError);
+          const msg = (e as Error).message;
+          expect(msg).toContain("legacy embedded layout");
+          expect(msg).toContain('"root": "../.."');
+          expect(msg).toContain('"root": "."');
+          expect(msg).toContain("missing, unreadable");
+        }
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
