@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🐛 Bug Fixes
+
+- *(vault)* Never auto-create a vault in findVault ([#67](https://github.com/cad0p/napkin/pull/67))
+
 ### 📚 Documentation
 
 - Port AGENTS.md from pi-napkin (drop goldmine vault line — mandate via system prompt) ([#65](https://github.com/cad0p/napkin/pull/65))
