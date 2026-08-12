@@ -118,7 +118,9 @@ export function saveConfig(
     obsidianDir ||
     (config.vault?.obsidian
       ? path.resolve(napkinDir, config.vault.obsidian)
-      : path.join(napkinDir, ".obsidian"));
+      : config.vault?.root
+        ? path.join(path.resolve(napkinDir, config.vault.root), ".obsidian")
+        : path.join(napkinDir, ".obsidian"));
   syncObsidianConfig(resolvedObsidian, config);
 }
 

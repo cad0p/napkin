@@ -41,13 +41,15 @@ function noVaultFoundMessage(
 }
 
 function legacyLayoutMessage(napkinDir: string, projectDir: string): string {
+  const siblingRoot = path.relative(napkinDir, projectDir).replace(/\\/g, "/");
   return (
     `Vault at ${projectDir} uses the legacy embedded layout: ` +
-    `${path.join(napkinDir, "config.json")} has no \"vault\" section. ` +
+    `${path.join(napkinDir, "config.json")} is missing, unreadable, or has` +
+    ` no "vault" section. ` +
     `This layout is no longer supported.\n` +
-    `  Add \"vault\": {\"root\": \"..\"} to adopt the sibling layout (content` +
-    ` in ${projectDir}/), or \"vault\": {\"root\": \".\"} to keep content` +
-    ` inside ${napkinDir}/.`
+    `  Add "vault": {"root": "${siblingRoot}"} to adopt the sibling layout` +
+    ` (content in ${projectDir}/), or "vault": {"root": "."} to keep` +
+    ` content inside ${napkinDir}/.`
   );
 }
 
@@ -101,7 +103,9 @@ export function findVault(startDir?: string): VaultInfo {
     "napkin",
     "config.json",
   );
-  throw new VaultNotFoundError(noVaultFoundMessage(startingDir, globalConfigPath));
+  throw new VaultNotFoundError(
+    noVaultFoundMessage(startingDir, globalConfigPath),
+  );
 }
 
 /**
