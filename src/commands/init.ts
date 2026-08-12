@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { Napkin } from "../sdk.js";
 import { EXIT_ERROR } from "../utils/exit-codes.js";
 import {
@@ -8,6 +9,10 @@ import {
   output,
   success,
 } from "../utils/output.js";
+import {
+  globalConfigPath,
+  setGlobalVaultIfUnset,
+} from "../utils/vault.js";
 
 export interface InitOptions extends OutputOptions {
   path?: string;
@@ -25,9 +30,18 @@ export async function init(opts: InitOptions) {
     process.exit(EXIT_ERROR);
   }
 
+  // First vault on the machine? Register it as the global default so
+  // commands resolve it from any directory (and the kb_* tools / distill
+  // pick it up on the next session). An existing valid default is an
+  // explicit user choice and is never overwritten. result.path is the
+  // .napkin/ dir — the global default points at the content root.
+  const defaultVault = result.created
+    ? setGlobalVaultIfUnset(path.dirname(result.path))
+    : null;
+
   if (!result.created && !result.template) {
     output(opts, {
-      json: () => result,
+      json: () => ({ ...result, defaultVault: null }),
       human: () => {
         console.log(
           `${dim("Vault already initialized at")} ${bold(result.path)}`,
@@ -38,10 +52,15 @@ export async function init(opts: InitOptions) {
   }
 
   output(opts, {
-    json: () => result,
+    json: () => ({ ...result, defaultVault }),
     human: () => {
       if (result.created) {
         console.log(`${dim("Initialized vault at")} ${bold(result.path)}`);
+        if (defaultVault?.set) {
+          console.log(
+            `  ${dim("default vault")} ${bold(defaultVault.configPath)}`,
+          );
+        }
       }
       if (result.template) {
         console.log(`  ${dim("template")} ${bold(result.template)}`);

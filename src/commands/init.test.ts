@@ -6,12 +6,20 @@ import { addTemplate } from "../core/init.js";
 import { init } from "./init.js";
 
 let tmpDir: string;
+let origXdg: string | undefined;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-init-test-"));
+  // Isolate the global config: init may register the created vault as the
+  // default in $XDG_CONFIG_HOME/napkin/config.json — never touch the
+  // real user's config.
+  origXdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = path.join(tmpDir, "xdg");
 });
 
 afterEach(() => {
+  if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = origXdg;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -205,6 +213,111 @@ describe("init command", () => {
     expect(fs.existsSync(path.join(tmpDir, ".napkin", ".obsidian"))).toBe(
       false,
     );
+  });
+
+  test("registers the vault as global default when none is configured", async () => {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.created).toBe(true);
+    expect(data.defaultVault.set).toBe(true);
+    expect(data.defaultVault.configPath).toBe(
+      path.join(tmpDir, "xdg", "napkin", "config.json"),
+    );
+
+    const globalConfig = JSON.parse(
+      fs.readFileSync(data.defaultVault.configPath, "utf-8"),
+    );
+    expect(globalConfig.vault).toBe(tmpDir);
+
+    // Commands outside the vault now resolve it via the global fallback
+    const { findVault } = await import("../utils/vault.js");
+    const outside = path.join(tmpDir, "elsewhere");
+    fs.mkdirSync(outside);
+    expect(findVault(outside).contentPath).toBe(tmpDir);
+  });
+
+  test("does not overwrite an existing valid global default", async () => {
+    // A pre-existing default vault (e.g. the user's long-term vault)
+    const defaultDir = path.join(tmpDir, "default-vault");
+    fs.mkdirSync(path.join(defaultDir, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(defaultDir, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+    const configDir = path.join(tmpDir, "xdg", "napkin");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ vault: defaultDir, otherKey: "keep" }),
+    );
+
+    await init({ quiet: true, path: tmpDir });
+
+    const globalConfig = JSON.parse(
+      fs.readFileSync(path.join(configDir, "config.json"), "utf-8"),
+    );
+    // Untouched: still points at the pre-existing default, other keys kept
+    expect(globalConfig.vault).toBe(defaultDir);
+    expect(globalConfig.otherKey).toBe("keep");
+  });
+
+  test("replaces a stale global default whose vault no longer exists", async () => {
+    const configDir = path.join(tmpDir, "xdg", "napkin");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ vault: path.join(tmpDir, "gone-vault") }),
+    );
+
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.defaultVault.set).toBe(true);
+    const globalConfig = JSON.parse(
+      fs.readFileSync(path.join(configDir, "config.json"), "utf-8"),
+    );
+    expect(globalConfig.vault).toBe(tmpDir);
+  });
+
+  test("does not write when the vault already existed", async () => {
+    const configDir = path.join(tmpDir, "xdg", "napkin");
+    await init({ quiet: true, path: tmpDir });
+    const configPath = path.join(configDir, "config.json");
+    const before = fs.readFileSync(configPath, "utf-8");
+
+    // Second init on the same dir: not created, global config untouched
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.created).toBe(false);
+    expect(data.defaultVault).toBeNull();
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  test("registers as default even with a template on a fresh dir", async () => {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    await init({ json: true, path: tmpDir, template: "personal" });
+    console.log = orig;
+
+    const data = JSON.parse(logs.join(""));
+    expect(data.created).toBe(true);
+    expect(data.defaultVault.set).toBe(true);
+    expect(data.template).toBe("personal");
   });
 
   test("rejects invalid template name", async () => {

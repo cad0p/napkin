@@ -30,7 +30,9 @@ works.
 ## Quick Start
 
 ```bash
-# Initialize a vault
+# Initialize a vault (the first vault on the machine also becomes the
+# default — napkin writes ~/.config/napkin/config.json so commands work
+# from any directory)
 napkin init --template coding
 
 # See what's in it

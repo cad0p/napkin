@@ -96,12 +96,56 @@ export function findVault(startDir?: string): VaultInfo {
   // user's cwd. Silent auto-create produced stray .napkin/ + .obsidian/ +
   // NAPKIN.md dirs in arbitrary directories (and in agent workspace dirs),
   // which users consistently reported as surprising.
-  const globalConfigPath = path.join(
+  throw new VaultNotFoundError(noVaultFoundMessage(startingDir, globalConfigPath()));
+}
+
+/**
+ * Path to the global napkin config: $XDG_CONFIG_HOME/napkin/config.json
+ * (defaults to ~/.config/napkin/config.json).
+ */
+export function globalConfigPath(): string {
+  return path.join(
     process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
     "napkin",
     "config.json",
   );
-  throw new VaultNotFoundError(noVaultFoundMessage(startingDir, globalConfigPath));
+}
+
+/**
+ * Set `vault` in the global config so `vaultPath` becomes the default vault
+ * for commands run outside any vault. Only writes when NO usable default
+ * vault is configured yet (missing config, missing `vault` field, or a
+ * stale path whose `.napkin/` no longer exists) — an existing valid default
+ * is an explicit user choice and is never overwritten. Other keys in an
+ * existing global config are preserved.
+ *
+ * Returns whether a write happened and the config path.
+ */
+export function setGlobalVaultIfUnset(vaultPath: string): {
+  set: boolean;
+  configPath: string;
+} {
+  const configPath = globalConfigPath();
+  if (getGlobalConfigVault()) {
+    return { set: false, configPath };
+  }
+
+  let raw: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    } catch {
+      // invalid JSON — start fresh, only the vault key matters globally
+      raw = {};
+    }
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({ ...raw, vault: vaultPath }, null, 2) + "\n",
+  );
+  return { set: true, configPath };
 }
 
 /**
