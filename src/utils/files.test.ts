@@ -13,6 +13,7 @@ import {
 } from "./files.js";
 import { loadIgnorer } from "./ignore.js";
 import { createTempVault } from "./test-helpers.js";
+import { NAPKIN_MARKER } from "./vault.js";
 
 let vault: { path: string; vaultPath: string; cleanup: () => void };
 
@@ -193,9 +194,9 @@ describe("sibling layout", () => {
     fs.mkdirSync(path.join(tmpDir, "folder"), { recursive: true });
     fs.writeFileSync(path.join(tmpDir, "folder", "deep.md"), "# Deep");
     // .napkin/ and .obsidian/ as siblings
-    fs.mkdirSync(path.join(tmpDir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, NAPKIN_MARKER), { recursive: true });
     fs.mkdirSync(path.join(tmpDir, ".obsidian"), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, ".napkin", "config.json"), "{}");
+    fs.writeFileSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"), "{}");
     siblingVault = {
       path: tmpDir,
       cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }),
@@ -219,7 +220,7 @@ describe("sibling layout", () => {
   test("listFolders skips .napkin/ when content root is parent", () => {
     const folders = listFolders(siblingVault.path);
     expect(folders).toContain("folder");
-    expect(folders).not.toContain(".napkin");
+    expect(folders).not.toContain(NAPKIN_MARKER);
   });
 });
 

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { addTemplate } from "../core/init.js";
+import { NAPKIN_MARKER } from "../utils/vault.js";
 import { init } from "./init.js";
 
 let tmpDir: string;
@@ -35,14 +36,14 @@ describe("init command", () => {
     expect(data.created).toBe(true);
 
     // .napkin/ holds config
-    expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "config.json"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"))).toBe(
       true,
     );
 
     // Config has vault.root pointing to parent
     const config = JSON.parse(
-      fs.readFileSync(path.join(tmpDir, ".napkin", "config.json"), "utf-8"),
+      fs.readFileSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"), "utf-8"),
     );
     expect(config.vault.root).toBe("..");
     expect(config.vault.obsidian).toBe("../.obsidian");
@@ -60,7 +61,7 @@ describe("init command", () => {
     ).toBe(true);
 
     // No .obsidian/ inside .napkin/
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", ".obsidian"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, ".obsidian"))).toBe(
       false,
     );
   });
@@ -79,7 +80,7 @@ describe("init command", () => {
   });
 
   test("creates config when only .napkin/ dir exists", async () => {
-    fs.mkdirSync(path.join(tmpDir, ".napkin"));
+    fs.mkdirSync(path.join(tmpDir, NAPKIN_MARKER));
 
     const logs: string[] = [];
     const orig = console.log;
@@ -90,7 +91,7 @@ describe("init command", () => {
     const data = JSON.parse(logs.join(""));
     expect(data.created).toBe(false);
 
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "config.json"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"))).toBe(
       true,
     );
     expect(fs.existsSync(path.join(tmpDir, ".obsidian"))).toBe(true);
@@ -120,10 +121,10 @@ describe("init command", () => {
     expect(fs.existsSync(path.join(tmpDir, "Templates/Guide.md"))).toBe(true);
 
     // NOT inside .napkin/
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "NAPKIN.md"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "NAPKIN.md"))).toBe(
       false,
     );
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "decisions"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "decisions"))).toBe(
       false,
     );
   });
@@ -186,13 +187,13 @@ describe("init command", () => {
     const data = JSON.parse(logs.join(""));
     expect(data.created).toBe(true);
 
-    expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "config.json"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"))).toBe(
       true,
     );
 
     const config = JSON.parse(
-      fs.readFileSync(path.join(tmpDir, ".napkin", "config.json"), "utf-8"),
+      fs.readFileSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"), "utf-8"),
     );
     expect(config.vault.root).toBe("..");
     expect(config.vault.obsidian).toBe("../.obsidian");
@@ -210,7 +211,7 @@ describe("init command", () => {
     expect(appJson.alwaysUpdateLinks).toBe(true);
 
     // No .obsidian/ inside .napkin/
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", ".obsidian"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, ".obsidian"))).toBe(
       false,
     );
   });
@@ -244,9 +245,9 @@ describe("init command", () => {
   test("does not overwrite an existing valid global default", async () => {
     // A pre-existing default vault (e.g. the user's long-term vault)
     const defaultDir = path.join(tmpDir, "default-vault");
-    fs.mkdirSync(path.join(defaultDir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(defaultDir, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(defaultDir, ".napkin", "config.json"),
+      path.join(defaultDir, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
     const configDir = path.join(tmpDir, "xdg", "napkin");
@@ -332,9 +333,9 @@ describe("init command", () => {
 
   test("reports set:false when a valid default exists elsewhere", async () => {
     const defaultDir = path.join(tmpDir, "default-vault");
-    fs.mkdirSync(path.join(defaultDir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(defaultDir, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(defaultDir, ".napkin", "config.json"),
+      path.join(defaultDir, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
     const configDir = path.join(tmpDir, "xdg", "napkin");
@@ -392,7 +393,7 @@ describe("init command", () => {
     expect(errMsg).toContain("Refusing to initialize");
     expect(errMsg).toContain(outer);
     // No nested .napkin/ was created
-    expect(fs.existsSync(path.join(subdir, ".napkin"))).toBe(false);
+    expect(fs.existsSync(path.join(subdir, NAPKIN_MARKER))).toBe(false);
     // Global config untouched — still points at the outer vault
     expect(fs.readFileSync(configPath, "utf-8")).toBe(before);
   });
@@ -491,8 +492,8 @@ describe("init command", () => {
     await init({ quiet: true, path: tmpDir, template: "coding" });
 
     // .napkin/ holds config only
-    expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "config.json"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "config.json"))).toBe(
       true,
     );
 
@@ -508,13 +509,13 @@ describe("init command", () => {
     expect(fs.existsSync(path.join(tmpDir, "Templates"))).toBe(true);
 
     // Nothing inside .napkin/ except config
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "NAPKIN.md"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "NAPKIN.md"))).toBe(
       false,
     );
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", "decisions"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, "decisions"))).toBe(
       false,
     );
-    expect(fs.existsSync(path.join(tmpDir, ".napkin", ".obsidian"))).toBe(
+    expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER, ".obsidian"))).toBe(
       false,
     );
   });

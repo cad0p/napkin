@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Ignorer } from "./ignore.js";
+import { NAPKIN_MARKER } from "./vault.js";
 
 export interface FileInfo {
   path: string;
@@ -66,7 +67,7 @@ export const SKIP_DIRS: ReadonlySet<string> = new Set([
   ".git",
   ".trash",
   ".nanny",
-  ".napkin",
+  NAPKIN_MARKER,
   "node_modules",
 ]);
 

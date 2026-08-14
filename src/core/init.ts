@@ -6,6 +6,7 @@ import {
   type NapkinConfig,
   saveConfig,
 } from "../utils/config.js";
+import { NAPKIN_MARKER } from "../utils/vault.js";
 
 export interface InitResult {
   status: string;
@@ -63,7 +64,7 @@ export function initVault(opts: {
     throw new Error("No path specified for vault initialization");
   }
   const targetDir = path.resolve(opts.path);
-  const napkinDir = path.join(targetDir, ".napkin");
+  const napkinDir = path.join(targetDir, NAPKIN_MARKER);
   const obsidianDir = path.join(targetDir, ".obsidian");
   const hasExistingObsidian =
     fs.existsSync(obsidianDir) && fs.statSync(obsidianDir).isDirectory();
@@ -127,7 +128,7 @@ export function scaffoldVault(
   template?: string,
 ): ScaffoldResult {
   const resolved = path.resolve(targetPath);
-  const napkinDir = path.join(resolved, ".napkin");
+  const napkinDir = path.join(resolved, NAPKIN_MARKER);
   const obsidianDir = path.join(resolved, ".obsidian");
   const hasExistingObsidian =
     fs.existsSync(obsidianDir) && fs.statSync(obsidianDir).isDirectory();
@@ -180,7 +181,7 @@ export function addTemplate(
   template: string,
 ): AddTemplateResult {
   const resolved = path.resolve(targetPath);
-  const napkinDir = path.join(resolved, ".napkin");
+  const napkinDir = path.join(resolved, NAPKIN_MARKER);
 
   if (!fs.existsSync(path.join(napkinDir, "config.json"))) {
     throw new Error("Vault not initialized. Run scaffold first.");

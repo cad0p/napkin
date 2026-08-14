@@ -3,6 +3,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { EXIT_NO_VAULT } from "./exit-codes.js";
 
+/**
+ * The directory marker identifying a napkin vault. The nested layout
+ * composes `.obsidian` + `NAPKIN_MARKER` under the project root. This is
+ * the single source of truth for the name — imported by downstream
+ * packages and napkin's own walk.
+ */
+export const NAPKIN_MARKER = ".napkin";
+
 export interface VaultInfo {
   /** Vault display name (derived from content root directory) */
   name: string;
@@ -66,14 +74,14 @@ export function findVault(startDir?: string): VaultInfo {
   const startingDir = dir;
 
   while (true) {
-    const napkinDir = path.join(dir, ".napkin");
+    const napkinDir = path.join(dir, NAPKIN_MARKER);
 
     if (fs.existsSync(napkinDir) && fs.statSync(napkinDir).isDirectory()) {
       return resolveVaultLayout(napkinDir, dir);
     }
 
     // Check for nested layout: .obsidian/.napkin/
-    const nestedNapkin = path.join(dir, ".obsidian", ".napkin");
+    const nestedNapkin = path.join(dir, ".obsidian", NAPKIN_MARKER);
     if (
       fs.existsSync(nestedNapkin) &&
       fs.statSync(nestedNapkin).isDirectory()
@@ -128,12 +136,12 @@ function findAncestorMarker(
   const root = path.parse(dir).root;
 
   while (true) {
-    const napkinDir = path.join(dir, ".napkin");
+    const napkinDir = path.join(dir, NAPKIN_MARKER);
     if (fs.existsSync(napkinDir) && fs.statSync(napkinDir).isDirectory()) {
       return { vaultDir: dir, markerDir: napkinDir };
     }
 
-    const nestedNapkin = path.join(dir, ".obsidian", ".napkin");
+    const nestedNapkin = path.join(dir, ".obsidian", NAPKIN_MARKER);
     if (
       fs.existsSync(nestedNapkin) &&
       fs.statSync(nestedNapkin).isDirectory()
@@ -230,7 +238,7 @@ function getGlobalConfigVault(): string | null {
         ? path.join(os.homedir(), raw.vault.slice(1))
         : path.resolve(path.dirname(configPath), raw.vault);
 
-    const napkinDir = path.join(vaultPath, ".napkin");
+    const napkinDir = path.join(vaultPath, NAPKIN_MARKER);
     // A FILE named .napkin is not a vault — only a directory counts as a
     // valid default; otherwise a stray file would block replacement.
     if (fs.existsSync(napkinDir) && fs.statSync(napkinDir).isDirectory()) {

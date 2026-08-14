@@ -29,5 +29,6 @@ export type { VaultInfo } from "./utils/vault.js";
 export {
   findAncestorConfigDir,
   findAncestorVault,
+  NAPKIN_MARKER,
   VaultNotFoundError,
 } from "./utils/vault.js";

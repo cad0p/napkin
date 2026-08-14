@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_CONFIG, saveConfig } from "./config.js";
+import { NAPKIN_MARKER } from "./vault.js";
 
 /**
  * Create a temporary vault for testing.
@@ -21,7 +22,7 @@ export function createTempVault(files?: Record<string, string>): {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-test-"));
 
   // .napkin/ IS the vault root, declared explicitly
-  const napkinDir = path.join(tmpDir, ".napkin");
+  const napkinDir = path.join(tmpDir, NAPKIN_MARKER);
   fs.mkdirSync(napkinDir, { recursive: true });
 
   // Write config.json which also syncs .obsidian/
