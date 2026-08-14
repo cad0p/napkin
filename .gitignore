@@ -7,7 +7,7 @@ node_modules/
 # TypeScript
 *.tsbuildinfo
 
-# Build output (not shipped; package uses bin/napkin.js + jiti on src/)
+# Build output (compiled by `prepare` and shipped in the tarball)
 dist
 
 # pnpm

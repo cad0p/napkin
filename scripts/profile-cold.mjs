@@ -111,4 +111,4 @@ for (const d of docs) {
 }
 lap(`contentScan ×${docs.length} ("distill")`);
 
-console.log(`\nTOTAL (excl jiti/startup): ${(performance.now() - t0).toFixed(0)} ms`);
+console.log(`\nTOTAL (excl startup): ${(performance.now() - t0).toFixed(0)} ms`);
