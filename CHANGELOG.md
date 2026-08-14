@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🚀 Features
+
+- *(vault)* Export findAncestorConfigDir alongside findAncestorVault (closes #74)
+
 ### 💼 Other
 
 - Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
