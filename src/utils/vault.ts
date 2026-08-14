@@ -111,13 +111,26 @@ export function findVault(startDir?: string): VaultInfo {
  * that contains it, or null.
  */
 export function findAncestorVault(startDir?: string): string | null {
+  return findAncestorMarker(startDir || process.cwd())?.vaultDir ?? null;
+}
+
+/**
+ * Shared walk behind {@link findAncestorVault} and
+ * {@link findAncestorConfigDir}. Returns the directory that contains a
+ * vault marker plus the marker directory itself (`.napkin/`, or
+ * `.obsidian/.napkin/` for the nested layout — where the vault's
+ * `config.json` lives), or null. Purely structural, read-only probes.
+ */
+function findAncestorMarker(
+  startDir: string,
+): { vaultDir: string; markerDir: string } | null {
   let dir = path.resolve(startDir || process.cwd());
   const root = path.parse(dir).root;
 
   while (true) {
     const napkinDir = path.join(dir, ".napkin");
     if (fs.existsSync(napkinDir) && fs.statSync(napkinDir).isDirectory()) {
-      return dir;
+      return { vaultDir: dir, markerDir: napkinDir };
     }
 
     const nestedNapkin = path.join(dir, ".obsidian", ".napkin");
@@ -125,7 +138,7 @@ export function findAncestorVault(startDir?: string): string | null {
       fs.existsSync(nestedNapkin) &&
       fs.statSync(nestedNapkin).isDirectory()
     ) {
-      return dir;
+      return { vaultDir: dir, markerDir: nestedNapkin };
     }
 
     const parent = path.dirname(dir);
@@ -134,6 +147,18 @@ export function findAncestorVault(startDir?: string): string | null {
     }
     dir = parent;
   }
+}
+
+/**
+ * Walk up from startDir looking for an existing vault's `.napkin/` (or
+ * `.obsidian/.napkin/` for the nested layout) at any level, returning
+ * the marker directory itself — where the vault's `config.json` lives.
+ * Purely structural — no global-config fallback and no layout
+ * validation: any ancestor marker counts, even a legacy one. Returns
+ * the marker dir, or null.
+ */
+export function findAncestorConfigDir(startDir?: string): string | null {
+  return findAncestorMarker(startDir || process.cwd())?.markerDir ?? null;
 }
 
 /**
