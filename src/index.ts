@@ -26,4 +26,8 @@ export { Napkin } from "./sdk.js";
 export type { VaultTemplate } from "./templates/types.js";
 export type { Heading } from "./utils/markdown.js";
 export type { VaultInfo } from "./utils/vault.js";
-export { findAncestorVault, VaultNotFoundError } from "./utils/vault.js";
+export {
+  findAncestorConfigDir,
+  findAncestorVault,
+  VaultNotFoundError,
+} from "./utils/vault.js";

@@ -3,7 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTempVault } from "./test-helpers.js";
-import { findVault, getVaultConfig, VaultNotFoundError } from "./vault.js";
+import {
+  findAncestorConfigDir,
+  findAncestorVault,
+  findVault,
+  getVaultConfig,
+  VaultNotFoundError,
+} from "./vault.js";
 
 let vault: { path: string; vaultPath: string; cleanup: () => void };
 
@@ -256,6 +262,93 @@ describe("findVault", () => {
       expect(result.configPath).toBe(path.join(tmpDir, ".obsidian", ".napkin"));
       expect(result.obsidianPath).toBe(path.join(tmpDir, ".obsidian"));
     });
+  });
+});
+
+describe("findAncestorVault / findAncestorConfigDir (structural walk-up)", () => {
+  const tmpDirs: string[] = [];
+
+  function makeTmpDir(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-ancestor-"));
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tmpDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves the plain .napkin/ marker: vaultDir = containing dir, configDir = the marker", () => {
+    const vault = makeTmpDir();
+    fs.mkdirSync(path.join(vault, ".napkin"));
+    const nested = path.join(vault, "a", "b");
+    fs.mkdirSync(nested, { recursive: true });
+
+    expect(findAncestorVault(vault)).toBe(vault);
+    expect(findAncestorVault(nested)).toBe(vault);
+    expect(findAncestorConfigDir(vault)).toBe(path.join(vault, ".napkin"));
+    expect(findAncestorConfigDir(nested)).toBe(path.join(vault, ".napkin"));
+  });
+
+  test("resolves the nested .obsidian/.napkin/ layout", () => {
+    const vault = makeTmpDir();
+    fs.mkdirSync(path.join(vault, ".obsidian", ".napkin"), {
+      recursive: true,
+    });
+    const nested = path.join(vault, "notes", "deep");
+    fs.mkdirSync(nested, { recursive: true });
+
+    expect(findAncestorVault(vault)).toBe(vault);
+    expect(findAncestorVault(nested)).toBe(vault);
+    expect(findAncestorConfigDir(vault)).toBe(
+      path.join(vault, ".obsidian", ".napkin"),
+    );
+    expect(findAncestorConfigDir(nested)).toBe(
+      path.join(vault, ".obsidian", ".napkin"),
+    );
+  });
+
+  test("plain .napkin/ wins over .obsidian/.napkin/ when both exist at the same level (precedence)", () => {
+    const vault = makeTmpDir();
+    fs.mkdirSync(path.join(vault, ".napkin"));
+    fs.mkdirSync(path.join(vault, ".obsidian", ".napkin"), {
+      recursive: true,
+    });
+
+    expect(findAncestorVault(vault)).toBe(vault);
+    expect(findAncestorConfigDir(vault)).toBe(path.join(vault, ".napkin"));
+  });
+
+  test("returns null for a non-vault tree", () => {
+    const tree = makeTmpDir();
+    const nested = path.join(tree, "x", "y");
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, "notes.md"), "# hi");
+
+    expect(findAncestorVault(tree)).toBeNull();
+    expect(findAncestorVault(nested)).toBeNull();
+    expect(findAncestorConfigDir(tree)).toBeNull();
+    expect(findAncestorConfigDir(nested)).toBeNull();
+  });
+
+  test("a FILE named .napkin is not a marker (isDirectory guard)", () => {
+    const vault = makeTmpDir();
+    fs.writeFileSync(path.join(vault, ".napkin"), "not a dir");
+    const nested = path.join(vault, "sub");
+    fs.mkdirSync(nested);
+
+    expect(findAncestorVault(vault)).toBeNull();
+    expect(findAncestorVault(nested)).toBeNull();
+    expect(findAncestorConfigDir(vault)).toBeNull();
+    expect(findAncestorConfigDir(nested)).toBeNull();
+  });
+
+  test("walking from the filesystem root terminates with null", () => {
+    const root = path.parse(process.cwd()).root;
+    expect(findAncestorVault(root)).toBeNull();
+    expect(findAncestorConfigDir(root)).toBeNull();
   });
 });
 
