@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { Napkin } from "./sdk.js";
 import { createTempVault } from "./utils/test-helpers.js";
+import { NAPKIN_MARKER } from "./utils/vault.js";
 
 let v: { path: string; vaultPath: string; cleanup: () => void };
 let n: Napkin;
@@ -345,7 +346,7 @@ describe("static", () => {
     try {
       const result = Napkin.scaffold(tmpDir);
       expect(result.created).toBe(true);
-      expect(fs.existsSync(path.join(tmpDir, ".napkin"))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, NAPKIN_MARKER))).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
