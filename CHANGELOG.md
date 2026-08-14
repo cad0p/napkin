@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 💼 Other
+
+- Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
+
+
 ## [0.14.0] - 2026-08-12
 
 <!-- USER-EDITABLE SECTION START -->
