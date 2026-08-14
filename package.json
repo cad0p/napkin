@@ -7,19 +7,25 @@
   },
   "description": "\ud83d\udcdc Knowledge system for agents. Local-first, file-based, progressively disclosed.",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "bin": {
     "napkin": "./bin/napkin.js"
   },
   "files": [
+    "dist",
     "src",
     "bin",
     "skills"
   ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "pnpm build",
     "typecheck": "tsc --noEmit",
     "dev": "node --import tsx src/main.ts",
     "test": "vitest run",
@@ -63,7 +69,6 @@
     "gray-matter": "^4.0.3",
     "ignore": "^7.0.6",
     "jexl": "^2.3.0",
-    "jiti": "^2.6.0",
     "js-yaml": "^4.1.0",
     "minisearch": "^7.2.0",
     "sql.js": "^1.14.0"

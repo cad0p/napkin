@@ -18,6 +18,9 @@ composite of basename BM25, content term frequency, backlink count, and
 recency. Results are cached with incremental invalidation (`.napkin/search-cache.json`),
 so repeat searches stay fast even on large vaults.
 
+The package ships a compiled `dist/` (JS + `.d.ts` + source maps) built by the
+`prepare` script — no jiti runtime; the CLI and the SDK both run on plain Node.
+
 Vault content can be excluded with a `.napkinignore` file at the vault root
 (gitignore-style patterns), by respecting the vault-root `.gitignore`, and via
 a dotfiles rule (all on by default, tunable under the `ignore` config section)
@@ -57,7 +60,8 @@ napkin daily append "- [ ] Review PR"
 
 ## SDK
 
-napkin is also a library. No CLI, no stdout - just data:
+napkin is also a library. No CLI, no stdout - just data. The SDK entry point
+resolves to the compiled `dist/index.js` with types from `dist/index.d.ts`:
 
 ```typescript
 import { Napkin, VaultNotFoundError } from "@cad0p/napkin";
