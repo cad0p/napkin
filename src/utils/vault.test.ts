@@ -9,6 +9,7 @@ import {
   findVault,
   getVaultConfig,
   NAPKIN_MARKER,
+  setGlobalVaultIfUnset,
   VaultNotFoundError,
 } from "./vault.js";
 
@@ -122,6 +123,171 @@ describe("findVault", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  describe("home-folder vault prohibition", () => {
+    // A temp dir acts as a FAKE $HOME — tests never touch the real
+    // ~/.napkin / real $HOME. The homeDir param is the private test seam.
+    let fakeHome: string;
+    let configDir: string;
+    let origXdg: string | undefined;
+
+    beforeEach(() => {
+      fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-home-"));
+      configDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-home-config-"));
+      origXdg = process.env.XDG_CONFIG_HOME;
+      process.env.XDG_CONFIG_HOME = configDir; // isolate from real global config
+    });
+
+    afterEach(() => {
+      if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origXdg;
+      fs.rmSync(configDir, { recursive: true, force: true });
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    });
+
+    function writeGlobalConfig(vault: string): string {
+      const napkinConfigDir = path.join(configDir, "napkin");
+      fs.mkdirSync(napkinConfigDir, { recursive: true });
+      const configPath = path.join(napkinConfigDir, "config.json");
+      fs.writeFileSync(configPath, JSON.stringify({ vault }));
+      return configPath;
+    }
+
+    function makeValidVault(dir: string): void {
+      const napkinDir = path.join(dir, NAPKIN_MARKER);
+      fs.mkdirSync(path.join(napkinDir, ".obsidian"), { recursive: true });
+      fs.writeFileSync(
+        path.join(napkinDir, "config.json"),
+        JSON.stringify({ vault: { root: "..", obsidian: "../.obsidian" } }),
+      );
+    }
+
+    function strayHomeMarker(): void {
+      fs.mkdirSync(path.join(fakeHome, NAPKIN_MARKER));
+    }
+
+    test("skips a stray $HOME/.napkin and resolves the global vault instead", () => {
+      strayHomeMarker();
+      const globalDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "napkin-home-global-vault-"),
+      );
+      try {
+        makeValidVault(globalDir);
+        writeGlobalConfig(globalDir);
+        const sub = path.join(fakeHome, "some", "project");
+        fs.mkdirSync(sub, { recursive: true });
+        const result = findVault(sub, fakeHome);
+        expect(result.configPath).toBe(path.join(globalDir, NAPKIN_MARKER));
+      } finally {
+        fs.rmSync(globalDir, { recursive: true, force: true });
+      }
+    });
+
+    test("throws with the stray hint when no global vault exists", () => {
+      strayHomeMarker();
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      let msg = "";
+      try {
+        findVault(sub, fakeHome);
+        expect.unreachable("expected VaultNotFoundError");
+      } catch (e) {
+        expect(e).toBeInstanceOf(VaultNotFoundError);
+        msg = (e as Error).message;
+      }
+      expect(msg).toContain("Found $HOME/.napkin");
+      expect(msg).toContain("not supported");
+    });
+
+    test("findAncestorVault / findAncestorConfigDir skip the home marker", () => {
+      strayHomeMarker();
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      expect(findAncestorVault(sub, fakeHome)).toBeNull();
+      expect(findAncestorConfigDir(sub, fakeHome)).toBeNull();
+    });
+
+    test("nested .obsidian/.napkin at home is skipped too", () => {
+      fs.mkdirSync(path.join(fakeHome, ".obsidian", NAPKIN_MARKER), {
+        recursive: true,
+      });
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      expect(findAncestorVault(sub, fakeHome)).toBeNull();
+      expect(findAncestorConfigDir(sub, fakeHome)).toBeNull();
+      expect(() => findVault(sub, fakeHome)).toThrow(VaultNotFoundError);
+    });
+
+    test("a vault at fakeHome/project still resolves (only the exact home dir is skipped)", () => {
+      const project = path.join(fakeHome, "project");
+      fs.mkdirSync(project, { recursive: true });
+      makeValidVault(project);
+      const sub = path.join(project, "notes");
+      fs.mkdirSync(sub, { recursive: true });
+      const result = findVault(sub, fakeHome);
+      expect(result.configPath).toBe(path.join(project, NAPKIN_MARKER));
+      expect(findAncestorVault(sub, fakeHome)).toBe(project);
+    });
+
+    test("global config vault pointing at fake home is rejected (with hint)", () => {
+      strayHomeMarker();
+      writeGlobalConfig(fakeHome); // vault: "<fakeHome>" resolves to home
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      let msg = "";
+      try {
+        findVault(sub, fakeHome);
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      expect(msg).toContain("Found $HOME/.napkin");
+      expect(msg).toContain("not supported");
+    });
+
+    test('global config vault: "~" never resolves home', () => {
+      strayHomeMarker();
+      writeGlobalConfig("~");
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      let threw = false;
+      try {
+        findVault(sub, fakeHome);
+      } catch (e) {
+        threw = e instanceof VaultNotFoundError;
+      }
+      expect(threw).toBe(true);
+    });
+
+    test('global config vault: "~/.napkin" is rejected', () => {
+      strayHomeMarker();
+      writeGlobalConfig("~/.napkin");
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      expect(() => findVault(sub, fakeHome)).toThrow(VaultNotFoundError);
+    });
+
+    test("setGlobalVaultIfUnset refuses home and $HOME/.napkin", () => {
+      strayHomeMarker();
+      const r1 = setGlobalVaultIfUnset(fakeHome, fakeHome);
+      expect(r1.set).toBe(false);
+      expect(fs.existsSync(r1.configPath)).toBe(false); // no write happened
+
+      const r2 = setGlobalVaultIfUnset(
+        path.join(fakeHome, NAPKIN_MARKER),
+        fakeHome,
+      );
+      expect(r2.set).toBe(false);
+      expect(fs.existsSync(r2.configPath)).toBe(false);
+    });
+
+    test("end-to-end: findVault from a subdir with global vault = fakeHome throws", () => {
+      strayHomeMarker();
+      writeGlobalConfig(fakeHome);
+      const sub = path.join(fakeHome, "some", "project");
+      fs.mkdirSync(sub, { recursive: true });
+      expect(() => findVault(sub, fakeHome)).toThrow(VaultNotFoundError);
+    });
   });
 
   describe("layout: embedded (.napkin/.obsidian/)", () => {

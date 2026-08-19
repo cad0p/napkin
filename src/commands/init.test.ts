@@ -359,6 +359,45 @@ describe("init command", () => {
     });
   });
 
+  test("refuses to initialize at $HOME (fake home dir)", async () => {
+    // A temp dir acts as a FAKE $HOME via init's homeDir test seam — never
+    // run init against the real home directory.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-home-"));
+    try {
+      const orig = process.exit;
+      let exitCode: number | undefined;
+      const origError = console.error;
+      let errMsg = "";
+      console.error = (...args: unknown[]) => {
+        errMsg = args.map(String).join(" ");
+      };
+      (process as any).exit = (code: number) => {
+        exitCode = code;
+        throw new Error("exit");
+      };
+      try {
+        await init({ json: true, path: fakeHome }, fakeHome);
+      } catch {
+        // expected
+      }
+      (process as any).exit = orig;
+      console.error = origError;
+
+      expect(exitCode).toBe(1);
+      expect(errMsg).toContain("Refusing to initialize a vault at $HOME");
+      expect(errMsg).toContain("~/Notes");
+      // Nothing was created in the home dir
+      expect(fs.existsSync(path.join(fakeHome, NAPKIN_MARKER))).toBe(false);
+      expect(fs.existsSync(path.join(fakeHome, ".obsidian"))).toBe(false);
+      // Global config untouched
+      expect(
+        fs.existsSync(path.join(tmpDir, "xdg", "napkin", "config.json")),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   test("refuses to initialize inside an existing vault tree", async () => {
     const outer = path.join(tmpDir, "outer");
     fs.mkdirSync(outer, { recursive: true });

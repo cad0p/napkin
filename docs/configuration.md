@@ -172,3 +172,9 @@ file). A global config that fails to parse as JSON is treated as absent —
 The `vault` field is resolved against the config directory (or `~` for home).
 It is only used to locate a vault when no `.napkin/` is discoverable upward
 from the working directory.
+
+The global vault can never point at `$HOME` (or `$HOME/.napkin`): home is
+never a valid vault root, and a vault there would resolve for every cwd
+under it. Such a `vault` value is ignored (and `napkin init` refuses to
+write it). Keep vaults in a project/dev directory (e.g. `~/Notes`, a repo,
+or a dedicated vault folder) instead.
