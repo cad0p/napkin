@@ -17,6 +17,10 @@ All notable changes to this project will be documented in this file.
 
 - Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
 
+### ⚙️ Miscellaneous Tasks
+
+- Drop pkg.pr.new preview publishing (closes #78) ([#80](https://github.com/cad0p/napkin/pull/80))
+
 
 ## [0.14.0] - 2026-08-12
 
