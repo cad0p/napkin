@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(vault)* Export findAncestorConfigDir alongside findAncestorVault (closes #74)
+- *(vault)* Export NAPKIN_MARKER, single-source the marker name (closes #76)
+- *(vault)* Prohibit $HOME/.napkin as a vault root (closes #78)
+
+### 💼 Other
+
+- Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
+
+### ⚙️ Miscellaneous Tasks
+
+- Drop pkg.pr.new preview publishing (closes #78) ([#80](https://github.com/cad0p/napkin/pull/80))
+
+
 ## [0.14.0] - 2026-08-12
 
 <!-- USER-EDITABLE SECTION START -->
