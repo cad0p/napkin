@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 - *(vault)* Export findAncestorConfigDir alongside findAncestorVault (closes #74)
 - *(vault)* Export NAPKIN_MARKER, single-source the marker name (closes #76)
+- *(vault)* Prohibit $HOME/.napkin as a vault root (closes #78)
 
 ### 💼 Other
 
