@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { TEMPLATES, type VaultTemplate } from "../templates/index.js";
 import {
@@ -56,14 +57,30 @@ function scaffoldTemplate(
   return created;
 }
 
-export function initVault(opts: {
-  path?: string;
-  template?: string;
-}): InitResult {
+/**
+ * The home folder is never a valid vault root — a vault at $HOME would
+ * resolve for every cwd under it (machine-wide kb re-pointing, steering
+ * exemptions). Shared by {@link initVault} and {@link scaffoldVault}.
+ */
+function refuseHomeVault(targetDir: string, homeDir: string): void {
+  if (path.resolve(targetDir) === path.resolve(homeDir)) {
+    throw new Error(
+      `Refusing to initialize a vault at $HOME — the home folder is not a` +
+        ` valid vault root. Create a project/dev directory (e.g. ~/Notes),` +
+        ` cd there, and run napkin init.`,
+    );
+  }
+}
+
+export function initVault(
+  opts: { path?: string; template?: string },
+  homeDir?: string,
+): InitResult {
   if (!opts.path) {
     throw new Error("No path specified for vault initialization");
   }
   const targetDir = path.resolve(opts.path);
+  refuseHomeVault(targetDir, homeDir || homedir());
   const napkinDir = path.join(targetDir, NAPKIN_MARKER);
   const obsidianDir = path.join(targetDir, ".obsidian");
   const hasExistingObsidian =
@@ -126,8 +143,10 @@ export interface ScaffoldResult {
 export function scaffoldVault(
   targetPath: string,
   template?: string,
+  homeDir?: string,
 ): ScaffoldResult {
   const resolved = path.resolve(targetPath);
+  refuseHomeVault(resolved, homeDir || homedir());
   const napkinDir = path.join(resolved, NAPKIN_MARKER);
   const obsidianDir = path.join(resolved, ".obsidian");
   const hasExistingObsidian =

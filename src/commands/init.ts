@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { Napkin } from "../sdk.js";
 import { EXIT_ERROR } from "../utils/exit-codes.js";
@@ -16,8 +17,21 @@ export interface InitOptions extends OutputOptions {
   template?: string;
 }
 
-export async function init(opts: InitOptions) {
+export async function init(opts: InitOptions, homeDir?: string) {
   const target = path.resolve(opts.path || process.cwd());
+  const home = path.resolve(homeDir || homedir());
+
+  // The home folder is never a valid vault root — refuse before any
+  // ancestor check or scaffold. A vault at $HOME would resolve for every
+  // cwd under it (machine-wide kb re-pointing, steering exemptions).
+  if (target === home) {
+    error(
+      `Refusing to initialize a vault at $HOME — the home folder is not a` +
+        ` valid vault root. Create a project/dev directory (e.g. ~/Notes),` +
+        ` cd there, and run napkin init.`,
+    );
+    process.exit(EXIT_ERROR);
+  }
 
   // Refuse to create a nested vault inside an existing vault tree — napkin
   // init creates new vaults only. Check the PARENT of the target so a

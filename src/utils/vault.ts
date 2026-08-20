@@ -39,13 +39,19 @@ export class VaultNotFoundError extends Error {
 
 function noVaultFoundMessage(
   startDir: string,
-  globalConfigPath: string,
+  configPath: string,
+  homeDir: string,
 ): string {
-  return (
+  let message =
     `No napkin vault found (searched up from ${startDir}).\n` +
     `  Run \`napkin init\` to create one here, pass --vault <path>, or set a` +
-    ` global vault in ${globalConfigPath} ({"vault": "/path/to/vault"}).`
-  );
+    ` global vault in ${configPath} ({"vault": "/path/to/vault"}).`;
+  if (fs.existsSync(path.join(homeDir, NAPKIN_MARKER))) {
+    message +=
+      `\n  Found $HOME/.napkin — a home-folder vault is not supported.` +
+      ` Remove it or migrate it into a real vault directory.`;
+  }
+  return message;
 }
 
 function legacyLayoutMessage(napkinDir: string, projectDir: string): string {
@@ -66,10 +72,16 @@ function legacyLayoutMessage(napkinDir: string, projectDir: string): string {
  * Falls back to the global vault configured in $XDG_CONFIG_HOME/napkin/config.json.
  * Throws {@link VaultNotFoundError} when no vault exists — never silently
  * creates one in the user's cwd.
+ *
+ * @param homeDir - Internal test seam: the home directory used for the
+ *   home-vault prohibition (defaults to `os.homedir()`). A marker sitting
+ *   DIRECTLY in $HOME is never a valid vault root and is skipped — the walk
+ *   continues toward the global-config fallback.
  */
-export function findVault(startDir?: string): VaultInfo {
+export function findVault(startDir?: string, homeDir?: string): VaultInfo {
   let dir = path.resolve(startDir || process.cwd());
   const root = path.parse(dir).root;
+  const home = path.resolve(homeDir || os.homedir());
 
   const startingDir = dir;
 
@@ -77,14 +89,20 @@ export function findVault(startDir?: string): VaultInfo {
     const napkinDir = path.join(dir, NAPKIN_MARKER);
 
     if (fs.existsSync(napkinDir) && fs.statSync(napkinDir).isDirectory()) {
-      return resolveVaultLayout(napkinDir, dir);
+      // A marker sitting directly in $HOME is never a valid vault root —
+      // skip it and keep walking (a stray ~/.napkin used to resolve home as
+      // the vault for every cwd under $HOME).
+      if (dir !== home) {
+        return resolveVaultLayout(napkinDir, dir);
+      }
     }
 
     // Check for nested layout: .obsidian/.napkin/
     const nestedNapkin = path.join(dir, ".obsidian", NAPKIN_MARKER);
     if (
       fs.existsSync(nestedNapkin) &&
-      fs.statSync(nestedNapkin).isDirectory()
+      fs.statSync(nestedNapkin).isDirectory() &&
+      dir !== home
     ) {
       return resolveVaultLayout(nestedNapkin, dir);
     }
@@ -97,7 +115,7 @@ export function findVault(startDir?: string): VaultInfo {
   }
 
   // Fall back to global vault from user config
-  const globalVault = getGlobalConfigVault();
+  const globalVault = getGlobalConfigVault(homeDir);
   if (globalVault) {
     return resolveVaultLayout(globalVault, path.dirname(globalVault));
   }
@@ -107,7 +125,7 @@ export function findVault(startDir?: string): VaultInfo {
   // NAPKIN.md dirs in arbitrary directories (and in agent workspace dirs),
   // which users consistently reported as surprising.
   throw new VaultNotFoundError(
-    noVaultFoundMessage(startingDir, globalConfigPath()),
+    noVaultFoundMessage(startingDir, globalConfigPath(homeDir), home),
   );
 }
 
@@ -118,8 +136,13 @@ export function findVault(startDir?: string): VaultInfo {
  * ancestor `.napkin/` counts, even a legacy one. Returns the directory
  * that contains it, or null.
  */
-export function findAncestorVault(startDir?: string): string | null {
-  return findAncestorMarker(startDir || process.cwd())?.vaultDir ?? null;
+export function findAncestorVault(
+  startDir?: string,
+  homeDir?: string,
+): string | null {
+  return (
+    findAncestorMarker(startDir || process.cwd(), homeDir)?.vaultDir ?? null
+  );
 }
 
 /**
@@ -128,23 +151,34 @@ export function findAncestorVault(startDir?: string): string | null {
  * vault marker plus the marker directory itself (`.napkin/`, or
  * `.obsidian/.napkin/` for the nested layout — where the vault's
  * `config.json` lives), or null. Purely structural, read-only probes.
+ *
+ * @param homeDir - Internal test seam (see {@link findVault}). A marker
+ *   sitting DIRECTLY in $HOME is skipped — the walk continues past home
+ *   toward the filesystem root.
  */
 function findAncestorMarker(
   startDir: string,
+  homeDir?: string,
 ): { vaultDir: string; markerDir: string } | null {
   let dir = path.resolve(startDir || process.cwd());
   const root = path.parse(dir).root;
+  const home = path.resolve(homeDir || os.homedir());
 
   while (true) {
     const napkinDir = path.join(dir, NAPKIN_MARKER);
-    if (fs.existsSync(napkinDir) && fs.statSync(napkinDir).isDirectory()) {
+    if (
+      fs.existsSync(napkinDir) &&
+      fs.statSync(napkinDir).isDirectory() &&
+      dir !== home
+    ) {
       return { vaultDir: dir, markerDir: napkinDir };
     }
 
     const nestedNapkin = path.join(dir, ".obsidian", NAPKIN_MARKER);
     if (
       fs.existsSync(nestedNapkin) &&
-      fs.statSync(nestedNapkin).isDirectory()
+      fs.statSync(nestedNapkin).isDirectory() &&
+      dir !== home
     ) {
       return { vaultDir: dir, markerDir: nestedNapkin };
     }
@@ -165,17 +199,25 @@ function findAncestorMarker(
  * validation: any ancestor marker counts, even a legacy one. Returns
  * the marker dir, or null.
  */
-export function findAncestorConfigDir(startDir?: string): string | null {
-  return findAncestorMarker(startDir || process.cwd())?.markerDir ?? null;
+export function findAncestorConfigDir(
+  startDir?: string,
+  homeDir?: string,
+): string | null {
+  return (
+    findAncestorMarker(startDir || process.cwd(), homeDir)?.markerDir ?? null
+  );
 }
 
 /**
  * Path to the global napkin config: $XDG_CONFIG_HOME/napkin/config.json
  * (defaults to ~/.config/napkin/config.json).
+ *
+ * @param homeDir - Internal test seam (see {@link findVault}).
  */
-export function globalConfigPath(): string {
+export function globalConfigPath(homeDir?: string): string {
   return path.join(
-    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+    process.env.XDG_CONFIG_HOME ||
+      path.join(path.resolve(homeDir || os.homedir()), ".config"),
     "napkin",
     "config.json",
   );
@@ -191,12 +233,24 @@ export function globalConfigPath(): string {
  *
  * Returns whether a write happened and the config path.
  */
-export function setGlobalVaultIfUnset(vaultPath: string): {
+export function setGlobalVaultIfUnset(
+  vaultPath: string,
+  homeDir?: string,
+): {
   set: boolean;
   configPath: string;
 } {
-  const configPath = globalConfigPath();
-  if (getGlobalConfigVault()) {
+  const configPath = globalConfigPath(homeDir);
+  const resolved = path.resolve(vaultPath);
+  const home = path.resolve(homeDir || os.homedir());
+
+  // Home is never a valid vault root — refuse to register it (or the
+  // $HOME/.napkin marker itself) as the global default, BEFORE any write.
+  if (resolved === home || resolved === path.join(home, NAPKIN_MARKER)) {
+    return { set: false, configPath };
+  }
+
+  if (getGlobalConfigVault(homeDir)) {
     return { set: false, configPath };
   }
 
@@ -213,7 +267,7 @@ export function setGlobalVaultIfUnset(vaultPath: string): {
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(
     configPath,
-    JSON.stringify({ ...raw, vault: vaultPath }, null, 2) + "\n",
+    `${JSON.stringify({ ...raw, vault: vaultPath }, null, 2)}\n`,
   );
   return { set: true, configPath };
 }
@@ -225,9 +279,10 @@ export function setGlobalVaultIfUnset(vaultPath: string): {
  *
  * Returns the .napkin/ path if a valid vault is configured, null otherwise.
  */
-function getGlobalConfigVault(): string | null {
-  const configPath = globalConfigPath();
+function getGlobalConfigVault(homeDir?: string): string | null {
+  const configPath = globalConfigPath(homeDir);
   if (!fs.existsSync(configPath)) return null;
+  const home = path.resolve(homeDir || os.homedir());
 
   try {
     const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
@@ -235,8 +290,16 @@ function getGlobalConfigVault(): string | null {
 
     const vaultPath =
       raw.vault === "~" || raw.vault.startsWith("~/")
-        ? path.join(os.homedir(), raw.vault.slice(1))
+        ? path.join(home, raw.vault.slice(1))
         : path.resolve(path.dirname(configPath), raw.vault);
+
+    // Home is never a valid vault root — a global config pointing at $HOME
+    // (or the $HOME/.napkin marker itself as content root) is rejected.
+    // Without this, `vault: "~"` would bypass the walk-up skip via
+    // findVault's global-config fallback.
+    if (vaultPath === home || vaultPath === path.join(home, NAPKIN_MARKER)) {
+      return null;
+    }
 
     const napkinDir = path.join(vaultPath, NAPKIN_MARKER);
     // A FILE named .napkin is not a vault — only a directory counts as a
