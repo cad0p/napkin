@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - *(vault)* Export NAPKIN_MARKER, single-source the marker name (closes #76)
 - *(vault)* Prohibit $HOME/.napkin as a vault root (closes #78)
 
+### 🐛 Bug Fixes
+
+- *(links)* Keep malformed percent-encoded markdown targets instead of throwing (closes #82)
+
 ### 💼 Other
 
 - Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
