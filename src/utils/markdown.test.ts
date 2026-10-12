@@ -89,6 +89,42 @@ describe("extractLinks", () => {
     expect(links.outgoing).not.toContain("https://example.com");
   });
 
+  test("decodes valid percent-encoded markdown link targets", () => {
+    const content = "[note](folder/My%20Note.md)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toContain("folder/My Note.md");
+  });
+
+  test("keeps malformed percent-encoded targets instead of throwing", () => {
+    const content = "[sessions](%{base_url}/my/preferences/security)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toContain("%{base_url}/my/preferences/security");
+  });
+
+  test("a malformed link does not hide sibling links", () => {
+    const content = "[bad](%{base_url}/x) and [good](./other.md)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["%{base_url}/x", "./other.md"]);
+  });
+
+  test("strips the fragment before decoding so a malformed fragment is ignored", () => {
+    const content = "[x](./note.md#%zz)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["./note.md"]);
+  });
+
+  test("keeps the raw fragment-stripped prefix when the target carries a fragment", () => {
+    const content = "[x](%{base_url}/x#frag)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["%{base_url}/x"]);
+  });
+
+  test("keeps multiple malformed targets in order within one pass", () => {
+    const content = "[a](%zz) [b](%yy)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["%zz", "%yy"]);
+  });
+
   test("returns empty for no links", () => {
     const links = extractLinks("No links");
     expect(links.wikilinks).toEqual([]);

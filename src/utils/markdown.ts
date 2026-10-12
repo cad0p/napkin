@@ -174,7 +174,17 @@ export function extractLinks(content: string): LinkInfo {
     const url = match[2].trim();
     // Only internal links (not http/https/mailto)
     if (!url.match(/^(https?|mailto|obsidian):\/\//)) {
-      const clean = decodeURIComponent(url.split("#")[0].trim());
+      const target = url.split("#")[0].trim();
+      // decodeURIComponent throws URIError on malformed percent-encoding
+      // (e.g. template tokens like %{base_url}). Fall back to the raw
+      // target so the link stays in the graph: throwing here would abort
+      // the caller's whole link/search pass over the vault.
+      let clean: string;
+      try {
+        clean = decodeURIComponent(target);
+      } catch {
+        clean = target;
+      }
       if (clean) outgoing.push(clean);
     }
   }
