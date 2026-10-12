@@ -407,6 +407,27 @@ describe("search", () => {
     vault.cleanup();
   });
 
+  test("searches a vault containing a malformed markdown link", async () => {
+    const vault = createTempVault({
+      "Bad/links.md": "[review sessions](%{base_url}/my/preferences/security)",
+      "Good/note.md": "# Good note\nunique-good-marker content",
+    });
+
+    const data = await captureJson(() =>
+      search({ json: true, vault: vault.path, query: "unique-good-marker" }),
+    );
+    const results = data.results as { file: string }[];
+    expect(results.map((r) => r.file)).toContain("Good/note.md");
+
+    const malformedData = await captureJson(() =>
+      search({ json: true, vault: vault.path, query: "sessions" }),
+    );
+    const malformedResults = malformedData.results as { file: string }[];
+    expect(malformedResults.map((r) => r.file)).toContain("Bad/links.md");
+
+    vault.cleanup();
+  });
+
   test("cache not used when searching a subfolder", async () => {
     // Cache is folder-specific — searching with --path shouldn't use full-vault cache
     await captureJson(() =>
