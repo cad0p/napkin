@@ -89,6 +89,24 @@ describe("extractLinks", () => {
     expect(links.outgoing).not.toContain("https://example.com");
   });
 
+  test("decodes valid percent-encoded markdown link targets", () => {
+    const content = "[note](folder/My%20Note.md)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toContain("folder/My Note.md");
+  });
+
+  test("keeps malformed percent-encoded targets instead of throwing", () => {
+    const content = "[sessions](%{base_url}/my/preferences/security)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toContain("%{base_url}/my/preferences/security");
+  });
+
+  test("a malformed link does not hide sibling links", () => {
+    const content = "[bad](%{base_url}/x) and [good](./other.md)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["%{base_url}/x", "./other.md"]);
+  });
+
   test("returns empty for no links", () => {
     const links = extractLinks("No links");
     expect(links.wikilinks).toEqual([]);
