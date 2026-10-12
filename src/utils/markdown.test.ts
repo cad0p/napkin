@@ -107,6 +107,24 @@ describe("extractLinks", () => {
     expect(links.outgoing).toEqual(["%{base_url}/x", "./other.md"]);
   });
 
+  test("strips the fragment before decoding so a malformed fragment is ignored", () => {
+    const content = "[x](./note.md#%zz)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["./note.md"]);
+  });
+
+  test("keeps the raw fragment-stripped prefix when the target carries a fragment", () => {
+    const content = "[x](%{base_url}/x#frag)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["%{base_url}/x"]);
+  });
+
+  test("keeps multiple malformed targets in order within one pass", () => {
+    const content = "[a](%zz) [b](%yy)";
+    const links = extractLinks(content);
+    expect(links.outgoing).toEqual(["%zz", "%yy"]);
+  });
+
   test("returns empty for no links", () => {
     const links = extractLinks("No links");
     expect(links.wikilinks).toEqual([]);
