@@ -1,12 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { loadIgnorer } from "../utils/ignore.js";
 import {
   createIndexStore,
   isQueryableIndexStore,
   resetIndexStoresForTests,
 } from "../utils/index-store.js";
-import { setBusyTimeoutForTests, SqliteStore } from "../utils/sqlite-store.js";
+import { markSearchPathsDirty } from "../utils/search-freshness.js";
+import { SqliteStore, setBusyTimeoutForTests } from "../utils/sqlite-store.js";
 import {
   createTempVault,
   dropSearchStoreFiles,
@@ -36,6 +38,20 @@ afterEach(() => {
 function vault(files: Record<string, string>): TempVault {
   const v = createTempVault(files);
   vaults.push(v);
+  // One fixed whole-second mtime for every note. The recency term is
+  // normalised across the result set and scores are rounded, so notes
+  // written a millisecond apart (or a copy that loses sub-millisecond
+  // precision) would flip scores at a rounding edge. Tests that need
+  // distinct times set them explicitly.
+  const fixed = new Date(2025, 0, 2);
+  for (const entry of fs.readdirSync(v.vaultPath, {
+    recursive: true,
+    withFileTypes: true,
+  })) {
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      fs.utimesSync(path.join(entry.parentPath, entry.name), fixed, fixed);
+    }
+  }
   return v;
 }
 
@@ -291,5 +307,46 @@ describe("SQLite search path failure modes (#109)", () => {
     expect(run(v, "lockedmarker").map((r) => r.file)).toContain(
       "Projects/alpha-roadmap.md",
     );
+  });
+
+  test("a fallback inside the freshness window walks instead of trusting an old JSON snapshot", () => {
+    // An old search-cache.json for the same notes (an earlier napkin wrote it).
+    const old = vault(corpus());
+    useJsonIndexStore(old.vaultPath);
+    run(old, "alpha");
+    const v = vault(corpus());
+    const windowed = (query: string) =>
+      searchVault(v.vaultPath, v.vaultPath, query, {
+        limit: 100,
+        snippets: false,
+        freshnessMs: 60_000,
+      }).map((r) => r.file);
+    windowed("alpha"); // the SQLite walk opens the window
+    const snapshot = JSON.parse(
+      fs.readFileSync(path.join(old.vaultPath, "search-cache.json"), "utf8"),
+    );
+    // Same notes, same ignore state: only the fingerprint's vault path differs.
+    snapshot.ignoreFingerprint = loadIgnorer(
+      v.vaultPath,
+      v.vaultPath,
+    ).fingerprint;
+    fs.writeFileSync(
+      path.join(v.vaultPath, "search-cache.json"),
+      JSON.stringify(snapshot),
+    );
+
+    // This process writes a note (napkin marks it dirty), then the store
+    // fails after the refresh took the dirty paths.
+    fs.writeFileSync(
+      path.join(v.vaultPath, "Projects/fresh-note.md"),
+      "# Fresh\nwindowmarker\n",
+    );
+    markSearchPathsDirty(v.vaultPath, "Projects/fresh-note.md");
+    const db = path.join(v.vaultPath, "cache", "index-v2.db");
+    for (const suffix of ["-wal", "-shm"])
+      fs.rmSync(`${db}${suffix}`, { force: true });
+    fs.writeFileSync(db, "this is not a sqlite database at all");
+
+    expect(windowed("windowmarker")).toContain("Projects/fresh-note.md");
   });
 });
