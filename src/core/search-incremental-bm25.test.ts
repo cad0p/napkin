@@ -2,7 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import MiniSearch from "minisearch";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createTempVault } from "../utils/test-helpers.js";
+import {
+  createTempVault,
+  dropSearchStoreFiles,
+  useJsonIndexStore,
+} from "../utils/test-helpers.js";
 import {
   getBasenameScoresForTests,
   resetSearchIndexForTests,
@@ -60,7 +64,7 @@ function incrementalScores(
  * from the notes on disk exactly as a fresh CLI process would build it.
  */
 function coldScores(vaultPath: string, query: string): Map<string, number> {
-  fs.rmSync(path.join(vaultPath, "search-cache.json"), { force: true });
+  dropSearchStoreFiles(vaultPath);
   resetSearchIndexForTests();
   return getBasenameScoresForTests(vaultPath, vaultPath, query);
 }
@@ -349,6 +353,7 @@ describe("disk cache snapshots keep BM25 statistics exact", () => {
       "meeting note.md": "# Meeting\n",
       "project note.md": "# Project\n",
     });
+    useJsonIndexStore(v.vaultPath);
     searchVault(v.vaultPath, v.vaultPath, "note", { snippets: false });
 
     // Recreate a snapshot the way the pre-fix code wrote one: discard the old

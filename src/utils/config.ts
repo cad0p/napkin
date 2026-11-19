@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { IndexStoreKind } from "./index-store.js";
 
 /**
  * Default number of search results per page.
@@ -48,6 +49,14 @@ export interface NapkinConfig {
      * window. 0 (the default) validates against disk on every search.
      */
     freshnessMs: number;
+    /**
+     * Which index store persists the search index (#106). `"sqlite"`
+     * (default) keeps `.napkin/cache/index-v1.db` updated by per-file
+     * diff; `"json"` keeps the whole-snapshot `search-cache.json`. A
+     * vault where the database cannot be opened (read-only or network
+     * filesystem, no `node:sqlite`) falls back to JSON automatically.
+     */
+    indexStore: IndexStoreKind;
   };
   daily: {
     folder: string;
@@ -87,6 +96,7 @@ export const DEFAULT_CONFIG: NapkinConfig = {
     // Never skip the walk by default: the CLI and a plain SDK instance keep
     // the pre-#93 behaviour (a search always reflects disk).
     freshnessMs: 0,
+    indexStore: "sqlite",
   },
   daily: {
     folder: "daily",

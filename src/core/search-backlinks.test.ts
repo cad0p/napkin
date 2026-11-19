@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { listFiles } from "../utils/files.js";
 import { loadIgnorer } from "../utils/ignore.js";
 import { extractLinks } from "../utils/markdown.js";
-import { createTempVault } from "../utils/test-helpers.js";
+import {
+  createTempVault,
+  dropSearchStoreFiles,
+  useJsonIndexStore,
+} from "../utils/test-helpers.js";
 import {
   getCachedBacklinkCountsForTests,
   resetSearchIndexForTests,
@@ -88,7 +92,7 @@ function liveCounts(): Map<string, number> {
 /** Force a cold rebuild and return its counts: the strongest oracle. */
 function coldCounts(): Map<string, number> {
   resetSearchIndexForTests();
-  fs.rmSync(path.join(v.vaultPath, "search-cache.json"), { force: true });
+  dropSearchStoreFiles(v.vaultPath);
   searchVault(v.vaultPath, v.vaultPath, QUERY);
   return liveCounts();
 }
@@ -332,6 +336,7 @@ describe("backlink counts by delta (#92)", () => {
         "a/note.md": "# a\n",
         "src/linker.md": "[[note]] [[note]]\n",
       });
+      useJsonIndexStore(v.vaultPath);
       searchVault(v.vaultPath, v.vaultPath, QUERY);
       vi.advanceTimersByTime(30_000);
 

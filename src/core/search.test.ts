@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { loadSearchCache } from "../utils/json-store.js";
-import { createTempVault } from "../utils/test-helpers.js";
+import { createTempVault, useJsonIndexStore } from "../utils/test-helpers.js";
 import {
   getCachedDocForTests,
   resetSearchIndexForTests,
@@ -174,6 +174,7 @@ describe("folder-scoped search over the whole-vault index", () => {
   });
 
   test("a folder search persists a whole-vault snapshot reusable in a fresh process", () => {
+    useJsonIndexStore(v.vaultPath);
     const scoped = searchVault(v.vaultPath, v.vaultPath, "alpha", {
       path: "Projects",
     });
@@ -198,6 +199,7 @@ describe("folder-scoped search over the whole-vault index", () => {
   });
 
   test("a disk cache with a non-null folder is treated as a miss and rebuilt", () => {
+    useJsonIndexStore(v.vaultPath);
     // Build a real whole-vault cache, then mark it as an old-style
     // per-folder snapshot.
     searchVault(v.vaultPath, v.vaultPath, "alpha");
@@ -234,6 +236,7 @@ describe("incremental cache persistence", () => {
   });
 
   test("persists a diff: the on-disk cache carries the new mtime and doc", () => {
+    useJsonIndexStore(v.vaultPath);
     vi.useFakeTimers();
     searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
 
@@ -266,6 +269,7 @@ describe("incremental cache persistence", () => {
   });
 
   test("a folder-scoped search persists a whole-vault snapshot", () => {
+    useJsonIndexStore(v.vaultPath);
     vi.useFakeTimers();
     searchVault(v.vaultPath, v.vaultPath, "alpha", { path: "Projects" });
 
@@ -292,6 +296,7 @@ describe("incremental cache persistence", () => {
   });
 
   test("a fresh process reads note text from disk after a disk-cache hit", () => {
+    useJsonIndexStore(v.vaultPath);
     vi.useFakeTimers();
     searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
     fs.writeFileSync(
@@ -320,6 +325,7 @@ describe("incremental cache persistence", () => {
   });
 
   test("throttles: leading edge for the first diff, one trailing write after", () => {
+    useJsonIndexStore(v.vaultPath);
     vi.useFakeTimers();
     const alphaPath = path.join(v.vaultPath, "Projects/alpha.md");
 
@@ -389,6 +395,7 @@ describe("contentless caches", () => {
   });
 
   test("the disk cache snapshot carries no note text", () => {
+    useJsonIndexStore(v.vaultPath);
     searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
 
     const raw = fs.readFileSync(cachePath(), "utf-8");
@@ -401,6 +408,7 @@ describe("contentless caches", () => {
   });
 
   test("a legacy content-bearing cache loads and its text is discarded", () => {
+    useJsonIndexStore(v.vaultPath);
     searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
 
     // Rewrite the snapshot in the pre-#85 shape: every doc carries content.

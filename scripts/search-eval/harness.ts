@@ -159,10 +159,22 @@ export function vaultFingerprint(napkin: Napkin): VaultFingerprint {
 
 /** Drop the on-disk search index so a run cold-builds from the vault. */
 export function dropSearchCache(napkin: Napkin): boolean {
+  let dropped = false;
   const cacheFile = path.join(napkin.vault.configPath, "search-cache.json");
-  if (!fs.existsSync(cacheFile)) return false;
-  fs.rmSync(cacheFile, { force: true });
-  return true;
+  if (fs.existsSync(cacheFile)) {
+    fs.rmSync(cacheFile, { force: true });
+    dropped = true;
+  }
+  // The SQLite store (#106): the DB plus its WAL/SHM sidecars.
+  const dbFile = path.join(napkin.vault.configPath, "cache", "index-v1.db");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const file = `${dbFile}${suffix}`;
+    if (fs.existsSync(file)) {
+      fs.rmSync(file, { force: true });
+      dropped = true;
+    }
+  }
+  return dropped;
 }
 
 // ── Recording ────────────────────────────────────────────────────

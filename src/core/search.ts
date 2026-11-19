@@ -6,8 +6,13 @@ import { listFiles, SKIP_DIRS } from "../utils/files.js";
 import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import {
   createIndexStore,
+  type IndexDiff,
+  type IndexDiffDoc,
   type IndexSnapshot,
   type IndexStore,
+  type IndexStoreKind,
+  isIncrementalIndexStore,
+  resetIndexStoresForTests,
 } from "../utils/index-store.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
@@ -15,6 +20,8 @@ import {
   type FileDiff,
   type FileMtimeEntry,
   type FileStatSig,
+  type LinkTarget,
+  linkTarget,
   statAllFiles,
 } from "../utils/search-cache.js";
 import {
@@ -80,6 +87,14 @@ export interface SearchOptions {
    * search. Overrides `search.freshnessMs` from the vault config.
    */
   freshnessMs?: number;
+  /**
+   * Which index store persists the search index (#106): `"sqlite"` uses
+   * `.napkin/cache/index-v1.db` with per-file diff writes, `"json"` uses
+   * the whole-snapshot `search-cache.json`. Falls back to JSON whenever
+   * the database cannot be opened. Overrides `search.indexStore` from the
+   * vault config.
+   */
+  indexStore?: IndexStoreKind;
 }
 
 export interface PaginatedSearchResults {
@@ -197,6 +212,7 @@ export function resetSearchIndexForTests(): void {
   lastCacheWriteAt.clear();
   memoryCache.clear();
   resetSearchFreshnessForTests();
+  resetIndexStoresForTests();
 }
 
 /**
@@ -236,6 +252,7 @@ export function getBasenameScoresForTests(
     ignorer,
     fingerprint,
     resolveFreshnessMs(config.search.freshnessMs, undefined),
+    resolveIndexStoreKind(config.search.indexStore, undefined),
   );
   const scores = new Map<string, number>();
   for (const result of basenameIndex.search(query)) {
@@ -393,25 +410,6 @@ function buildBasenameMap(docs: Iterable<DocRecord>): Map<string, string[]> {
     if (paths.length > 1) sortByDepth(paths);
   }
   return basenameMap;
-}
-
-/**
- * A wikilink target classified the way resolution narrows it: a target with
- * a slash or a `.md` suffix resolves as a path (keeping its own spelling);
- * anything else is a bare basename lookup.
- */
-interface LinkTarget {
-  key: string;
-  /** Path-style ref, or null for a bare-name link. */
-  ref: string | null;
-}
-
-function linkTarget(target: string): LinkTarget {
-  if (target.includes("/") || target.endsWith(".md")) {
-    const ref = target.endsWith(".md") ? target : `${target}.md`;
-    return { key: path.basename(ref, ".md").toLowerCase(), ref };
-  }
-  return { key: target.toLowerCase(), ref: null };
 }
 
 /**
@@ -684,13 +682,14 @@ function resolveVaultIndex(
   ignorer: Ignorer,
   ignoreFp: string,
   freshnessMs: number,
+  indexStoreKind: IndexStoreKind,
 ): ResolvedIndex {
   // One index per vault (#87): folder scoping is a query-time filter in
   // searchVault, so the memory key and the store never depend on a folder.
   const memKey = memoryCacheKey(contentPath, ignoreFp);
   // The store choice lives behind this call (#94): search.ts never learns
   // whether the snapshot comes from a JSON file or a SQLite database.
-  const store = createIndexStore(configPath);
+  const store = createIndexStore(configPath, indexStoreKind);
 
   const cached = memoryCache.get(memKey);
   if (cached) {
@@ -746,10 +745,11 @@ function resolveVaultIndex(
   // A cold build reads every note, so it is a walk: record it for the
   // freshness window (#93).
   recordSearchWalk(contentPath, memKey);
-  // Goes through the throttle like the incremental path: it writes
-  // immediately (nothing was written for this key yet) and records the write
-  // time, so an immediate follow-up diff coalesces instead of rewriting.
-  persistCacheThrottled(store, memKey, fresh, ignoreFp);
+  // A JSON store writes through the throttle (the leading edge fires
+  // immediately anyway, and a follow-up diff coalesces); an incremental
+  // store takes the bulk snapshot directly — a diff write never needs the
+  // throttle (#106).
+  persistBuiltIndex(store, memKey, fresh, ignoreFp);
   return {
     basenameIndex: fresh.basenameIndex,
     docs: fresh.docs,
@@ -795,24 +795,56 @@ function applyIncrementalOrCached(
     isFreshnessWindowOpen(contentPath, memKey, freshnessMs)
   ) {
     if (pending.dirty.length === 0) return cachedView(cache);
-    const updated = applyDiff(
+    const updated = applyDiffAndPersist(
       contentPath,
+      store,
+      memKey,
       cache,
+      ignoreFp,
       diffFromDirtyPaths(contentPath, cache, pending.dirty, ignorer),
     );
-    if (!updated) return cachedView(cache);
-    persistCacheThrottled(store, memKey, cache, ignoreFp);
-    return updated;
+    return updated ?? cachedView(cache);
   }
 
-  const updated = applyIncrementalDiff(contentPath, cache, ignorer);
+  const updated = applyDiffAndPersist(
+    contentPath,
+    store,
+    memKey,
+    cache,
+    ignoreFp,
+    vaultDiff(contentPath, cache, ignorer),
+  );
   // Recorded after the walk, so the window opens on a completed walk and
   // never hides a half-applied diff from the next search.
   recordSearchWalk(contentPath, memKey);
-  if (!updated) return cachedView(cache);
   // Without this the store only ever holds the cold snapshot, so every new
   // process re-reads everything added or edited since (#84).
-  persistCacheThrottled(store, memKey, cache, ignoreFp);
+  return updated ?? cachedView(cache);
+}
+
+/**
+ * Apply one diff to the in-memory index and persist it to the store.
+ * Returns null when the diff is empty.
+ *
+ * `alreadyIndexed` records which of the diff's added paths were indexed
+ * before the apply — the difference between an edit (basename set unchanged)
+ * and a genuine add (basename blob rewrite due).
+ */
+function applyDiffAndPersist(
+  contentPath: string,
+  store: IndexStore,
+  memKey: string,
+  cache: CachedVaultIndex,
+  ignoreFp: string,
+  diff: FileDiff,
+): ResolvedIndex | null {
+  const alreadyIndexed = new Set<string>();
+  for (const entry of diff.toAdd) {
+    if (cache.docs.has(entry.file)) alreadyIndexed.add(entry.file);
+  }
+  const updated = applyDiff(contentPath, cache, diff);
+  if (!updated) return null;
+  persistAppliedDiff(store, memKey, cache, ignoreFp, diff, alreadyIndexed);
   return updated;
 }
 
@@ -910,6 +942,26 @@ function loadFromDiskCache(cache: IndexSnapshot): CachedVaultIndex | null {
     }
     const fileMtimes = new Map(Object.entries(cache.fileMtimes));
     const basenameMap = buildBasenameMap(docs.values());
+    // Repair a blob that lags the file rows (#106): SqliteStore rewrites the
+    // basename blob only when the basename set changes, so pure edits leave
+    // docs newer than the blob. Removing tombstoned files and re-adding the
+    // changed ones applies the same MiniSearch updates the incremental path
+    // did, so scores stay exactly cold-build parity (#100).
+    if (cache.indexDelta) {
+      for (const removed of cache.indexDelta.remove) {
+        if (loaded.has(removed.file)) {
+          loaded.remove({ file: removed.file, basename: removed.basename });
+        }
+      }
+      for (const file of cache.indexDelta.add) {
+        const doc = docs.get(file);
+        if (!doc) continue;
+        if (loaded.has(file)) {
+          loaded.remove({ file: doc.file, basename: doc.basename });
+        }
+        loaded.add(doc);
+      }
+    }
     // A snapshot written by a version that discarded docs carries their stale
     // posting entries ("dirt"), and those inflate the BM25 document frequency
     // of the live docs they precede until a vacuum — the drift #100 fixes on
@@ -941,25 +993,16 @@ function loadFromDiskCache(cache: IndexSnapshot): CachedVaultIndex | null {
 }
 
 /**
- * Stat current files, diff against the cached mtime map, and apply changes
- * to the in-memory index. Returns null when the cache is fully up-to-date
- * (no I/O beyond the stat walk).
- *
- * Changed docs are re-read from disk (for their outgoing links and stat
- * signature) and added/replaced in the basename MiniSearch index. Backlink
- * counts are updated by delta (#92): a changed doc's old link contributions
- * are subtracted and its new ones added, and only the basename keys whose
- * path set changed are re-resolved — for the docs that did not change.
- * Bulk churn falls back to a single full pass.
+ * Stat current files and diff against the cached mtime map — the walk half
+ * of the incremental update (the apply half is `applyDiff`).
  */
-function applyIncrementalDiff(
+function vaultDiff(
   vaultPath: string,
   cache: CachedVaultIndex,
   ignore?: Ignorer,
-): ResolvedIndex | null {
+): FileDiff {
   const current = statAllFiles(vaultPath, undefined, ignore);
-  const diff = diffFileMtimes(Object.fromEntries(cache.fileMtimes), current);
-  return applyDiff(vaultPath, cache, diff);
+  return diffFileMtimes(Object.fromEntries(cache.fileMtimes), current);
 }
 
 /**
@@ -1221,35 +1264,127 @@ function addToIndex(
  *
  * Best-effort: search works without a store, so failures are swallowed.
  */
+function buildSnapshot(
+  state: CachedVaultIndex,
+  ignoreFp: string,
+): IndexSnapshot {
+  const docsArr = [...state.docs.values()];
+  const outgoingLinks: Record<string, string[]> = {};
+  for (const d of docsArr) outgoingLinks[d.file] = d.outgoingLinks;
+  return {
+    // Kept for format compatibility (#87): the snapshot always holds the
+    // whole vault now, so this is always null. A stored snapshot with a
+    // non-null folder is an old per-folder one and is treated as a miss.
+    folder: null,
+    fileMtimes: Object.fromEntries(state.fileMtimes),
+    index: JSON.stringify(state.basenameIndex),
+    docs: docsArr.map((d) => ({
+      file: d.file,
+      basename: d.basename,
+      mtime: d.mtime,
+      size: d.size,
+    })),
+    backlinkCounts: Object.fromEntries(state.backlinkCounts),
+    outgoingLinks,
+    ignoreFingerprint: ignoreFp,
+  };
+}
+
 function persistCache(
   store: IndexStore,
   state: CachedVaultIndex,
   ignoreFp: string,
 ): void {
-  const docsArr = [...state.docs.values()];
-  const outgoingLinks: Record<string, string[]> = {};
-  for (const d of docsArr) outgoingLinks[d.file] = d.outgoingLinks;
   try {
-    store.save({
-      // Kept for format compatibility (#87): the snapshot always holds the
-      // whole vault now, so this is always null. A stored snapshot with a
-      // non-null folder is an old per-folder one and is treated as a miss.
-      folder: null,
-      fileMtimes: Object.fromEntries(state.fileMtimes),
-      index: JSON.stringify(state.basenameIndex),
-      docs: docsArr.map((d) => ({
-        file: d.file,
-        basename: d.basename,
-        mtime: d.mtime,
-        size: d.size,
-      })),
-      backlinkCounts: Object.fromEntries(state.backlinkCounts),
-      outgoingLinks,
-      ignoreFingerprint: ignoreFp,
-    });
+    store.save(buildSnapshot(state, ignoreFp));
   } catch {
     // Best-effort persistence — search still works without it.
   }
+}
+
+/**
+ * Persist a cold-built index. An incremental store takes the bulk snapshot
+ * directly (one transaction); a snapshot-only store goes through the
+ * throttle — the leading edge still fires immediately.
+ */
+function persistBuiltIndex(
+  store: IndexStore,
+  cacheKey: string,
+  state: CachedVaultIndex,
+  ignoreFp: string,
+): void {
+  if (isIncrementalIndexStore(store)) {
+    persistCache(store, state, ignoreFp);
+    return;
+  }
+  persistCacheThrottled(store, cacheKey, state, ignoreFp);
+}
+
+/**
+ * Turn an applied diff plus the post-apply index state into the store-level
+ * `IndexDiff`. The basename blob is serialized only when the basename SET
+ * changed — a removed file, or an added path that was not already indexed
+ * (a rename arrives as remove+add). Pure edits leave the blob alone; the
+ * loading side repairs it from the per-file generation delta instead.
+ */
+function toIndexDiff(
+  cache: CachedVaultIndex,
+  diff: FileDiff,
+  alreadyIndexed: ReadonlySet<string>,
+  ignoreFp: string,
+): IndexDiff {
+  const upsert: IndexDiffDoc[] = [];
+  for (const entry of diff.toAdd) {
+    const doc = cache.docs.get(entry.file);
+    if (!doc) continue;
+    upsert.push({
+      file: doc.file,
+      basename: doc.basename,
+      mtime: doc.mtime,
+      size: doc.size,
+      outgoingLinks: doc.outgoingLinks,
+    });
+  }
+  const basenameSetChanged =
+    diff.toRemove.length > 0 ||
+    diff.toAdd.some((entry) => !alreadyIndexed.has(entry.file));
+  return {
+    upsert,
+    remove: diff.toRemove.map((file) => ({
+      file,
+      basename: path.basename(file, ".md"),
+    })),
+    indexBlob: basenameSetChanged
+      ? JSON.stringify(cache.basenameIndex)
+      : undefined,
+    ignoreFingerprint: ignoreFp,
+  };
+}
+
+/**
+ * Persist an applied diff. An incremental store writes just the changed rows
+ * in one transaction — O(changed), no throttle needed. A snapshot-only store
+ * rewrites the whole snapshot through the throttle, as before.
+ */
+function persistAppliedDiff(
+  store: IndexStore,
+  cacheKey: string,
+  state: CachedVaultIndex,
+  ignoreFp: string,
+  diff: FileDiff,
+  alreadyIndexed: ReadonlySet<string>,
+): void {
+  if (isIncrementalIndexStore(store)) {
+    try {
+      store.saveDiff(toIndexDiff(state, diff, alreadyIndexed, ignoreFp));
+    } catch {
+      // Best-effort persistence — the in-memory index is correct either way,
+      // and a rolled-back diff is re-persisted by the next one (the DB stays
+      // consistent at its last committed generation).
+    }
+    return;
+  }
+  persistCacheThrottled(store, cacheKey, state, ignoreFp);
 }
 
 /**
@@ -1351,6 +1486,20 @@ function resolveFreshnessMs(
   return Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 
+/**
+ * Resolve the index store kind (#106): per-call option > vault config >
+ * `"sqlite"`. The SqliteStore's per-file diff writes make it strictly
+ * better than the whole-snapshot rewrite on every measured axis (see #106);
+ * `createIndexStore` falls back to `JsonStore` whenever the database
+ * cannot be opened, so selecting it is safe on any filesystem.
+ */
+function resolveIndexStoreKind(
+  configValue: IndexStoreKind | undefined,
+  optionValue: IndexStoreKind | undefined,
+): IndexStoreKind {
+  return optionValue ?? configValue ?? "sqlite";
+}
+
 export function searchVault(
   contentPath: string,
   configPath: string,
@@ -1372,6 +1521,7 @@ export function searchVault(
     ignorer,
     ignoreFp,
     resolveFreshnessMs(config.search.freshnessMs, opts?.freshnessMs),
+    resolveIndexStoreKind(config.search.indexStore, opts?.indexStore),
   );
 
   // Folder scope is a query-time filter over the whole-vault index (#87):

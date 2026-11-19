@@ -121,23 +121,39 @@ export interface NapkinOptions {
    * this.
    */
   searchFreshnessMs?: number;
+  /**
+   * Which index store persists the search index (#106): `"sqlite"` for
+   * `.napkin/cache/index-v1.db` with per-file diff writes, `"json"` for
+   * the whole-snapshot `search-cache.json`. Falls back to JSON whenever
+   * the database cannot be opened. A per-call `search(q, { indexStore })`
+   * wins over this; both fall back to `search.indexStore` in the config.
+   */
+  searchIndexStore?: "sqlite" | "json";
 }
 
 export class Napkin {
   readonly vault: VaultInfo;
   private readonly searchFreshnessMs: number | undefined;
+  private readonly searchIndexStore: "sqlite" | "json" | undefined;
 
   constructor(path: string, opts?: NapkinOptions) {
     this.vault = findVault(path);
     this.searchFreshnessMs = opts?.searchFreshnessMs;
+    this.searchIndexStore = opts?.searchIndexStore;
   }
 
-  /** Per-call search options, with the instance freshness default applied. */
+  /** Per-call search options, with the instance defaults applied. */
   private searchOptions(opts?: SearchOptions): SearchOptions | undefined {
-    if (this.searchFreshnessMs === undefined) return opts;
+    if (
+      this.searchFreshnessMs === undefined &&
+      this.searchIndexStore === undefined
+    ) {
+      return opts;
+    }
     return {
       ...opts,
       freshnessMs: opts?.freshnessMs ?? this.searchFreshnessMs,
+      indexStore: opts?.indexStore ?? this.searchIndexStore,
     };
   }
 
