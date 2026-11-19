@@ -126,6 +126,20 @@ working directory) in `~/.config/napkin/config.json`:
 
 All SDK methods return typed data and throw errors on failure. No `console.log`, no `process.exit`.
 
+To resolve a vault without loading the SDK (a host that loads napkin on
+first use, for example), import the vault module on its own. It depends only
+on node builtins, and `new Napkin(path)` resolves the vault with the same
+`findVault`:
+
+```typescript
+import { findVault, NAPKIN_MARKER, VaultNotFoundError } from "@cad0p/napkin/vault";
+
+const vault = findVault("/path/to/project"); // throws VaultNotFoundError
+```
+
+Both entries also resolve through `require()` (Node's `require(esm)`), which
+returns the same module instance as `import`.
+
 ---
 
 ## Progressive Disclosure
