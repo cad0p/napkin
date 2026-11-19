@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Drop pkg.pr.new preview publishing (closes #78) ([#80](https://github.com/cad0p/napkin/pull/80))
+- *(package)* Declare engines node >=22.13 and test the floor in CI (closes #91) ([#97](https://github.com/cad0p/napkin/pull/97))
 
 
 ## [0.14.0] - 2026-08-12
