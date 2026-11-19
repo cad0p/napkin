@@ -524,3 +524,123 @@ describe("per-folder overview cache", () => {
     }
   });
 });
+
+/**
+ * The vault walk is bounded to the configured depth (#117): notes in
+ * folders deeper than it are never listed or statted, so they cannot
+ * change the whole-vault fingerprint or any per-folder signature.
+ */
+describe("bounded vault walk", () => {
+  const DEEP_FIXTURE: Record<string, string> = {
+    ...FIXTURE,
+    "deep/one/two/buried.md":
+      "# Buried\ntelescope collimation reflector focal optics",
+  };
+
+  test("a change below the configured depth does not invalidate the whole-vault cache", () => {
+    const vault = createTempVault(DEEP_FIXTURE);
+    const files = cacheFiles(vault.vaultPath);
+    const fixed = new Date("2024-06-01T12:00:00Z");
+    try {
+      const first = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 2,
+      });
+      // "deep/one/two" is folder depth 3 — outside the bound.
+      expect(first.overview.some((f) => f.path === "deep/one/two")).toBe(false);
+      fs.utimesSync(files.result, fixed, fixed);
+      fs.utimesSync(files.folders, fixed, fixed);
+
+      // Rewriting the deep note must leave the bounded fingerprint alone:
+      // a whole-result hit returns the previous result without rewriting
+      // either cache file (a miss always rewrites the result cache).
+      writeNote(
+        vault.vaultPath,
+        "deep/one/two/buried.md",
+        "# Buried\nsourdough fermentation hydration levain starter",
+      );
+      const second = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 2,
+      });
+      expect(second).toEqual(first);
+      expect(fs.statSync(files.result).mtimeMs).toBe(fixed.getTime());
+      expect(fs.statSync(files.folders).mtimeMs).toBe(fixed.getTime());
+
+      // The same file is still visible to a run deep enough to reach it.
+      const deep = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 3,
+      });
+      expect(deep.overview.some((f) => f.path === "deep/one/two")).toBe(true);
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("a change at the boundary depth invalidates the whole-vault cache", () => {
+    const vault = createTempVault(FIXTURE);
+    const files = cacheFiles(vault.vaultPath);
+    const fixed = new Date("2024-06-01T12:00:00Z");
+    try {
+      const first = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 2,
+      });
+      fs.utimesSync(files.result, fixed, fixed);
+
+      // "imports/tenant-0" is folder depth 2 — exactly at the bound.
+      writeNote(
+        vault.vaultPath,
+        "imports/tenant-0/contract.md",
+        "# Converted document\nsourdough fermentation hydration levain starter",
+      );
+      const second = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 2,
+      });
+
+      // Miss: the result cache was rewritten, and the answer is the cold one.
+      expect(fs.statSync(files.result).mtimeMs).not.toBe(fixed.getTime());
+      expect(second).not.toEqual(first);
+      expect(second).toEqual(cold(vault.vaultPath, { depth: 2 }));
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("ignore and symlink semantics are unchanged at the walk boundary", () => {
+    // alpha/ is ignored; "linked" is a symlink at depth 1 to an external
+    // dir holding folders at depths 2 (inside the bound) and 3 (outside).
+    const vault = createTempVault({
+      ...FIXTURE,
+      ".napkinignore": "alpha/\n",
+    });
+    try {
+      const external = path.join(vault.path, "external");
+      fs.mkdirSync(path.join(external, "sub/deep"), { recursive: true });
+      fs.writeFileSync(
+        path.join(external, "sub/note.md"),
+        "# Linked\ntelescope collimation reflector focal optics",
+      );
+      fs.writeFileSync(
+        path.join(external, "sub/deep/buried.md"),
+        "# Buried\nsourdough fermentation hydration levain starter",
+      );
+      fs.symlinkSync(external, path.join(vault.vaultPath, "linked"));
+
+      const shallow = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 2,
+      });
+      const paths = shallow.overview.map((f) => f.path);
+      // An ignored dir inside the bound is still pruned (and not walked).
+      expect(paths).not.toContain("alpha");
+      // Depth follows the symlink path, so linked/sub is folder depth 2.
+      expect(paths).toContain("linked/sub");
+      expect(paths).not.toContain("linked/sub/deep");
+
+      const deep = getOverview(vault.vaultPath, vault.vaultPath, {
+        depth: 3,
+      });
+      expect(deep.overview.map((f) => f.path)).toContain("linked/sub/deep");
+      expect(deep.overview.map((f) => f.path)).not.toContain("alpha");
+    } finally {
+      vault.cleanup();
+    }
+  });
+});
