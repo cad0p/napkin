@@ -3,6 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_CONFIG, saveConfig } from "./config.js";
 import { forceJsonIndexStoreForTests } from "./index-store.js";
+import {
+  forceJsonOverviewStoreForTests,
+  resetOverviewStoresForTests,
+} from "./overview-store.js";
 import { NAPKIN_MARKER } from "./vault.js";
 
 /**
@@ -75,4 +79,42 @@ export function dropSearchStoreFiles(vaultPath: string): void {
   for (const suffix of ["", "-wal", "-shm"]) {
     fs.rmSync(`${db}${suffix}`, { force: true });
   }
+}
+
+/**
+ * Pin the vault's overview folder-data store to the JSON cache (#112): for
+ * tests that assert on overview-folders-cache.json itself — its bytes, its
+ * mtime, its compaction — now that the store is SQLite
+ * (.napkin/cache/overview-v1.db). Test-only seam: there is no user-facing
+ * store selection, the pin lives in overview-store module state keyed by this
+ * vault's config dir.
+ */
+export function useJsonOverviewStore(vaultPath: string): void {
+  forceJsonOverviewStoreForTests(vaultPath);
+}
+
+/**
+ * Drop every on-disk overview store — overview-folders-cache.json AND the
+ * SQLite store's cache/overview-v1.db (+ WAL/SHM sidecars) — so the next
+ * overview rebuilds every folder regardless of the configured store (#112).
+ * The whole-result overview-cache.json is removed too: a "cold" run means
+ * computing, not answering from the result cache.
+ */
+export function dropOverviewStoreFiles(vaultPath: string): void {
+  fs.rmSync(path.join(vaultPath, "overview-cache.json"), { force: true });
+  fs.rmSync(path.join(vaultPath, "overview-folders-cache.json"), {
+    force: true,
+  });
+  const db = path.join(vaultPath, "cache", "overview-v1.db");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    fs.rmSync(`${db}${suffix}`, { force: true });
+  }
+}
+
+/**
+ * Drop the cached overview-store objects so a test observes a fresh selection
+ * (and a fresh SQLite connection) the way a new process would.
+ */
+export function resetOverviewIndexForTests(): void {
+  resetOverviewStoresForTests();
 }

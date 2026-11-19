@@ -1,7 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, test } from "vitest";
-import { createTempVault } from "../utils/test-helpers.js";
+import {
+  createTempVault,
+  dropOverviewStoreFiles,
+  useJsonOverviewStore,
+} from "../utils/test-helpers.js";
 import { getOverview } from "./overview.js";
 
 /**
@@ -13,6 +17,12 @@ import { getOverview } from "./overview.js";
  * then clears both cache files and recomputes cold on the mutated vault. The
  * incremental result must deep-equal the cold one — for edits, adds, removes,
  * folder deletes/adds, option changes, and ignore-rule changes.
+ *
+ * #112 moved the default per-folder store to SQLite
+ * (.napkin/cache/overview-v1.db). Tests that assert on the JSON cache FILE
+ * (overview-folders-cache.json — its bytes, its mtime, its compaction) pin the
+ * vault to the JSON fallback via useJsonOverviewStore; behavioral tests run
+ * the default store. overview-store.test.ts covers the SQLite side directly.
  *
  * Notes are well-formed markdown on purpose: gray-matter memoizes by content
  * string (see overview.equivalence.test.ts), so re-parsing identical content
@@ -56,11 +66,9 @@ function cacheFiles(vaultPath: string): { result: string; folders: string } {
   };
 }
 
-/** Cold recomputation of the current vault state: both caches removed first. */
+/** Cold recomputation of the current vault state: all caches removed first. */
 function cold(vaultPath: string, opts?: Parameters<typeof getOverview>[2]) {
-  const files = cacheFiles(vaultPath);
-  fs.rmSync(files.result, { force: true });
-  fs.rmSync(files.folders, { force: true });
+  dropOverviewStoreFiles(vaultPath);
   return getOverview(vaultPath, vaultPath, opts);
 }
 
@@ -170,6 +178,8 @@ describe("per-folder overview cache", () => {
     "one folder changed ($name): incremental ≡ cold",
     ({ apply, rebuilt }) => {
       const vault = createTempVault(FIXTURE);
+      // White-box assertions read the JSON cache file — pin the fallback.
+      useJsonOverviewStore(vault.vaultPath);
       try {
         const before = getOverview(vault.vaultPath, vault.vaultPath);
         expect(before.overview.length).toBeGreaterThan(0);
@@ -255,6 +265,8 @@ describe("per-folder overview cache", () => {
 
   test("same mtime but a different size is visible (size is part of the fingerprint)", () => {
     const vault = createTempVault(FIXTURE);
+    // White-box: reads the rebuilt folder's terms from the JSON cache file.
+    useJsonOverviewStore(vault.vaultPath);
     const notePath = path.join(vault.vaultPath, "alpha/kubernetes.md");
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
@@ -290,6 +302,8 @@ describe("per-folder overview cache", () => {
 
   test("option change reuses every folder entry and does not rewrite the folder cache", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file's bytes and mtime — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
@@ -319,6 +333,8 @@ describe("per-folder overview cache", () => {
 
   test("warm result hit does not touch the per-folder cache", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file's mtime — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
@@ -337,6 +353,8 @@ describe("per-folder overview cache", () => {
 
   test("corrupt folder cache is a miss, never an error", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
@@ -361,6 +379,8 @@ describe("per-folder overview cache", () => {
 
   test("old cache version is a miss", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
@@ -386,6 +406,8 @@ describe("per-folder overview cache", () => {
 
   test("an entry with an out-of-range term index rebuilds only that folder", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
@@ -451,6 +473,8 @@ describe("per-folder overview cache", () => {
         "# Ephemeral\nquarantine placeholder temporary scaffolding",
     };
     const vault = createTempVault(fixture);
+    // Asserts dictionary compaction in the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
       const before = readFoldersCache(vault.vaultPath);
@@ -475,6 +499,8 @@ describe("per-folder overview cache", () => {
         "# Buried\ntelescope collimation reflector focal optics",
     };
     const vault = createTempVault(fixture);
+    // Asserts on the JSON cache file's retained entries — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     try {
       // maxDepth 3 builds deep/one/two (depth 3).
       const deep = getOverview(vault.vaultPath, vault.vaultPath, {
