@@ -227,3 +227,77 @@ describe("saveSearchCache / loadSearchCache", () => {
     expect(loaded).toBeNull();
   });
 });
+
+describe("saveSearchCache atomicity", () => {
+  const cachePath = (dir: string) => path.join(dir, "search-cache.json");
+  const tempFiles = (dir: string) =>
+    fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith("search-cache.json.") && f.endsWith(".tmp"));
+
+  function sampleData(ignoreFingerprint = "fp-test") {
+    return {
+      folder: null,
+      fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
+      index: '{"serialized":"index"}',
+      docs: [
+        {
+          file: "README.md",
+          basename: "README",
+          content: "# readme body",
+          mtime: 1000,
+          size: 42,
+        },
+      ],
+      backlinkCounts: { "README.md": 2 },
+      outgoingLinks: { "README.md": [] },
+      ignoreFingerprint,
+    };
+  }
+
+  test("leaves no temp files behind", () => {
+    saveSearchCache(vault.vaultPath, sampleData());
+
+    expect(fs.existsSync(cachePath(vault.vaultPath))).toBe(true);
+    expect(tempFiles(vault.vaultPath)).toEqual([]);
+    expect(loadSearchCache(vault.vaultPath)?.ignoreFingerprint).toBe("fp-test");
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "a failed write keeps the previous cache and removes the temp file",
+    () => {
+      saveSearchCache(vault.vaultPath, sampleData());
+      const before = fs.readFileSync(cachePath(vault.vaultPath), "utf-8");
+
+      // Read-only directory: the temp file cannot be created at all.
+      fs.chmodSync(vault.vaultPath, 0o500);
+      try {
+        expect(() =>
+          saveSearchCache(vault.vaultPath, sampleData("other-fp")),
+        ).toThrow();
+      } finally {
+        fs.chmodSync(vault.vaultPath, 0o700);
+      }
+
+      // The previous snapshot is intact and still loads.
+      expect(fs.readFileSync(cachePath(vault.vaultPath), "utf-8")).toBe(before);
+      expect(loadSearchCache(vault.vaultPath)?.ignoreFingerprint).toBe(
+        "fp-test",
+      );
+      expect(tempFiles(vault.vaultPath)).toEqual([]);
+    },
+  );
+
+  test("cleans up the temp file when the rename fails", () => {
+    // A directory occupying the target path makes rename(2) fail after the
+    // temp file was written — the half-written temp must not be left behind.
+    const target = cachePath(vault.vaultPath);
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, "occupied"), "x");
+
+    expect(() => saveSearchCache(vault.vaultPath, sampleData())).toThrow();
+
+    expect(tempFiles(vault.vaultPath)).toEqual([]);
+    expect(fs.readdirSync(target)).toEqual(["occupied"]);
+  });
+});
