@@ -40,6 +40,14 @@ export interface NapkinConfig {
     limit: number;
     contextLines: number;
     resultsPerPage: number;
+    /**
+     * Freshness window (ms) for the search index walk (#93). Inside the
+     * window a search reuses the index this process already built instead of
+     * listing and statting every note; writes made through napkin are still
+     * seen immediately, writes made by OTHER processes after at most this
+     * window. 0 (the default) validates against disk on every search.
+     */
+    freshnessMs: number;
   };
   daily: {
     folder: string;
@@ -76,6 +84,9 @@ export const DEFAULT_CONFIG: NapkinConfig = {
     limit: 30,
     contextLines: 5,
     resultsPerPage: DEFAULT_SEARCH_RESULTS_PER_PAGE,
+    // Never skip the walk by default: the CLI and a plain SDK instance keep
+    // the pre-#93 behaviour (a search always reflects disk).
+    freshnessMs: 0,
   },
   daily: {
     folder: "daily",

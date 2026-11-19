@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import MiniSearch from "minisearch";
 import { loadConfig } from "../utils/config.js";
-import { listFiles } from "../utils/files.js";
+import { listFiles, SKIP_DIRS } from "../utils/files.js";
 import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
@@ -15,6 +15,12 @@ import {
   saveSearchCache,
   statAllFiles,
 } from "../utils/search-cache.js";
+import {
+  isFreshnessWindowOpen,
+  recordSearchWalk,
+  resetSearchFreshnessForTests,
+  takeSearchFreshness,
+} from "../utils/search-freshness.js";
 
 /**
  * Maximum snippet lines returned per file. Prevents broad queries from
@@ -59,6 +65,19 @@ export interface SearchOptions {
   contextLines?: number;
   snippets?: boolean;
   page?: number;
+  /**
+   * Freshness window for the vault stat walk, in milliseconds (#93).
+   *
+   * Inside the window a search reuses the index this process already built
+   * instead of listing and statting every note, so a query costs a basename
+   * BM25 lookup plus the content scan. Writes made through napkin in this
+   * process are still picked up (their paths are re-stat'd); writes made by
+   * OTHER processes become visible after at most this window.
+   *
+   * `0` (the default, and the CLI behaviour) validates against disk on every
+   * search. Overrides `search.freshnessMs` from the vault config.
+   */
+  freshnessMs?: number;
 }
 
 export interface PaginatedSearchResults {
@@ -175,6 +194,7 @@ export function resetSearchIndexForTests(): void {
   }
   lastCacheWriteAt.clear();
   memoryCache.clear();
+  resetSearchFreshnessForTests();
 }
 
 /**
@@ -633,6 +653,7 @@ function resolveVaultIndex(
   configPath: string,
   ignorer: Ignorer,
   ignoreFp: string,
+  freshnessMs: number,
 ): ResolvedIndex {
   // One index per vault (#87): folder scoping is a query-time filter in
   // searchVault, so the memory key and disk cache never depend on a folder.
@@ -647,6 +668,7 @@ function resolveVaultIndex(
       cached,
       ignoreFp,
       ignorer,
+      freshnessMs,
     );
   }
 
@@ -671,6 +693,7 @@ function resolveVaultIndex(
         loaded,
         ignoreFp,
         ignorer,
+        freshnessMs,
       );
     }
   }
@@ -687,6 +710,9 @@ function resolveVaultIndex(
     pathLinkCounts: built.pathLinkCounts,
   };
   memoryCache.set(memKey, fresh);
+  // A cold build reads every note, so it is a walk: record it for the
+  // freshness window (#93).
+  recordSearchWalk(contentPath, memKey);
   // Goes through the throttle like the incremental path: it writes
   // immediately (nothing was written for this key yet) and records the write
   // time, so an immediate follow-up diff coalesces instead of rewriting.
@@ -698,10 +724,27 @@ function resolveVaultIndex(
   };
 }
 
+/** The cached view of a vault, when the diff found nothing to change. */
+function cachedView(cache: CachedVaultIndex): ResolvedIndex {
+  return {
+    basenameIndex: cache.basenameIndex,
+    docs: cache.docs,
+    backlinkCounts: cache.backlinkCounts,
+  };
+}
+
 /**
- * Apply the mtime+size diff to a cached index and persist the result when
- * anything changed. Returns the cached view unchanged when the cache is
- * already up-to-date (the stat walk is the only I/O in that case).
+ * Bring the cached index up to date with the disk and persist it when anything
+ * changed. Three ways through (#93):
+ *
+ *  - nothing pending and the last walk is inside the freshness window: return
+ *    the cache as-is, with no I/O at all. This is the fast path a long-lived
+ *    consumer hits on most queries.
+ *  - paths this process wrote since the last search: re-stat just those and
+ *    apply them through the incremental diff (read-your-writes inside the
+ *    window), without a full walk.
+ *  - otherwise: walk the vault and diff — the pre-#93 behaviour, and what a
+ *    freshness window of 0 always does.
  */
 function applyIncrementalOrCached(
   contentPath: string,
@@ -710,19 +753,104 @@ function applyIncrementalOrCached(
   cache: CachedVaultIndex,
   ignoreFp: string,
   ignorer: Ignorer,
+  freshnessMs: number,
 ): ResolvedIndex {
-  const updated = applyIncrementalDiff(contentPath, cache, ignorer);
-  if (!updated) {
-    return {
-      basenameIndex: cache.basenameIndex,
-      docs: cache.docs,
-      backlinkCounts: cache.backlinkCounts,
-    };
+  const pending = takeSearchFreshness(contentPath);
+
+  if (
+    !pending.forceWalk &&
+    isFreshnessWindowOpen(contentPath, memKey, freshnessMs)
+  ) {
+    if (pending.dirty.length === 0) return cachedView(cache);
+    const updated = applyDiff(
+      contentPath,
+      cache,
+      diffFromDirtyPaths(contentPath, cache, pending.dirty, ignorer),
+    );
+    if (!updated) return cachedView(cache);
+    persistCacheThrottled(configPath, memKey, cache, ignoreFp);
+    return updated;
   }
+
+  const updated = applyIncrementalDiff(contentPath, cache, ignorer);
+  // Recorded after the walk, so the window opens on a completed walk and
+  // never hides a half-applied diff from the next search.
+  recordSearchWalk(contentPath, memKey);
+  if (!updated) return cachedView(cache);
   // Without this the disk cache only ever holds the cold snapshot, so every
   // new process re-reads everything added or edited since (#84).
   persistCacheThrottled(configPath, memKey, cache, ignoreFp);
   return updated;
+}
+
+/**
+ * Build a diff from the vault-relative paths this process wrote (#93).
+ *
+ * A dirty path is re-stat'd — and re-read — unconditionally: signature
+ * equality is not a reason to trust the index for a file the process itself
+ * just wrote, and a same-length edit in the same filesystem tick reports an
+ * unchanged mtime+size (see statAllFiles). Paths the vault walk could not
+ * enumerate are dropped: indexing a note that a cold build would exclude
+ * would make the incremental result diverge from a fresh one.
+ */
+function diffFromDirtyPaths(
+  contentPath: string,
+  cache: CachedVaultIndex,
+  dirty: string[],
+  ignore?: Ignorer,
+): FileDiff {
+  const toAdd: FileMtimeEntry[] = [];
+  const toRemove: string[] = [];
+  for (const file of dirty) {
+    if (!isEnumeratedPath(file, ignore)) continue;
+    const sig = statFile(contentPath, file);
+    if (sig === null) {
+      if (cache.fileMtimes.has(file)) toRemove.push(file);
+    } else {
+      toAdd.push({ file, ...sig });
+    }
+  }
+  return {
+    toAdd,
+    toRemove,
+    unchanged: toAdd.length === 0 && toRemove.length === 0,
+  };
+}
+
+/** Stat one vault-relative note; null when it is not a readable file. */
+function statFile(contentPath: string, file: string): FileStatSig | null {
+  try {
+    const stat = fs.statSync(path.join(contentPath, file));
+    if (!stat.isFile()) return null;
+    return { mtime: stat.mtimeMs, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the vault walk would list this path — the filter a dirty path
+ * must pass before it may enter the index.
+ *
+ * Mirrors listFiles: only `.md` files are indexed, no path segment may be a
+ * SKIP_DIRS entry (pruned unconditionally at descent), and the ignore
+ * predicate must pass for the file AND for every ancestor directory, because
+ * a dir-only pattern (`build/`) prunes a subtree without matching the files
+ * inside it.
+ */
+function isEnumeratedPath(file: string, ignore?: Ignorer): boolean {
+  if (!file.endsWith(".md")) return false;
+  const segments = file.split("/");
+  const name = segments[segments.length - 1];
+  if (SKIP_DIRS.has(name)) return false;
+  let dir = "";
+  for (let i = 0; i < segments.length - 1; i++) {
+    const segment = segments[i];
+    if (SKIP_DIRS.has(segment)) return false;
+    dir = dir === "" ? segment : `${dir}/${segment}`;
+    if (ignore?.ignores(`${dir}/`)) return false;
+  }
+  return !ignore?.ignores(file);
 }
 
 function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
@@ -789,6 +917,18 @@ function applyIncrementalDiff(
 ): ResolvedIndex | null {
   const current = statAllFiles(vaultPath, undefined, ignore);
   const diff = diffFileMtimes(Object.fromEntries(cache.fileMtimes), current);
+  return applyDiff(vaultPath, cache, diff);
+}
+
+/**
+ * Apply one diff (a full walk's, or the dirty paths' — #93) to the cached
+ * index. Returns null when the diff is empty.
+ */
+function applyDiff(
+  vaultPath: string,
+  cache: CachedVaultIndex,
+  diff: FileDiff,
+): ResolvedIndex | null {
   if (diff.unchanged) {
     return null;
   }
@@ -1119,6 +1259,22 @@ function normalizeFolderScope(
 
 // ── Public search API ─────────────────────────────────────────────
 
+/**
+ * Resolve the freshness window (#93): per-call option > vault config > `0`.
+ *
+ * A window of 0 means "validate against disk on every search", which is what
+ * the CLI and a default SDK instance do — behaviour is unchanged unless a
+ * long-lived consumer asks for a window. Negative or non-finite values fall
+ * back to 0: never skipping the walk is the safe reading of a bad number.
+ */
+function resolveFreshnessMs(
+  configValue: number | undefined,
+  optionValue: number | undefined,
+): number {
+  const raw = optionValue ?? configValue ?? 0;
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
 export function searchVault(
   contentPath: string,
   configPath: string,
@@ -1139,6 +1295,7 @@ export function searchVault(
     configPath,
     ignorer,
     ignoreFp,
+    resolveFreshnessMs(config.search.freshnessMs, opts?.freshnessMs),
   );
 
   // Folder scope is a query-time filter over the whole-vault index (#87):

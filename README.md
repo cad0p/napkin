@@ -100,6 +100,16 @@ n.bookmarks();
 n.config();
 ```
 
+By default every search validates its index by walking the vault. A
+long-lived consumer that searches in a loop can bound that with a freshness
+window (milliseconds) — writes through the same process stay visible
+immediately, other processes' writes appear after at most the window:
+
+```typescript
+const n = new Napkin("/path/to/project", { searchFreshnessMs: 5000 });
+n.search("auth", { freshnessMs: 0 }); // per-call override: walk now
+```
+
 Scaffold with a template (the only API that creates a vault):
 
 ```typescript
