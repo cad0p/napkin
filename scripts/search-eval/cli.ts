@@ -284,6 +284,8 @@ function parseArgs(argv: string[]): Options {
     usage("--candidate is only meaningful in judge mode");
   }
   if (opts.mode === "judge") {
+    if (opts.record)
+      usage("judge mode compares against a recording; it cannot --record");
     if (!opts.compare) usage("judge mode needs --compare <baseline.json>");
     if (!opts.judgeModel) usage("judge mode needs --judge-model");
     if (opts.judgeCache === null) opts.judgeCache = defaultJudgeCacheDir();
