@@ -103,6 +103,8 @@ export interface QueryableIndexStore extends IncrementalIndexStore, NameSource {
   scanPaths(folderScope: string | null): IterableIterator<string>;
   /** Recency and resolved backlink count per path. */
   hitInfo(files: string[]): Map<string, { mtime: number; links: number }>;
+  /** Run one search's reads against a single committed state. */
+  readSnapshot<T>(fn: () => T): T;
   /** Close the connection (reopened lazily by the next call). */
   release(): void;
   /** Park an unusable database aside so the next open rebuilds it. */

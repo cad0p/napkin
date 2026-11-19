@@ -802,7 +802,7 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
           "FROM name_terms n JOIN files f ON f.id = n.file_id " +
           "WHERE n.term >= ? AND n.term < ? ORDER BY n.term, n.file_id",
       )
-      .all(prefix, `${prefix}\u{10FFFF}`) as unknown as NamePosting[];
+      .all(prefix, prefixUpperBound(prefix)) as unknown as NamePosting[];
   }
 
   postingsForTerms(terms: string[]): NamePosting[] {
@@ -828,6 +828,25 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
         )
         .all(min, max) as unknown as { term: string }[]
     ).map((r) => r.term);
+  }
+
+  /**
+   * Run the read phase of one search inside a single read transaction, so
+   * statistics, postings, the path scan and hit info all come from the same
+   * committed state even when another process writes in between (WAL gives
+   * each statement the newest commit otherwise). The callback must finish
+   * every read it starts, including iterators, before it returns.
+   */
+  readSnapshot<T>(fn: () => T): T {
+    this.ensureOpen();
+    this.db.exec("BEGIN DEFERRED");
+    try {
+      return fn();
+    } finally {
+      // A read-only transaction: COMMIT and ROLLBACK are equivalent; the
+      // connection may already be gone if the callback closed it.
+      if (!this.closed && this.db.isTransaction) this.db.exec("COMMIT");
+    }
   }
 
   /** Close the connection; the next call reopens it lazily. */
@@ -1047,4 +1066,21 @@ function bumpDelta(
 function parentDir(file: string): string {
   const idx = file.lastIndexOf("/");
   return idx === -1 ? "" : file.slice(0, idx);
+}
+
+/**
+ * Exclusive upper bound for "every string that starts with `prefix`" under
+ * SQLite's BINARY collation (UTF-8 bytes, i.e. code point order): the prefix
+ * with its last code point incremented, trailing U+10FFFF dropped first. A
+ * fixed `prefix + U+10FFFF` bound would miss terms whose next code point is
+ * U+10FFFF itself. With no successor (empty or all U+10FFFF) every string
+ * at or above the prefix qualifies, so the bound is past the largest one.
+ */
+export function prefixUpperBound(prefix: string): string {
+  const cps = [...prefix].map((c) => c.codePointAt(0) as number);
+  while (cps.length > 0 && cps[cps.length - 1] === 0x10ffff) cps.pop();
+  if (cps.length === 0) return "\u{10FFFF}".repeat(prefix.length + 64);
+  let next = (cps.pop() as number) + 1;
+  if (next >= 0xd800 && next <= 0xdfff) next = 0xe000;
+  return String.fromCodePoint(...cps, next);
 }

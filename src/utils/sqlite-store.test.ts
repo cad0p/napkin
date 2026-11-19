@@ -7,7 +7,7 @@ import {
   forceJsonIndexStoreForTests,
 } from "./index-store.js";
 import { JsonStore } from "./json-store.js";
-import { loadSqlite, SqliteStore } from "./sqlite-store.js";
+import { loadSqlite, prefixUpperBound, SqliteStore } from "./sqlite-store.js";
 import { createTempVault } from "./test-helpers.js";
 
 /**
@@ -326,5 +326,48 @@ describe("createIndexStore selection", () => {
     } finally {
       fs.chmodSync(v.vaultPath, 0o755);
     }
+  });
+});
+
+describe("prefixUpperBound (#109 review r1)", () => {
+  const cmp = (a: string, b: string) => {
+    // SQLite BINARY = UTF-8 byte order = code point order.
+    const x = [...a].map((c) => c.codePointAt(0) as number);
+    const y = [...b].map((c) => c.codePointAt(0) as number);
+    for (let i = 0; i < Math.min(x.length, y.length); i++) {
+      if (x[i] !== y[i]) return x[i] - y[i];
+    }
+    return x.length - y.length;
+  };
+  const inRange = (term: string, prefix: string) =>
+    cmp(term, prefix) >= 0 && cmp(term, prefixUpperBound(prefix)) < 0;
+
+  test("every extension of the prefix is inside, the next prefix is not", () => {
+    for (const prefix of [
+      "note",
+      "a",
+      "z\u{10FFFF}",
+      "\u{FFFF}",
+      "\u{D7FF}",
+      "é",
+    ]) {
+      for (const tail of ["", "x", "\u{10FFFF}", "\u{10FFFF}x", "\u{1F600}"]) {
+        expect(
+          inRange(prefix + tail, prefix),
+          JSON.stringify(prefix + tail),
+        ).toBe(true);
+      }
+      expect(inRange(prefixUpperBound(prefix), prefix)).toBe(false);
+    }
+    expect(inRange("nota", "note")).toBe(false);
+    expect(inRange("notf", "note")).toBe(false);
+  });
+
+  test("a code point just below the surrogates skips past them", () => {
+    expect(prefixUpperBound("\u{D7FF}")).toBe("\u{E000}");
+  });
+
+  test("no successor: every string at or above the prefix qualifies", () => {
+    expect(inRange("\u{10FFFF}\u{10FFFF}abc", "\u{10FFFF}")).toBe(true);
   });
 });

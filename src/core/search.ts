@@ -1681,32 +1681,34 @@ function searchViaStore(
 ): SearchResult[] {
   refreshStore(store, contentPath, ignorer, ignoreFp, freshnessMs);
 
-  // Basename BM25 over the SQL postings. Statistics (document count, mean
-  // field length, document frequency) stay whole-vault; only the hits are
-  // restricted to the folder scope, exactly like the in-memory path.
-  const basenameScores = new Map<string, number>();
-  for (const [file, score] of searchNames(store, query)) {
-    if (folderScope !== null && !file.startsWith(`${folderScope}/`)) {
-      continue;
+  return store.readSnapshot(() => {
+    // Basename BM25 over the SQL postings. Statistics (document count, mean
+    // field length, document frequency) stay whole-vault; only the hits are
+    // restricted to the folder scope, exactly like the in-memory path.
+    const basenameScores = new Map<string, number>();
+    for (const [file, score] of searchNames(store, query)) {
+      if (folderScope !== null && !file.startsWith(`${folderScope}/`)) {
+        continue;
+      }
+      basenameScores.set(file, score);
     }
-    basenameScores.set(file, score);
-  }
 
-  const contentTf = contentScan(
-    contentPath,
-    store.scanPaths(folderScope),
-    queryTerms(query),
-  );
+    const contentTf = contentScan(
+      contentPath,
+      store.scanPaths(folderScope),
+      queryTerms(query),
+    );
 
-  return rankAndRender(
-    contentPath,
-    config,
-    query,
-    opts,
-    basenameScores,
-    contentTf,
-    (files) => store.hitInfo(files),
-  );
+    return rankAndRender(
+      contentPath,
+      config,
+      query,
+      opts,
+      basenameScores,
+      contentTf,
+      (files) => store.hitInfo(files),
+    );
+  });
 }
 
 /** Read one note's index record; null when it vanished or is unreadable. */

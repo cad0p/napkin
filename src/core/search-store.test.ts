@@ -253,6 +253,21 @@ describe("SQLite search path (#109)", () => {
   });
 });
 
+test("a basename containing U+10FFFF matches the in-memory path", () => {
+  const v = vault({
+    "Misc/note\u{10FFFF}x.md": "# odd\nbody\n",
+    "Misc/other.md": "# o\n",
+  });
+  const sqlite = run(v, "note").map((r) => r.file);
+  const json = vault({
+    "Misc/note\u{10FFFF}x.md": "# odd\nbody\n",
+    "Misc/other.md": "# o\n",
+  });
+  useJsonIndexStore(json.vaultPath);
+  expect(sqlite).toEqual(run(json, "note").map((r) => r.file));
+  expect(sqlite).toContain("Misc/note\u{10FFFF}x.md");
+});
+
 describe("SQLite search path failure modes (#109)", () => {
   test("a database corrupted after open falls back, then recovers", () => {
     const v = vault(corpus());
