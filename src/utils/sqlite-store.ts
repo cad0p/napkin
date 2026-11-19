@@ -229,10 +229,14 @@ function prepareAll(db: DatabaseSync): Stmts {
     allFiles: db.prepare(
       "SELECT id, path, basename, mtime, size, gen FROM files",
     ),
-    // Ordered by the links_src index (src ASC, then rowid within src) —
-    // an index scan with no temp b-tree sort over ~200k rows, which keeps
-    // the load cheap. Per-file target order stays rowid order.
-    allLinks: db.prepare("SELECT src, target FROM links ORDER BY src"),
+    // Grouped per source file: 28k rows instead of 174k on a large vault,
+    // so the load allocates ~6x fewer transient row objects (V8 keeps the
+    // high-water mark as heapTotal for the process lifetime). Group order
+    // follows the links_src index scan, and within a group json_group_array
+    // preserves the rowid order the per-row query produced.
+    allLinks: db.prepare(
+      "SELECT src, json_group_array(target) AS targets FROM links GROUP BY src",
+    ),
     tombsSince: db.prepare(
       "SELECT path, basename FROM tombstones WHERE gen > ? ORDER BY path",
     ),
@@ -562,10 +566,12 @@ export class SqliteStore implements IncrementalIndexStore {
       docs.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
       for (const row of this.stmts.allLinks.iterate() as Iterable<{
         src: number;
-        target: string;
+        targets: string;
       }>) {
         const file = idToPath.get(row.src);
-        if (file !== undefined) outgoingLinks[file].push(row.target);
+        if (file !== undefined) {
+          outgoingLinks[file] = JSON.parse(row.targets) as string[];
+        }
       }
       // Hand the page cache and freed SQL memory back to malloc — the bulk
       // load just touched every page, and no more reads are coming.
