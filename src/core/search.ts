@@ -4,15 +4,17 @@ import MiniSearch from "minisearch";
 import { loadConfig } from "../utils/config.js";
 import { listFiles, SKIP_DIRS } from "../utils/files.js";
 import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
+import {
+  createIndexStore,
+  type IndexSnapshot,
+  type IndexStore,
+} from "../utils/index-store.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
   diffFileMtimes,
   type FileDiff,
   type FileMtimeEntry,
   type FileStatSig,
-  loadSearchCache,
-  type SearchCacheData,
-  saveSearchCache,
   statAllFiles,
 } from "../utils/search-cache.js";
 import {
@@ -169,7 +171,7 @@ const lastCacheWriteAt = new Map<string, number>();
  */
 interface PendingCacheWrite {
   timer: NodeJS.Timeout;
-  configPath: string;
+  store: IndexStore;
   state: CachedVaultIndex;
   ignoreFp: string;
 }
@@ -667,9 +669,9 @@ interface ResolvedIndex {
 /**
  * Resolve the vault index:
  *   1. Check the in-memory cache (long-lived process fast path).
- *   2. Otherwise check the on-disk cache: if it exists, load the basename
- *      index + metadata, and apply an incremental diff (discard removed,
- *      add/replace changed).
+ *   2. Otherwise ask the index store: if it holds a snapshot, load the
+ *      basename index + metadata, and apply an incremental diff (discard
+ *      removed, add/replace changed).
  *   3. Otherwise (cold) build from scratch.
  *
  * In all cases the result is kept in the in-memory cache for reuse, and a
@@ -684,14 +686,17 @@ function resolveVaultIndex(
   freshnessMs: number,
 ): ResolvedIndex {
   // One index per vault (#87): folder scoping is a query-time filter in
-  // searchVault, so the memory key and disk cache never depend on a folder.
+  // searchVault, so the memory key and the store never depend on a folder.
   const memKey = memoryCacheKey(contentPath, ignoreFp);
+  // The store choice lives behind this call (#94): search.ts never learns
+  // whether the snapshot comes from a JSON file or a SQLite database.
+  const store = createIndexStore(configPath);
 
   const cached = memoryCache.get(memKey);
   if (cached) {
     return applyIncrementalOrCached(
       contentPath,
-      configPath,
+      store,
       memKey,
       cached,
       ignoreFp,
@@ -700,8 +705,8 @@ function resolveVaultIndex(
     );
   }
 
-  const diskCache = loadSearchCache(configPath);
-  // The disk cache is only valid when it holds a whole-vault snapshot
+  const diskCache = store.load();
+  // A stored snapshot is only valid when it holds a whole-vault view
   // (folder === null; older per-folder caches are treated as a miss and
   // replaced) AND the ignore state matches the current fingerprint — an
   // ignore change can hide/unhide files that incremental diffing against
@@ -716,7 +721,7 @@ function resolveVaultIndex(
       memoryCache.set(memKey, loaded);
       return applyIncrementalOrCached(
         contentPath,
-        configPath,
+        store,
         memKey,
         loaded,
         ignoreFp,
@@ -744,7 +749,7 @@ function resolveVaultIndex(
   // Goes through the throttle like the incremental path: it writes
   // immediately (nothing was written for this key yet) and records the write
   // time, so an immediate follow-up diff coalesces instead of rewriting.
-  persistCacheThrottled(configPath, memKey, fresh, ignoreFp);
+  persistCacheThrottled(store, memKey, fresh, ignoreFp);
   return {
     basenameIndex: fresh.basenameIndex,
     docs: fresh.docs,
@@ -776,7 +781,7 @@ function cachedView(cache: CachedVaultIndex): ResolvedIndex {
  */
 function applyIncrementalOrCached(
   contentPath: string,
-  configPath: string,
+  store: IndexStore,
   memKey: string,
   cache: CachedVaultIndex,
   ignoreFp: string,
@@ -796,7 +801,7 @@ function applyIncrementalOrCached(
       diffFromDirtyPaths(contentPath, cache, pending.dirty, ignorer),
     );
     if (!updated) return cachedView(cache);
-    persistCacheThrottled(configPath, memKey, cache, ignoreFp);
+    persistCacheThrottled(store, memKey, cache, ignoreFp);
     return updated;
   }
 
@@ -805,9 +810,9 @@ function applyIncrementalOrCached(
   // never hides a half-applied diff from the next search.
   recordSearchWalk(contentPath, memKey);
   if (!updated) return cachedView(cache);
-  // Without this the disk cache only ever holds the cold snapshot, so every
-  // new process re-reads everything added or edited since (#84).
-  persistCacheThrottled(configPath, memKey, cache, ignoreFp);
+  // Without this the store only ever holds the cold snapshot, so every new
+  // process re-reads everything added or edited since (#84).
+  persistCacheThrottled(store, memKey, cache, ignoreFp);
   return updated;
 }
 
@@ -881,7 +886,7 @@ function isEnumeratedPath(file: string, ignore?: Ignorer): boolean {
   return !ignore?.ignores(file);
 }
 
-function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
+function loadFromDiskCache(cache: IndexSnapshot): CachedVaultIndex | null {
   try {
     const loaded = MiniSearch.loadJSON(cache.index, {
       fields: ["basename"],
@@ -1206,18 +1211,18 @@ function addToIndex(
 }
 
 /**
- * Serialize a cached index to `.napkin/search-cache.json`.
+ * Convert the in-memory index to an `IndexSnapshot` and hand it to the store.
  *
  * Cold and incremental paths both call this with the same in-memory shape, so
- * the on-disk format is a single full snapshot either way — a cache written
+ * what is stored is a single full snapshot either way — a snapshot written
  * incrementally loads exactly like one built cold. Note text is never
  * written: docs carry metadata only (#85), so the snapshot stays small and a
  * process that loads it retains no content.
  *
- * Best-effort: search works without a cache, so failures are swallowed.
+ * Best-effort: search works without a store, so failures are swallowed.
  */
 function persistCache(
-  configPath: string,
+  store: IndexStore,
   state: CachedVaultIndex,
   ignoreFp: string,
 ): void {
@@ -1225,11 +1230,10 @@ function persistCache(
   const outgoingLinks: Record<string, string[]> = {};
   for (const d of docsArr) outgoingLinks[d.file] = d.outgoingLinks;
   try {
-    saveSearchCache(configPath, {
-      // Kept for format compatibility (#87): the cache always holds a
-      // whole-vault snapshot now, so this is always null. A cache file
-      // with a non-null folder is an old per-folder snapshot and is
-      // treated as a miss.
+    store.save({
+      // Kept for format compatibility (#87): the snapshot always holds the
+      // whole vault now, so this is always null. A stored snapshot with a
+      // non-null folder is an old per-folder one and is treated as a miss.
       folder: null,
       fileMtimes: Object.fromEntries(state.fileMtimes),
       index: JSON.stringify(state.basenameIndex),
@@ -1249,16 +1253,21 @@ function persistCache(
 }
 
 /**
- * Persist the cache for `cacheKey`, at most once per CACHE_WRITE_INTERVAL_MS.
+ * Persist the snapshot for `cacheKey`, at most once per CACHE_WRITE_INTERVAL_MS.
  *
  * Leading edge: the first write after the window happens right away, which is
  * what makes a one-shot CLI process persist at all. Writes inside the window
  * are coalesced into a single trailing write of the latest state, on an
  * `unref()`'d timer so a pending flush never keeps a CLI process alive (a
  * long-lived extension process flushes normally).
+ *
+ * The throttle belongs to the caller, not to the store: it exists because a
+ * `save()` rewrites the whole snapshot (O(vault) bytes), which is what
+ * `JsonStore` costs. `SqliteStore`'s per-file deltas make it unnecessary and
+ * retire it (#94).
  */
 function persistCacheThrottled(
-  configPath: string,
+  store: IndexStore,
   cacheKey: string,
   state: CachedVaultIndex,
   ignoreFp: string,
@@ -1271,7 +1280,7 @@ function persistCacheThrottled(
     // ran; drop it rather than write the same snapshot twice.
     cancelPendingWrite(cacheKey);
     lastCacheWriteAt.set(cacheKey, now);
-    persistCache(configPath, state, ignoreFp);
+    persistCache(store, state, ignoreFp);
     return;
   }
 
@@ -1280,7 +1289,7 @@ function persistCacheThrottled(
     // Inside the window with a flush already scheduled: only refresh what the
     // trailing write will serialize (the state object is mutated in place, so
     // in practice this is the same reference).
-    pending.configPath = configPath;
+    pending.store = store;
     pending.state = state;
     pending.ignoreFp = ignoreFp;
     return;
@@ -1291,11 +1300,11 @@ function persistCacheThrottled(
     pendingCacheWrites.delete(cacheKey);
     if (!entry) return;
     lastCacheWriteAt.set(cacheKey, Date.now());
-    persistCache(entry.configPath, entry.state, entry.ignoreFp);
+    persistCache(entry.store, entry.state, entry.ignoreFp);
   }, CACHE_WRITE_INTERVAL_MS - elapsed);
   // Never keep the process alive just to flush a cache.
   timer.unref();
-  pendingCacheWrites.set(cacheKey, { timer, configPath, state, ignoreFp });
+  pendingCacheWrites.set(cacheKey, { timer, store, state, ignoreFp });
 }
 
 // ── Folder scoping (query-time filter) ──────────────────────────

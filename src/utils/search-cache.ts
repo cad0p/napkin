@@ -4,43 +4,15 @@ import * as path from "node:path";
 import { listFiles } from "./files.js";
 import type { Ignorer } from "./ignore.js";
 
-const CACHE_FILE = "search-cache.json";
-
 /**
- * Cached doc metadata. Never carries note text (#85): content is read from
- * disk per query by the content scan and snippet extraction. Older caches
- * that still embed a `content` field are accepted and the field is discarded
- * on load, so a warm process never retains note text through this cache.
+ * Per-file stat signatures for the search index, and the diff that turns two
+ * of them into "what to re-read" and "what to forget".
+ *
+ * This module is deliberately store-agnostic: the persisted snapshot lives
+ * behind `IndexStore` (`JsonStore` today, a SQLite store next, #94), and both
+ * need the same change detection — an mtime+size signature per file, compared
+ * the same way, with the same "an unchanged vault touches no I/O" outcome.
  */
-export interface CachedDoc {
-  file: string;
-  basename: string;
-  mtime: number;
-  size: number;
-}
-
-export interface SearchCacheData {
-  /** Scope of this cache — null = full vault, otherwise folder path. */
-  folder: string | null;
-  /** file → {mtime,size} map, for incremental diffing. */
-  fileMtimes: Record<string, FileStatSig>;
-  /** JSON-serialized MiniSearch index. */
-  index: string;
-  /** Doc metadata only — never note text (#85). */
-  docs: CachedDoc[];
-  /** file → inbound backlink count. */
-  backlinkCounts: Record<string, number>;
-  /** file → raw wikilink targets (for incremental backlink recompute). */
-  outgoingLinks: Record<string, string[]>;
-  /**
-   * Fingerprint of the ignore-relevant state (config `ignore.*` + both
-   * ignore files' {mtime,size}). A mismatch forces a cold rebuild — an
-   * ignore change can hide/unhide files that incremental diffing would
-   * miss.
-   */
-  ignoreFingerprint: string;
-}
-
 export interface FileMtimeEntry {
   file: string;
   mtime: number;
@@ -149,100 +121,4 @@ export function diffFileMtimes(
     toRemove,
     unchanged: toAdd.length === 0 && toRemove.length === 0,
   };
-}
-
-/**
- * Load cached search index if it exists and is valid.
- * Returns null if no cache or corrupted data.
- * The caller is responsible for diffing fileMtimes to decide warm vs incremental.
- */
-export function loadSearchCache(configPath: string): SearchCacheData | null {
-  const cachePath = path.join(configPath, CACHE_FILE);
-  try {
-    const raw = fs.readFileSync(cachePath, "utf-8");
-    const data = JSON.parse(raw) as Partial<SearchCacheData>;
-    // Shape validation — reject old-format caches (with `fingerprint` instead
-    // of `fileMtimes`) and missing fields.
-    if (
-      !data.fileMtimes ||
-      typeof data.fileMtimes !== "object" ||
-      !data.index ||
-      !Array.isArray(data.docs) ||
-      !data.backlinkCounts ||
-      !data.outgoingLinks ||
-      typeof data.ignoreFingerprint !== "string"
-    ) {
-      return null;
-    }
-    // Docs carry metadata only (#85). Rebuild the entries instead of
-    // returning them as parsed so a legacy cache that still embeds
-    // `docs[].content` is accepted (no rejection, correct recall) but the
-    // note text is dropped here — it never reaches the in-memory cache.
-    const docs: CachedDoc[] = [];
-    for (const doc of data.docs) {
-      if (
-        !doc ||
-        typeof doc.file !== "string" ||
-        typeof doc.basename !== "string" ||
-        typeof doc.mtime !== "number" ||
-        typeof doc.size !== "number"
-      ) {
-        return null;
-      }
-      docs.push({
-        file: doc.file,
-        basename: doc.basename,
-        mtime: doc.mtime,
-        size: doc.size,
-      });
-    }
-    return {
-      folder: data.folder as string | null,
-      fileMtimes: data.fileMtimes,
-      index: data.index,
-      docs,
-      backlinkCounts: data.backlinkCounts,
-      outgoingLinks: data.outgoingLinks,
-      ignoreFingerprint: data.ignoreFingerprint,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Save search index cache to disk.
- *
- * Atomic: the snapshot is written to a temp file in the same directory and
- * renamed over the target, so a reader never observes a half-written cache
- * and a crash mid-write leaves the previous snapshot intact. Concurrent
- * writers are safe without locking — every write is a full snapshot that
- * `loadSearchCache` re-validates against file mtime+size, so last-writer-wins
- * is correct.
- *
- * Throws on I/O failure (after removing the temp file); callers that treat
- * persistence as best-effort swallow it.
- */
-export function saveSearchCache(
-  configPath: string,
-  data: SearchCacheData,
-): void {
-  const cachePath = path.join(configPath, CACHE_FILE);
-  // pid + random suffix: two writers (or a run that crashed mid-write) never
-  // share a temp path, so one cannot clobber the other's half-written file.
-  const tmpPath = path.join(
-    configPath,
-    `${CACHE_FILE}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
-  );
-  try {
-    fs.writeFileSync(tmpPath, JSON.stringify(data));
-    fs.renameSync(tmpPath, cachePath);
-  } catch (err) {
-    try {
-      fs.rmSync(tmpPath, { force: true });
-    } catch {
-      // Best-effort cleanup; the write error below is the one that matters.
-    }
-    throw err;
-  }
 }
