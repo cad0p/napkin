@@ -106,11 +106,39 @@ import { type Ignorer, loadIgnorer } from "./utils/ignore.js";
 import type { Heading } from "./utils/markdown.js";
 import { findVault, type VaultInfo } from "./utils/vault.js";
 
+export interface NapkinOptions {
+  /**
+   * Freshness window for `search`/`searchPaginated`, in milliseconds
+   * (#93). A long-lived consumer that searches in a loop (per-call
+   * `new Napkin(cwd)`) can set this so repeat searches on an unchanged
+   * vault skip the whole-vault stat walk — ~0.4 s per query on a 28.7k-note
+   * vault, and the walk grows with the vault. Writes made through this
+   * process are always seen (read-your-writes); writes from other processes
+   * appear after at most one window.
+   *
+   * Omitted means "use the vault config" (`search.freshnessMs`, default 0 =
+   * walk on every search). A per-call `search(q, { freshnessMs })` wins over
+   * this.
+   */
+  searchFreshnessMs?: number;
+}
+
 export class Napkin {
   readonly vault: VaultInfo;
+  private readonly searchFreshnessMs: number | undefined;
 
-  constructor(path: string) {
+  constructor(path: string, opts?: NapkinOptions) {
     this.vault = findVault(path);
+    this.searchFreshnessMs = opts?.searchFreshnessMs;
+  }
+
+  /** Per-call search options, with the instance freshness default applied. */
+  private searchOptions(opts?: SearchOptions): SearchOptions | undefined {
+    if (this.searchFreshnessMs === undefined) return opts;
+    return {
+      ...opts,
+      freshnessMs: opts?.freshnessMs ?? this.searchFreshnessMs,
+    };
   }
 
   /** Ignorer for this vault (memoized by fingerprint — cheap on repeat). */
@@ -147,7 +175,7 @@ export class Napkin {
       this.vault.contentPath,
       this.vault.configPath,
       query,
-      opts,
+      this.searchOptions(opts),
     );
   }
 
@@ -156,7 +184,7 @@ export class Napkin {
       this.vault.contentPath,
       this.vault.configPath,
       query,
-      opts,
+      this.searchOptions(opts),
     );
   }
 

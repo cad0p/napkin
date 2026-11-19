@@ -29,6 +29,30 @@ napkin config set --key search.limit --value 50
 | `search.limit` | `30` | Max results returned (total pool available across all pages) |
 | `search.contextLines` | `5` | Context lines around matches. 0 = match-only |
 | `search.resultsPerPage` | `10` | Max results returned per page. Use `--page N` to paginate. |
+| `search.freshnessMs` | `0` | Freshness window for the search index walk. `0` = validate against disk on every search; N = reuse the index for N ms (see below) |
+
+#### Search freshness
+
+Every search validates its index by listing and statting the whole vault —
+~0.4 s on a 28.7k-note vault, paid on every query. `search.freshnessMs`
+bounds how often that walk runs in one process:
+
+- **`0` (default)** — walk on every search, so a `napkin search` reflects the
+  disk at the moment it runs. The CLI always behaves this way.
+- **`N > 0`** — a search that starts less than `N` ms after this process's
+  last walk reuses the index as-is: no directory listing, no per-file stat.
+
+Writes made through napkin in the same process stay visible inside the window:
+create, append/prepend, move/rename, delete, daily notes, template inserts,
+frontmatter/property changes and task updates all record the path they wrote,
+and the next search re-stats just those paths (a few stats, not a walk).
+Writes made by a **different** process (the distill CLI, an editor, another pi
+session) are visible after at most `N` ms.
+
+The intended user is a long-lived library consumer that searches in a loop. Set
+it per instance with `new Napkin(path, { searchFreshnessMs: N })` or per call
+with `n.search(query, { freshnessMs: N })` — the per-call option wins, and both
+override this config key.
 
 ### daily
 

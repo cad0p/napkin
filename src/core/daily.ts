@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
+import { markSearchPathsDirty } from "../utils/search-freshness.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 interface DailyConfig {
@@ -69,6 +70,7 @@ export function ensureDaily(v: VaultInfo): { path: string; created: boolean } {
       }
     }
     fs.writeFileSync(fullPath, content);
+    markSearchPathsDirty(v.contentPath, dp);
     return { path: dp, created: true };
   }
 
@@ -103,6 +105,7 @@ export function appendDaily(
   const existing = fs.readFileSync(fullPath, "utf-8");
   const separator = inline ? "" : "\n";
   fs.writeFileSync(fullPath, existing + separator + content);
+  markSearchPathsDirty(v.contentPath, dp);
 
   return dp;
 }
@@ -130,6 +133,7 @@ export function prependDaily(
   } else {
     fs.writeFileSync(fullPath, content + separator + existing);
   }
+  markSearchPathsDirty(v.contentPath, dp);
 
   return dp;
 }
