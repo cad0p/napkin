@@ -5,6 +5,38 @@ import { listFiles } from "./files.js";
 import type { Ignorer } from "./ignore.js";
 
 /**
+ * A wikilink target classified the way resolution narrows it (#92).
+ *
+ * Shared by `search.ts` (in-memory link tallies) and `SqliteStore` (#94),
+ * which persists the same classification in `links`/`link_counts`: a target
+ * with a slash or a `.md` suffix resolves as a path (keeping its own
+ * spelling); anything else is a bare basename lookup.
+ */
+export interface LinkTarget {
+  /** Lowercased basename the target resolves through. */
+  key: string;
+  /** Path-style ref ("folder/note.md"), or null for a bare-name link. */
+  ref: string | null;
+}
+
+export function linkTarget(target: string): LinkTarget {
+  if (target.includes("/") || target.endsWith(".md")) {
+    const ref = target.endsWith(".md") ? target : `${target}.md`;
+    return { key: path.basename(ref, ".md").toLowerCase(), ref };
+  }
+  return { key: target.toLowerCase(), ref: null };
+}
+
+/**
+ * The `link_counts` row key for a classified target: the bare basename for
+ * bare links, `p:<ref>` for path links — so the two namespaces never collide
+ * (a path ref keeps its folder spelling).
+ */
+export function linkCountKey(link: LinkTarget): string {
+  return link.ref === null ? link.key : `p:${link.ref}`;
+}
+
+/**
  * Per-file stat signatures for the search index, and the diff that turns two
  * of them into "what to re-read" and "what to forget".
  *

@@ -334,14 +334,15 @@ describe("search", () => {
   });
 
   test("creates cache file after first search", async () => {
-    const cachePath = path.join(v.vaultPath, "search-cache.json");
-    expect(fs.existsSync(cachePath)).toBe(false);
+    // The default store is SQLite (#106): .napkin/cache/index-v1.db.
+    const dbPath = path.join(v.vaultPath, "cache", "index-v1.db");
+    expect(fs.existsSync(dbPath)).toBe(false);
 
     await captureJson(() =>
       search({ json: true, vault: v.path, query: "alpha" }),
     );
 
-    expect(fs.existsSync(cachePath)).toBe(true);
+    expect(fs.existsSync(dbPath)).toBe(true);
   });
 
   test("second search uses cache and returns same results", async () => {

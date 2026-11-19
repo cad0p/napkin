@@ -132,9 +132,11 @@ export class Napkin {
     this.searchFreshnessMs = opts?.searchFreshnessMs;
   }
 
-  /** Per-call search options, with the instance freshness default applied. */
+  /** Per-call search options, with the instance defaults applied. */
   private searchOptions(opts?: SearchOptions): SearchOptions | undefined {
-    if (this.searchFreshnessMs === undefined) return opts;
+    if (this.searchFreshnessMs === undefined) {
+      return opts;
+    }
     return {
       ...opts,
       freshnessMs: opts?.freshnessMs ?? this.searchFreshnessMs,
