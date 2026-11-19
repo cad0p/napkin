@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - *(scripts)* Search eval harness for accuracy and ranking (closes #90) ([#98](https://github.com/cad0p/napkin/pull/98))
 - *(scripts)* LLM-judge mode for the search eval harness (closes #108) ([#110](https://github.com/cad0p/napkin/pull/110))
 - *(search)* SQLite index store with per-file writes (closes #106) ([#111](https://github.com/cad0p/napkin/pull/111))
+- *(exports)* @cad0p/napkin/vault subpath and a default condition for require(esm) (closes #121) ([#122](https://github.com/cad0p/napkin/pull/122))
 
 ### 🐛 Bug Fixes
 
