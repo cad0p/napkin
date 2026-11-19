@@ -12,6 +12,8 @@ pnpm add -g @cad0p/napkin
 npm install -g @cad0p/napkin
 ```
 
+Requires Node.js 22.13 or later.
+
 Search indexes filenames with [MiniSearch](https://github.com/lucaong/minisearch)
 (BM25) and scans note contents from disk for substring matches, ranking by a
 composite of basename BM25, content term frequency, backlink count, and
