@@ -35,6 +35,7 @@ All notable changes to this project will be documented in this file.
 
 - *(search)* Update backlink counts by delta in the incremental diff (closes #92) ([#99](https://github.com/cad0p/napkin/pull/99))
 - *(search)* Skip the stat walk inside a freshness window, see own writes (closes #93) ([#101](https://github.com/cad0p/napkin/pull/101))
+- *(overview)* Cache FolderData per folder, rebuild only changed folders (closes #86) ([#107](https://github.com/cad0p/napkin/pull/107))
 
 ### ⚙️ Miscellaneous Tasks
 
