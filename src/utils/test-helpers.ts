@@ -56,7 +56,7 @@ export function createTempVault(files?: Record<string, string>): {
 /**
  * Pin the vault's search index store to JSON (#106): for tests that assert
  * on `search-cache.json` itself — its bytes, its mtime, its throttle — now
- * that the store is SQLite (`.napkin/cache/index-v1.db`). Test-only seam:
+ * that the store is SQLite (`.napkin/cache/index-v2.db`). Test-only seam:
  * there is no user-facing store selection, the pin lives in index-store
  * module state keyed by this vault's config dir.
  */
@@ -66,12 +66,12 @@ export function useJsonIndexStore(vaultPath: string): void {
 
 /**
  * Drop every on-disk search index — `search-cache.json` AND the SQLite
- * store's `cache/index-v1.db` (+ WAL/SHM sidecars) — so the next search
+ * store's `cache/index-v2.db` (+ WAL/SHM sidecars) — so the next search
  * cold-builds regardless of the configured store (#106).
  */
 export function dropSearchStoreFiles(vaultPath: string): void {
   fs.rmSync(path.join(vaultPath, "search-cache.json"), { force: true });
-  const db = path.join(vaultPath, "cache", "index-v1.db");
+  const db = path.join(vaultPath, "cache", "index-v2.db");
   for (const suffix of ["", "-wal", "-shm"]) {
     fs.rmSync(`${db}${suffix}`, { force: true });
   }

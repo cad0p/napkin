@@ -16,7 +16,7 @@ import { createTempVault } from "./test-helpers.js";
  * schema-version skew, and a mid-diff write failure.
  */
 
-const DB_REL = path.join("cache", "index-v1.db");
+const DB_REL = path.join("cache", "index-v2.db");
 
 const vaults: { cleanup: () => void }[] = [];
 const stores: SqliteStore[] = [];
@@ -87,7 +87,7 @@ function snapshot(ignoreFingerprint = "fp") {
 }
 
 describe("SqliteStore", () => {
-  test("open creates .napkin/cache/index-v1.db and a '*' .gitignore", () => {
+  test("open creates .napkin/cache/index-v2.db and a '*' .gitignore", () => {
     const v = makeVault();
     openStore(v.vaultPath);
     expect(fs.existsSync(path.join(v.vaultPath, DB_REL))).toBe(true);
@@ -104,17 +104,17 @@ describe("SqliteStore", () => {
     const loaded = openStore(v.vaultPath).load();
     expect(loaded).not.toBeNull();
     expect(loaded?.folder).toBeNull();
-    expect(loaded?.index).toBe('{"serialized":"index"}');
+    // The basename index is SQL postings now, never a serialized blob.
+    expect(loaded?.index).toBe("");
     expect(loaded?.ignoreFingerprint).toBe("fp");
     expect(loaded?.fileMtimes).toEqual(snapshot().fileMtimes);
     expect(loaded?.docs).toEqual(snapshot().docs);
     expect(loaded?.outgoingLinks).toEqual(snapshot().outgoingLinks);
-    // Just written: blob and file rows share a generation, no repair needed.
-    expect(loaded?.indexDelta).toBeUndefined();
     expect(store.linkCountsForTests()).toEqual({ one: 1 });
+    expect(store.inspectForTests().nameTerms).toBe(2);
   });
 
-  test("saveDiff applies a pure edit without touching the basename blob", () => {
+  test("saveDiff applies a pure edit without touching the basename postings", () => {
     const v = makeVault();
     const store = openStore(v.vaultPath);
     store.save(snapshot());
@@ -128,12 +128,9 @@ describe("SqliteStore", () => {
 
     const after = store.inspectForTests();
     expect(after.gen).toBe(before.gen + 1);
-    // Edit-only diff: no indexBlob, so the blob stays at its generation…
-    expect(after.blobGen).toBe(before.blobGen);
-    // …and load() reports the changed file as a repair delta.
+    // An edit never changes a basename: postings stay as they were.
+    expect(after.nameTerms).toBe(before.nameTerms);
     const loaded = store.load();
-    expect(loaded?.indexDelta?.add).toEqual(["a/one.md"]);
-    expect(loaded?.indexDelta?.remove ?? []).toEqual([]);
     expect(loaded?.fileMtimes["a/one.md"].mtime).toBe(3000);
     // The edited file's new outgoing link adjusts the tallies by delta.
     expect(store.linkCountsForTests()).toEqual({ one: 1, two: 1 });
@@ -147,33 +144,34 @@ describe("SqliteStore", () => {
     store.saveDiff({
       upsert: [],
       remove: [{ file: "b/two.md", basename: "two" }],
-      indexBlob: '{"serialized":"index-v2"}',
       ignoreFingerprint: "fp",
     });
 
     const loaded = store.load();
     expect(loaded?.docs.map((d) => d.file)).toEqual(["a/one.md"]);
-    expect(loaded?.index).toBe('{"serialized":"index-v2"}');
-    // The blob moved with the tombstone's generation: nothing left to repair.
-    expect(loaded?.indexDelta).toBeUndefined();
     // b/two.md's link to "one" is gone.
     expect(store.linkCountsForTests()).toEqual({});
+    // Its postings and the vocabulary term it alone owned are gone too.
+    const after = store.inspectForTests();
+    expect(after.nameTerms).toBe(1);
+    expect(after.nameVocab).toBe(1);
+    expect(after.tombstones).toBe(1);
   });
 
-  test("a delete without a new blob surfaces as an indexDelta removal", () => {
+  test("an add and a rename keep the name postings in step", () => {
     const v = makeVault();
     const store = openStore(v.vaultPath);
     store.save(snapshot());
-
     store.saveDiff({
-      upsert: [],
-      remove: [{ file: "b/two.md", basename: "two" }],
+      upsert: [doc("c/three.md"), doc("c/one.md")],
+      remove: [{ file: "a/one.md", basename: "one" }],
       ignoreFingerprint: "fp",
     });
-
-    const loaded = store.load();
-    expect(loaded?.indexDelta?.remove).toEqual([
-      { file: "b/two.md", basename: "two" },
+    // "one" is still owned by c/one.md; "two" by b/two.md; "three" is new.
+    expect(store.nameStats()).toEqual({ docs: 3, lenSum: 3 });
+    expect(store.vocabBetween(1, 10)).toEqual(["one", "three", "two"]);
+    expect(store.postingsWithPrefix("one").map((p) => p.path)).toEqual([
+      "c/one.md",
     ]);
   });
 
@@ -185,7 +183,6 @@ describe("SqliteStore", () => {
     expect(store.inspectForTests().fileCount).toBe(2);
     const loaded = store.load();
     expect(loaded?.docs).toEqual(snapshot().docs);
-    expect(loaded?.index).toBe(snapshot().index);
   });
 
   test("a mid-diff write failure rolls the transaction back", () => {
@@ -228,7 +225,7 @@ describe("SqliteStore", () => {
     expect(
       fs
         .readdirSync(path.join(v.vaultPath, "cache"))
-        .some((f) => f.startsWith("index-v1.db.corrupt-")),
+        .some((f) => f.startsWith("index-v2.db.corrupt-")),
     ).toBe(true);
 
     store.save(snapshot());

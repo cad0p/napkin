@@ -166,7 +166,7 @@ export function dropSearchCache(napkin: Napkin): boolean {
     dropped = true;
   }
   // The SQLite store (#106): the DB plus its WAL/SHM sidecars.
-  const dbFile = path.join(napkin.vault.configPath, "cache", "index-v1.db");
+  const dbFile = path.join(napkin.vault.configPath, "cache", "index-v2.db");
   for (const suffix of ["", "-wal", "-shm"]) {
     const file = `${dbFile}${suffix}`;
     if (fs.existsSync(file)) {

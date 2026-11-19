@@ -1,5 +1,6 @@
 import { JsonStore } from "./json-store.js";
-import type { FileStatSig } from "./search-cache.js";
+import type { NameSource } from "./name-search.js";
+import type { FileDiff, FileMtimeEntry, FileStatSig } from "./search-cache.js";
 import { SqliteStore } from "./sqlite-store.js";
 
 /**
@@ -82,6 +83,39 @@ export function isIncrementalIndexStore(
 }
 
 /**
+ * A store search queries in place (#109) instead of loading a snapshot.
+ *
+ * Every method reads on demand and returns plain values; the store keeps
+ * nothing proportional to the vault between calls. Search calls `release()`
+ * when it is done, so even the connection is not held between searches.
+ * `searchVault` treats any throw from these methods as "this store failed
+ * for this search" and answers from the in-memory path instead.
+ */
+export interface QueryableIndexStore extends IncrementalIndexStore, NameSource {
+  /** True when the store holds an index built under this ignore state. */
+  isReady(ignoreFingerprint: string): boolean;
+  /** Replace the whole index (cold build), in one transaction. */
+  replaceAll(docs: IndexDiffDoc[], ignoreFingerprint: string): void;
+  hasFile(file: string): boolean;
+  /** Diff a stat walk against the stored signatures, streaming the rows. */
+  diffAgainst(current: FileMtimeEntry[]): FileDiff;
+  /** Stream indexed paths in order, optionally inside a folder scope. */
+  scanPaths(folderScope: string | null): IterableIterator<string>;
+  /** Recency and resolved backlink count per path. */
+  hitInfo(files: string[]): Map<string, { mtime: number; links: number }>;
+  /** Close the connection (reopened lazily by the next call). */
+  release(): void;
+  /** Park an unusable database aside so the next open rebuilds it. */
+  discard(): void;
+}
+
+export function isQueryableIndexStore(
+  store: IndexStore,
+): store is QueryableIndexStore {
+  return typeof (store as QueryableIndexStore).hitInfo === "function";
+}
+
+/**
  * One indexed note. Metadata only — never note text (#85): the content scan
  * reads notes from disk per query, so a warm process retains none.
  */
@@ -110,13 +144,6 @@ export interface IndexDiff {
   upsert: IndexDiffDoc[];
   /** Removed files (path + basename, for tombstones and index repair). */
   remove: { file: string; basename: string }[];
-  /**
-   * Serialized basename MiniSearch index — present only when the basename
-   * SET changed (a file added or removed). Pure edits skip it: the blob is
-   * the largest single write, and a loading process repairs it from the
-   * per-file generation delta (`IndexSnapshot.indexDelta`) instead.
-   */
-  indexBlob?: string;
   /** Ignore fingerprint the diff was applied under. */
   ignoreFingerprint: string;
 }
@@ -159,20 +186,6 @@ export interface IndexSnapshot {
    * can hide/unhide files that incremental diffing would miss.
    */
   ignoreFingerprint: string;
-  /**
-   * Docs whose stored state is newer than the basename `index` blob
-   * (`SqliteStore` writes the blob only when the basename set changes, so
-   * pure edits leave it a generation or more behind). The loader repairs the
-   * loaded MiniSearch index by removing `remove` entries and re-adding the
-   * `add` files' docs (both already present in `docs`), which is exactly
-   * what the incremental in-memory path does — parity is preserved.
-   */
-  indexDelta?: {
-    /** File paths present in `docs` to (re)add to the loaded index. */
-    add: string[];
-    /** Files deleted since the blob was written. */
-    remove: { file: string; basename: string }[];
-  };
 }
 
 /**
@@ -188,7 +201,10 @@ export interface IndexSnapshot {
  * statements) on every search would cost a few ms each time.
  */
 export function createIndexStore(configPath: string): IndexStore {
-  const kind = forcedJsonConfigs.has(configPath) ? "json" : "sqlite";
+  const kind =
+    forcedJsonConfigs.has(configPath) || failures.get(configPath) === PIN_AFTER
+      ? "json"
+      : "sqlite";
   const key = `${configPath}${kind}`;
   const cached = stores.get(key);
   if (cached) return cached;
@@ -201,6 +217,42 @@ export function createIndexStore(configPath: string): IndexStore {
 }
 
 const stores = new Map<string, IndexStore>();
+
+/** Query-path failures per config dir; at PIN_AFTER the process stops trying SQLite. */
+const failures = new Map<string, number>();
+const PIN_AFTER = 3;
+
+/** Messages that mean the database FILE is unusable, not just busy. */
+const CORRUPTION =
+  /malformed|not a database|corrupt|disk image|file is encrypted/i;
+
+/**
+ * A query against the store threw (locked, corrupt, I/O). The caller answers
+ * that search from the in-memory path; here the store is cleaned up for the
+ * next one: a corrupt file is parked aside and the cached handle dropped, so
+ * the next open rebuilds. After `PIN_AFTER` failures this process pins
+ * `JsonStore` for the vault.
+ */
+export function reportIndexStoreFailure(
+  configPath: string,
+  store: IndexStore,
+  error: unknown,
+): void {
+  failures.set(configPath, (failures.get(configPath) ?? 0) + 1);
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    if (isQueryableIndexStore(store)) {
+      if (CORRUPTION.test(message)) {
+        store.discard();
+        stores.delete(`${configPath}sqlite`);
+      } else {
+        store.release();
+      }
+    }
+  } catch {
+    // Cleanup is best-effort; the search already has its answer.
+  }
+}
 
 /**
  * Test-only seam: config dirs pinned to `JsonStore` (see
@@ -224,4 +276,5 @@ export function forceJsonIndexStoreForTests(configPath: string): void {
  */
 export function resetIndexStoresForTests(): void {
   stores.clear();
+  failures.clear();
 }

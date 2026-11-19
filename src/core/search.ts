@@ -6,14 +6,17 @@ import { listFiles, SKIP_DIRS } from "../utils/files.js";
 import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import {
   createIndexStore,
-  type IndexDiff,
   type IndexDiffDoc,
   type IndexSnapshot,
   type IndexStore,
-  isIncrementalIndexStore,
+  isQueryableIndexStore,
+  type QueryableIndexStore,
+  reportIndexStoreFailure,
   resetIndexStoresForTests,
 } from "../utils/index-store.js";
+import { JsonStore } from "../utils/json-store.js";
 import { extractLinks } from "../utils/markdown.js";
+import { searchNames } from "../utils/name-search.js";
 import {
   diffFileMtimes,
   type FileDiff,
@@ -219,7 +222,36 @@ export function getCachedDocForTests(
       return cache.docs.get(file);
     }
   }
+  // SQLite-backed (#109): nothing is cached in memory, the signature lives
+  // in the store. Test vaults use the content path as their config dir.
+  const store = createIndexStore(contentPath);
+  if (isQueryableIndexStore(store) && "fileForTests" in store) {
+    const row = (store as unknown as SqliteStoreTestView).fileForTests(file);
+    store.release();
+    if (row) {
+      return {
+        ...row,
+        basename: path.basename(file, ".md"),
+        outgoingLinks: [],
+      };
+    }
+  }
   return undefined;
+}
+
+interface SqliteStoreTestView {
+  phantomRefCountsForTests?(): Map<string, number>;
+  fileForTests(
+    file: string,
+  ): { file: string; mtime: number; size: number } | undefined;
+}
+
+/** Test-only: whether the in-memory cache holds an index for the vault. */
+export function hasMemoryIndexForTests(contentPath: string): boolean {
+  for (const cacheKey of memoryCache.keys()) {
+    if (cacheKey.startsWith(`${contentPath}\0`)) return true;
+  }
+  return false;
 }
 
 /**
@@ -237,12 +269,22 @@ export function getBasenameScoresForTests(
 ): Map<string, number> {
   const config = loadConfig(configPath);
   const { ignorer, fingerprint } = loadIgnorer(contentPath, configPath);
+  const freshnessMs = resolveFreshnessMs(config.search.freshnessMs, undefined);
+  const store = createIndexStore(configPath);
+  if (isQueryableIndexStore(store)) {
+    try {
+      refreshStore(store, contentPath, ignorer, fingerprint, freshnessMs);
+      return searchNames(store, query);
+    } finally {
+      store.release();
+    }
+  }
   const { basenameIndex } = resolveVaultIndex(
     contentPath,
     configPath,
     ignorer,
     fingerprint,
-    resolveFreshnessMs(config.search.freshnessMs, undefined),
+    freshnessMs,
   );
   const scores = new Map<string, number>();
   for (const result of basenameIndex.search(query)) {
@@ -263,7 +305,24 @@ export function getCachedBacklinkCountsForTests(
       return new Map(cache.backlinkCounts);
     }
   }
-  return undefined;
+  // SQLite-backed (#109): resolve every file's count from link_counts.
+  const store = createIndexStore(contentPath);
+  if (!isQueryableIndexStore(store)) return undefined;
+  try {
+    const files = [...store.scanPaths(null)];
+    const counts = new Map<string, number>();
+    for (const [file, info] of store.hitInfo(files)) {
+      if (info.links !== 0) counts.set(file, info.links);
+    }
+    const phantoms = (store as unknown as SqliteStoreTestView)
+      .phantomRefCountsForTests;
+    if (phantoms) {
+      for (const [ref, n] of phantoms.call(store)) counts.set(ref, n);
+    }
+    return counts;
+  } finally {
+    store.release();
+  }
 }
 
 // ── Index building (cold path) ────────────────────────────────────
@@ -612,14 +671,14 @@ function relativeTime(mtimeMs: number): string {
  */
 function contentScan(
   contentPath: string,
-  docs: Map<string, DocRecord>,
+  files: Iterable<string>,
   terms: string[],
 ): Map<string, number> {
   const tf = new Map<string, number>();
   if (terms.length === 0) return tf;
   const lowerTerms = terms.map((t) => t.toLowerCase());
-  for (const doc of docs.values()) {
-    const content = readNoteContent(contentPath, doc.file);
+  for (const file of files) {
+    const content = readNoteContent(contentPath, file);
     if (content === null) continue;
     const lo = content.toLowerCase();
     let total = 0;
@@ -641,7 +700,7 @@ function contentScan(
       }
       total += count;
     }
-    if (total > 0) tf.set(doc.file, total);
+    if (total > 0) tf.set(file, total);
   }
   return tf;
 }
@@ -672,13 +731,14 @@ function resolveVaultIndex(
   ignorer: Ignorer,
   ignoreFp: string,
   freshnessMs: number,
+  storeOverride?: IndexStore,
 ): ResolvedIndex {
   // One index per vault (#87): folder scoping is a query-time filter in
   // searchVault, so the memory key and the store never depend on a folder.
   const memKey = memoryCacheKey(contentPath, ignoreFp);
   // The store choice lives behind this call (#94): search.ts never learns
   // whether the snapshot comes from a JSON file or a SQLite database.
-  const store = createIndexStore(configPath);
+  const store = storeOverride ?? createIndexStore(configPath);
 
   const cached = memoryCache.get(memKey);
   if (cached) {
@@ -790,7 +850,12 @@ function applyIncrementalOrCached(
       memKey,
       cache,
       ignoreFp,
-      diffFromDirtyPaths(contentPath, cache, pending.dirty, ignorer),
+      diffFromDirtyPaths(
+        contentPath,
+        (file) => cache.fileMtimes.has(file),
+        pending.dirty,
+        ignorer,
+      ),
     );
     return updated ?? cachedView(cache);
   }
@@ -814,10 +879,6 @@ function applyIncrementalOrCached(
 /**
  * Apply one diff to the in-memory index and persist it to the store.
  * Returns null when the diff is empty.
- *
- * `alreadyIndexed` records which of the diff's added paths were indexed
- * before the apply — the difference between an edit (basename set unchanged)
- * and a genuine add (basename blob rewrite due).
  */
 function applyDiffAndPersist(
   contentPath: string,
@@ -827,13 +888,9 @@ function applyDiffAndPersist(
   ignoreFp: string,
   diff: FileDiff,
 ): ResolvedIndex | null {
-  const alreadyIndexed = new Set<string>();
-  for (const entry of diff.toAdd) {
-    if (cache.docs.has(entry.file)) alreadyIndexed.add(entry.file);
-  }
   const updated = applyDiff(contentPath, cache, diff);
   if (!updated) return null;
-  persistAppliedDiff(store, memKey, cache, ignoreFp, diff, alreadyIndexed);
+  persistAppliedDiff(store, memKey, cache, ignoreFp);
   return updated;
 }
 
@@ -849,7 +906,7 @@ function applyDiffAndPersist(
  */
 function diffFromDirtyPaths(
   contentPath: string,
-  cache: CachedVaultIndex,
+  isIndexed: (file: string) => boolean,
   dirty: string[],
   ignore?: Ignorer,
 ): FileDiff {
@@ -859,7 +916,7 @@ function diffFromDirtyPaths(
     if (!isEnumeratedPath(file, ignore)) continue;
     const sig = statFile(contentPath, file);
     if (sig === null) {
-      if (cache.fileMtimes.has(file)) toRemove.push(file);
+      if (isIndexed(file)) toRemove.push(file);
     } else {
       toAdd.push({ file, ...sig });
     }
@@ -931,26 +988,6 @@ function loadFromDiskCache(cache: IndexSnapshot): CachedVaultIndex | null {
     }
     const fileMtimes = new Map(Object.entries(cache.fileMtimes));
     const basenameMap = buildBasenameMap(docs.values());
-    // Repair a blob that lags the file rows (#106): SqliteStore rewrites the
-    // basename blob only when the basename set changes, so pure edits leave
-    // docs newer than the blob. Removing tombstoned files and re-adding the
-    // changed ones applies the same MiniSearch updates the incremental path
-    // did, so scores stay exactly cold-build parity (#100).
-    if (cache.indexDelta) {
-      for (const removed of cache.indexDelta.remove) {
-        if (loaded.has(removed.file)) {
-          loaded.remove({ file: removed.file, basename: removed.basename });
-        }
-      }
-      for (const file of cache.indexDelta.add) {
-        const doc = docs.get(file);
-        if (!doc) continue;
-        if (loaded.has(file)) {
-          loaded.remove({ file: doc.file, basename: doc.basename });
-        }
-        loaded.add(doc);
-      }
-    }
     // A snapshot written by a version that discarded docs carries their stale
     // posting entries ("dirt"), and those inflate the BM25 document frequency
     // of the live docs they precede until a vacuum — the drift #100 fixes on
@@ -1292,9 +1329,9 @@ function persistCache(
 }
 
 /**
- * Persist a cold-built index. An incremental store takes the bulk snapshot
- * directly (one transaction); a snapshot-only store goes through the
- * throttle — the leading edge still fires immediately.
+ * Persist a cold-built index through the throttle — the leading edge still
+ * fires immediately. (The in-memory path only runs with `JsonStore`; a
+ * SQLite store is queried in place, see `searchViaStore`.)
  */
 function persistBuiltIndex(
   store: IndexStore,
@@ -1302,77 +1339,16 @@ function persistBuiltIndex(
   state: CachedVaultIndex,
   ignoreFp: string,
 ): void {
-  if (isIncrementalIndexStore(store)) {
-    persistCache(store, state, ignoreFp);
-    return;
-  }
   persistCacheThrottled(store, cacheKey, state, ignoreFp);
 }
 
-/**
- * Turn an applied diff plus the post-apply index state into the store-level
- * `IndexDiff`. The basename blob is serialized only when the basename SET
- * changed — a removed file, or an added path that was not already indexed
- * (a rename arrives as remove+add). Pure edits leave the blob alone; the
- * loading side repairs it from the per-file generation delta instead.
- */
-function toIndexDiff(
-  cache: CachedVaultIndex,
-  diff: FileDiff,
-  alreadyIndexed: ReadonlySet<string>,
-  ignoreFp: string,
-): IndexDiff {
-  const upsert: IndexDiffDoc[] = [];
-  for (const entry of diff.toAdd) {
-    const doc = cache.docs.get(entry.file);
-    if (!doc) continue;
-    upsert.push({
-      file: doc.file,
-      basename: doc.basename,
-      mtime: doc.mtime,
-      size: doc.size,
-      outgoingLinks: doc.outgoingLinks,
-    });
-  }
-  const basenameSetChanged =
-    diff.toRemove.length > 0 ||
-    diff.toAdd.some((entry) => !alreadyIndexed.has(entry.file));
-  return {
-    upsert,
-    remove: diff.toRemove.map((file) => ({
-      file,
-      basename: path.basename(file, ".md"),
-    })),
-    indexBlob: basenameSetChanged
-      ? JSON.stringify(cache.basenameIndex)
-      : undefined,
-    ignoreFingerprint: ignoreFp,
-  };
-}
-
-/**
- * Persist an applied diff. An incremental store writes just the changed rows
- * in one transaction — O(changed), no throttle needed. A snapshot-only store
- * rewrites the whole snapshot through the throttle, as before.
- */
+/** Persist an applied diff: a snapshot-only store rewrites through the throttle. */
 function persistAppliedDiff(
   store: IndexStore,
   cacheKey: string,
   state: CachedVaultIndex,
   ignoreFp: string,
-  diff: FileDiff,
-  alreadyIndexed: ReadonlySet<string>,
 ): void {
-  if (isIncrementalIndexStore(store)) {
-    try {
-      store.saveDiff(toIndexDiff(state, diff, alreadyIndexed, ignoreFp));
-    } catch {
-      // Best-effort persistence — the in-memory index is correct either way,
-      // and a rolled-back diff is re-persisted by the next one (the DB stays
-      // consistent at its last committed generation).
-    }
-    return;
-  }
   persistCacheThrottled(store, cacheKey, state, ignoreFp);
 }
 
@@ -1489,13 +1465,9 @@ export function searchVault(
     contentPath,
     configPath,
   );
-
-  const { basenameIndex, docs, backlinkCounts } = resolveVaultIndex(
-    contentPath,
-    configPath,
-    ignorer,
-    ignoreFp,
-    resolveFreshnessMs(config.search.freshnessMs, opts?.freshnessMs),
+  const freshnessMs = resolveFreshnessMs(
+    config.search.freshnessMs,
+    opts?.freshnessMs,
   );
 
   // Folder scope is a query-time filter over the whole-vault index (#87):
@@ -1503,15 +1475,49 @@ export function searchVault(
   // "foo/bar/y.md" but NOT "foobar/x.md". A folder that does not exist
   // yields no in-scope files — same empty result listFiles produced.
   const folderScope = normalizeFolderScope(contentPath, opts?.path);
+
+  const store = createIndexStore(configPath);
+  let fallback: IndexStore | undefined;
+  if (isQueryableIndexStore(store)) {
+    // #109: the SQLite store is queried per search; nothing of the index is
+    // held in this process afterwards. Any failure (locked, corrupt, I/O)
+    // answers THIS search from the in-memory path below — never a crash.
+    try {
+      return searchViaStore(
+        store,
+        contentPath,
+        config,
+        ignorer,
+        ignoreFp,
+        freshnessMs,
+        folderScope,
+        query,
+        opts,
+      );
+    } catch (error) {
+      reportIndexStoreFailure(configPath, store, error);
+      fallback = new JsonStore(configPath);
+    } finally {
+      store.release();
+    }
+  }
+
+  const { basenameIndex, docs, backlinkCounts } = resolveVaultIndex(
+    contentPath,
+    configPath,
+    ignorer,
+    ignoreFp,
+    freshnessMs,
+    fallback,
+  );
+
+  // Basename BM25 search (fast), restricted to in-scope files.
   const inScope =
     folderScope === null
       ? null
       : (file: string) => file.startsWith(`${folderScope}/`);
-
-  // Basename BM25 search (fast), restricted to in-scope files.
-  const basenameResults = basenameIndex.search(query);
   const basenameScores = new Map<string, number>();
-  for (const r of basenameResults) {
+  for (const r of basenameIndex.search(query)) {
     const id = r.id as string;
     if (inScope && !inScope(id)) continue;
     basenameScores.set(id, r.score);
@@ -1519,22 +1525,72 @@ export function searchVault(
 
   // Content substring scan (one note at a time, read from disk), restricted
   // to in-scope docs — out-of-folder docs are never candidates.
-  const terms = query
+  const scanFiles: string[] = [];
+  for (const file of docs.keys()) {
+    if (!inScope || inScope(file)) scanFiles.push(file);
+  }
+  const contentTf = contentScan(contentPath, scanFiles, queryTerms(query));
+
+  const results = rankAndRender(
+    contentPath,
+    config,
+    query,
+    opts,
+    basenameScores,
+    contentTf,
+    (files) => {
+      const info = new Map<string, HitInfo>();
+      for (const file of files) {
+        const doc = docs.get(file);
+        if (!doc) continue;
+        // Backlink counts are whole-vault by design (#87): links from outside
+        // a folder scope still count — they reflect a note's real importance.
+        info.set(file, {
+          mtime: doc.mtime,
+          links: backlinkCounts.get(file) || 0,
+        });
+      }
+      return info;
+    },
+  );
+  // A one-off fallback must not leave a whole-vault index in the heap.
+  if (fallback) memoryCache.delete(memoryCacheKey(contentPath, ignoreFp));
+  return results;
+}
+
+/** Whitespace-split, lowercased content-scan terms. */
+function queryTerms(query: string): string[] {
+  return query
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 0);
-  let scanDocs = docs;
-  if (inScope) {
-    scanDocs = new Map<string, DocRecord>();
-    for (const [file, doc] of docs) {
-      if (inScope(file)) scanDocs.set(file, doc);
-    }
-  }
-  const contentTf = contentScan(contentPath, scanDocs, terms);
+}
 
+interface HitInfo {
+  mtime: number;
+  /** Resolved inbound link count. */
+  links: number;
+}
+
+/**
+ * Merge basename + content hits, score, rank and render the top results.
+ *
+ * Shared by the in-memory path and the store path: both hand over the same
+ * two score maps and a lookup for the per-hit facts (recency, backlinks).
+ */
+function rankAndRender(
+  contentPath: string,
+  config: ReturnType<typeof loadConfig>,
+  query: string,
+  opts: SearchOptions | undefined,
+  basenameScores: Map<string, number>,
+  contentTf: Map<string, number>,
+  infoOf: (files: string[]) => Map<string, HitInfo>,
+): SearchResult[] {
   // Merge basename + content hits.
   const allHits = new Set([...basenameScores.keys(), ...contentTf.keys()]);
   if (allHits.size === 0) return [];
+  const info = infoOf([...allHits]);
 
   const scored: Array<{
     file: string;
@@ -1543,27 +1599,28 @@ export function searchVault(
     _mtime: number;
   }> = [];
   for (const file of allHits) {
-    const doc = docs.get(file);
-    if (!doc) continue;
+    const hit = info.get(file);
+    if (!hit) continue;
     const bm25 = basenameScores.get(file) || 0;
     const tf = contentTf.get(file) || 0;
-    // Backlink counts are whole-vault by design (#87): links from outside
-    // a folder scope still count — they reflect a note's real importance.
-    const links = backlinkCounts.get(file) || 0;
     scored.push({
       file,
       composite:
         bm25 * BASENAME_BOOST +
         tf * CONTENT_TF_WEIGHT +
-        links * BACKLINK_WEIGHT,
-      links,
-      _mtime: doc.mtime,
+        hit.links * BACKLINK_WEIGHT,
+      links: hit.links,
+      _mtime: hit.mtime,
     });
   }
 
   // Normalise recency across the result set.
-  const maxMtime = Math.max(...scored.map((r) => r._mtime));
-  const minMtime = Math.min(...scored.map((r) => r._mtime));
+  let maxMtime = -Infinity;
+  let minMtime = Infinity;
+  for (const r of scored) {
+    if (r._mtime > maxMtime) maxMtime = r._mtime;
+    if (r._mtime < minMtime) minMtime = r._mtime;
+  }
   const mtimeRange = maxMtime - minMtime || 1;
   for (const s of scored) {
     s.composite += ((s._mtime - minMtime) / mtimeRange) * RECENCY_WEIGHT;
@@ -1577,7 +1634,7 @@ export function searchVault(
 
   // Read content + extract snippets ONLY for the top-N results. Note text is
   // never cached, so this is always a disk read (top-N files, not the vault).
-  const withSnippets: SearchResult[] = topN.map((s) => {
+  return topN.map((s) => {
     const content = readNoteContent(contentPath, s.file) ?? "";
     return {
       file: s.file,
@@ -1595,8 +1652,144 @@ export function searchVault(
             ),
     };
   });
+}
 
-  return withSnippets;
+// ── Store-backed search (#109) ───────────────────────────────────
+
+/**
+ * One search against a queryable store: bring the store up to date (cold
+ * build, stat-walk diff, or dirty paths inside the freshness window), then
+ * answer the query with SQL reads. No whole-vault structure outlives the
+ * call.
+ */
+function searchViaStore(
+  store: QueryableIndexStore,
+  contentPath: string,
+  config: ReturnType<typeof loadConfig>,
+  ignorer: Ignorer,
+  ignoreFp: string,
+  freshnessMs: number,
+  folderScope: string | null,
+  query: string,
+  opts: SearchOptions | undefined,
+): SearchResult[] {
+  refreshStore(store, contentPath, ignorer, ignoreFp, freshnessMs);
+
+  // Basename BM25 over the SQL postings. Statistics (document count, mean
+  // field length, document frequency) stay whole-vault; only the hits are
+  // restricted to the folder scope, exactly like the in-memory path.
+  const basenameScores = new Map<string, number>();
+  for (const [file, score] of searchNames(store, query)) {
+    if (folderScope !== null && !file.startsWith(`${folderScope}/`)) {
+      continue;
+    }
+    basenameScores.set(file, score);
+  }
+
+  const contentTf = contentScan(
+    contentPath,
+    store.scanPaths(folderScope),
+    queryTerms(query),
+  );
+
+  return rankAndRender(
+    contentPath,
+    config,
+    query,
+    opts,
+    basenameScores,
+    contentTf,
+    (files) => store.hitInfo(files),
+  );
+}
+
+/** Read one note's index record; null when it vanished or is unreadable. */
+function tryReadDoc(vaultPath: string, file: string): IndexDiffDoc | null {
+  try {
+    return readDoc(vaultPath, file);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make the store reflect the vault (#93 semantics, store-resident state):
+ *
+ *  - not built under this ignore state: cold build (read every note once,
+ *    one transaction);
+ *  - inside the freshness window: only the paths this process wrote are
+ *    re-stat'd and applied;
+ *  - otherwise: stat walk, streamed comparison against the stored
+ *    signatures, apply the diff.
+ */
+function refreshStore(
+  store: QueryableIndexStore,
+  contentPath: string,
+  ignorer: Ignorer,
+  ignoreFp: string,
+  freshnessMs: number,
+): void {
+  const memKey = memoryCacheKey(contentPath, ignoreFp);
+  const pending = takeSearchFreshness(contentPath);
+
+  if (!store.isReady(ignoreFp)) {
+    const docs: IndexDiffDoc[] = [];
+    for (const file of listFiles(contentPath, { ext: "md", ignore: ignorer })) {
+      const doc = tryReadDoc(contentPath, file);
+      if (doc) docs.push(doc);
+    }
+    store.replaceAll(docs, ignoreFp);
+    recordSearchWalk(contentPath, memKey);
+    return;
+  }
+
+  if (
+    !pending.forceWalk &&
+    isFreshnessWindowOpen(contentPath, memKey, freshnessMs)
+  ) {
+    if (pending.dirty.length === 0) return;
+    applyStoreDiff(
+      store,
+      contentPath,
+      ignoreFp,
+      diffFromDirtyPaths(
+        contentPath,
+        (file) => store.hasFile(file),
+        pending.dirty,
+        ignorer,
+      ),
+    );
+    return;
+  }
+
+  const current = statAllFiles(contentPath, undefined, ignorer);
+  applyStoreDiff(store, contentPath, ignoreFp, store.diffAgainst(current));
+  // Recorded after the apply, so the window opens on a completed walk.
+  recordSearchWalk(contentPath, memKey);
+}
+
+function applyStoreDiff(
+  store: QueryableIndexStore,
+  contentPath: string,
+  ignoreFp: string,
+  diff: FileDiff,
+): void {
+  if (diff.unchanged) return;
+  const upsert: IndexDiffDoc[] = [];
+  const vanished: string[] = [];
+  for (const entry of diff.toAdd) {
+    const doc = tryReadDoc(contentPath, entry.file);
+    if (doc) upsert.push(doc);
+    else if (store.hasFile(entry.file)) vanished.push(entry.file);
+  }
+  store.saveDiff({
+    upsert,
+    remove: [...diff.toRemove, ...vanished].map((file) => ({
+      file,
+      basename: path.basename(file, ".md"),
+    })),
+    ignoreFingerprint: ignoreFp,
+  });
 }
 
 export function searchVaultPaginated(
