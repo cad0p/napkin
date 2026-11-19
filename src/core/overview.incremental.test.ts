@@ -1,7 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, test } from "vitest";
-import { createTempVault } from "../utils/test-helpers.js";
+import {
+  createTempVault,
+  dropOverviewStoreFiles,
+  useJsonOverviewStore,
+} from "../utils/test-helpers.js";
 import { getOverview } from "./overview.js";
 
 /**
@@ -13,6 +17,12 @@ import { getOverview } from "./overview.js";
  * then clears both cache files and recomputes cold on the mutated vault. The
  * incremental result must deep-equal the cold one — for edits, adds, removes,
  * folder deletes/adds, option changes, and ignore-rule changes.
+ *
+ * #118 moved the default per-folder store to SQLite
+ * (.napkin/cache/overview-v2.db). Tests that assert on the JSON cache FILE
+ * (overview-folders-cache.json — its bytes, its mtime, its compaction) pin the
+ * vault to the JSON fallback via useJsonOverviewStore; behavioral tests run
+ * the default store. overview-store.test.ts covers the SQLite side directly.
  *
  * Notes are well-formed markdown on purpose: gray-matter memoizes by content
  * string (see overview.equivalence.test.ts), so re-parsing identical content
@@ -56,11 +66,9 @@ function cacheFiles(vaultPath: string): { result: string; folders: string } {
   };
 }
 
-/** Cold recomputation of the current vault state: both caches removed first. */
+/** Cold recomputation of the current vault state: all caches removed first. */
 function cold(vaultPath: string, opts?: Parameters<typeof getOverview>[2]) {
-  const files = cacheFiles(vaultPath);
-  fs.rmSync(files.result, { force: true });
-  fs.rmSync(files.folders, { force: true });
+  dropOverviewStoreFiles(vaultPath);
   return getOverview(vaultPath, vaultPath, opts);
 }
 
@@ -170,6 +178,8 @@ describe("per-folder overview cache", () => {
     "one folder changed ($name): incremental ≡ cold",
     ({ apply, rebuilt }) => {
       const vault = createTempVault(FIXTURE);
+      // White-box assertions read the JSON cache file — pin the fallback.
+      useJsonOverviewStore(vault.vaultPath);
       try {
         const before = getOverview(vault.vaultPath, vault.vaultPath);
         expect(before.overview.length).toBeGreaterThan(0);
@@ -255,6 +265,8 @@ describe("per-folder overview cache", () => {
 
   test("same mtime but a different size is visible (size is part of the fingerprint)", () => {
     const vault = createTempVault(FIXTURE);
+    // White-box: reads the rebuilt folder's terms from the JSON cache file.
+    useJsonOverviewStore(vault.vaultPath);
     const notePath = path.join(vault.vaultPath, "alpha/kubernetes.md");
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
@@ -290,6 +302,8 @@ describe("per-folder overview cache", () => {
 
   test("option change reuses every folder entry and does not rewrite the folder cache", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file's bytes and mtime — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
@@ -319,6 +333,8 @@ describe("per-folder overview cache", () => {
 
   test("warm result hit does not touch the per-folder cache", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file's mtime — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
@@ -337,6 +353,8 @@ describe("per-folder overview cache", () => {
 
   test("corrupt folder cache is a miss, never an error", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
@@ -361,6 +379,8 @@ describe("per-folder overview cache", () => {
 
   test("old cache version is a miss", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
@@ -386,6 +406,8 @@ describe("per-folder overview cache", () => {
 
   test("an entry with an out-of-range term index rebuilds only that folder", () => {
     const vault = createTempVault(FIXTURE);
+    // Asserts on the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
@@ -451,6 +473,8 @@ describe("per-folder overview cache", () => {
         "# Ephemeral\nquarantine placeholder temporary scaffolding",
     };
     const vault = createTempVault(fixture);
+    // Asserts dictionary compaction in the JSON cache file — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     try {
       getOverview(vault.vaultPath, vault.vaultPath);
       const before = readFoldersCache(vault.vaultPath);
@@ -475,6 +499,8 @@ describe("per-folder overview cache", () => {
         "# Buried\ntelescope collimation reflector focal optics",
     };
     const vault = createTempVault(fixture);
+    // Asserts on the JSON cache file's retained entries — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     try {
       // maxDepth 3 builds deep/one/two (depth 3).
       const deep = getOverview(vault.vaultPath, vault.vaultPath, {
@@ -526,6 +552,152 @@ describe("per-folder overview cache", () => {
 });
 
 /**
+ * Sibling collapse ON at depth 3 (#118): the SQLite per-note store must
+ * reproduce the collapse exactly — the merged parent's keywords come from
+ * merged term data (not stored candidates), its df contribution is the
+ * union of the absorbed children's, and a note change inside a collapsed
+ * child re-aggregates only that folder before the merge is recomputed.
+ */
+describe("sibling collapse at depth 3", () => {
+  // Two depth-3 sibling groups: "area/x/tenant-*" under a parent that has a
+  // direct note of its own (the merge keeps the parent's own FolderData),
+  // and "area/y/tenant-*" under a parent with no direct files (the merged
+  // row is created where no folder row exists). Six homogeneous siblings
+  // each: identical boilerplate, so mean pairwise body cosine collapses.
+  const DEEP_FIXTURE: Record<string, string> = {
+    ...FIXTURE,
+    "area/x/index.md":
+      "# Area X\nproject umbrella charter governance milestones",
+  };
+  const SHARED = [
+    "Lease agreement between landlord and tenant with signature page.",
+    "Rent schedule and lease term apply as stated in the appendix.",
+    "Bank guarantee and insurance certificate required before occupancy.",
+  ];
+  for (const parent of ["area/x", "area/y"]) {
+    for (let i = 0; i < 6; i++) {
+      DEEP_FIXTURE[`${parent}/tenant-${i}/contract.md`] =
+        `# Converted document ${i}\n${SHARED.filter((_, j) => j !== i % 3).join("\n")}\nSuite ${100 + i}.`;
+    }
+  }
+  // A depth-3 sibling group that must NOT collapse: heterogeneous bodies.
+  const TOPICS = [
+    "Kubernetes ingress routing and pod autoscaling.",
+    "Payroll tax withholding for hourly contractors.",
+    "Sourdough fermentation schedules and hydration.",
+    "Telescope collimation for reflector optics.",
+    "Beehive winterization and varroa treatment.",
+    "Marathon splits and lactate threshold pacing.",
+  ];
+  TOPICS.forEach((body, i) => {
+    DEEP_FIXTURE[`area/z/topic-${i}/note.md`] = `# Topic ${i}\n${body}`;
+  });
+
+  const OPTS = { depth: 3, collapse: true, collapseDepth: 2 };
+
+  test("collapse fires on stored data and the merged rows match cold", () => {
+    const vault = createTempVault(DEEP_FIXTURE);
+    try {
+      const result = getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      const x = result.overview.find((f) => f.path === "area/x");
+      const y = result.overview.find((f) => f.path === "area/y");
+      expect(x?.collapsedFolders).toBe(6);
+      expect(y?.collapsedFolders).toBe(6);
+      // Children are gone; the heterogeneous group survives.
+      expect(result.overview.some((f) => f.path === "area/x/tenant-0")).toBe(
+        false,
+      );
+      expect(
+        result.overview.filter((f) => f.path.startsWith("area/z/topic-")),
+      ).toHaveLength(6);
+      expect(result).toEqual(cold(vault.vaultPath, OPTS));
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("a note edit inside a collapsed child re-aggregates and re-merges", () => {
+    const vault = createTempVault(DEEP_FIXTURE);
+    try {
+      getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      // Diverge one child enough to flip the similarity below the gate:
+      // the group then renders as six rows instead of one merged row.
+      writeNote(
+        vault.vaultPath,
+        "area/x/tenant-2/contract.md",
+        "# Telescope\ntelescope collimation reflector focal optics lens mirror",
+      );
+      const second = getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      expect(second).toEqual(cold(vault.vaultPath, OPTS));
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("a note edit in the merge-target parent re-merges stored children", () => {
+    const vault = createTempVault(DEEP_FIXTURE);
+    try {
+      getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      writeNote(
+        vault.vaultPath,
+        "area/x/index.md",
+        "# Area X\ncharter governance milestones roadmap budget allocation",
+      );
+      const second = getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      expect(second).toEqual(cold(vault.vaultPath, OPTS));
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("a new sibling joins the collapse group", () => {
+    const vault = createTempVault(DEEP_FIXTURE);
+    try {
+      getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      writeNote(
+        vault.vaultPath,
+        "area/y/tenant-6/contract.md",
+        `# Converted document 6\n${SHARED.join("\n")}\nSuite 106.`,
+      );
+      const second = getOverview(vault.vaultPath, vault.vaultPath, OPTS);
+      expect(
+        second.overview.find((f) => f.path === "area/y")?.collapsedFolders,
+      ).toBe(7);
+      expect(second).toEqual(cold(vault.vaultPath, OPTS));
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("SQLite and JSON stores agree on collapsed output", () => {
+    const vSql = createTempVault(DEEP_FIXTURE);
+    const vJson = createTempVault(DEEP_FIXTURE);
+    useJsonOverviewStore(vJson.vaultPath);
+    try {
+      const a = getOverview(vSql.vaultPath, vSql.vaultPath, OPTS);
+      const b = getOverview(vJson.vaultPath, vJson.vaultPath, OPTS);
+      expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+      // Same agreement after a mutation inside a collapsed child.
+      for (const v of [vSql, vJson]) {
+        writeNote(
+          v.vaultPath,
+          "area/y/tenant-1/contract.md",
+          `# Converted document 1\n${SHARED.join("\n")}\nSuite 777.`,
+        );
+      }
+      expect(
+        JSON.stringify(getOverview(vSql.vaultPath, vSql.vaultPath, OPTS)),
+      ).toBe(
+        JSON.stringify(getOverview(vJson.vaultPath, vJson.vaultPath, OPTS)),
+      );
+    } finally {
+      vSql.cleanup();
+      vJson.cleanup();
+    }
+  });
+});
+
+/**
  * The vault walk is bounded to the configured depth (#117): notes in
  * folders deeper than it are never listed or statted, so they cannot
  * change the whole-vault fingerprint or any per-folder signature.
@@ -539,6 +711,8 @@ describe("bounded vault walk", () => {
 
   test("a change below the configured depth does not invalidate the whole-vault cache", () => {
     const vault = createTempVault(DEEP_FIXTURE);
+    // Asserts on the JSON cache file's mtime — pin the fallback.
+    useJsonOverviewStore(vault.vaultPath);
     const files = cacheFiles(vault.vaultPath);
     const fixed = new Date("2024-06-01T12:00:00Z");
     try {
