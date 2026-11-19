@@ -413,6 +413,11 @@ pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json
 # Intended ranking change: metrics, latency, worst queries
 pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json \
   --mode ranking --report /data/eval/report.md
+
+# Quality gate for a change that is *meant* to alter results (#108)
+pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json \
+  --mode judge --judge-model "provider/fast-model" \
+  --report /data/eval/judge.md --judge-json /data/eval/judge.json
 ```
 
 - **identity** (default) is the gate for changes meant to be
@@ -434,9 +439,46 @@ pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json \
   (`--reuse-cache` keeps it) so both runs build the same index.
 - `--sample N --seed S` records a reproducible subset, for query sets whose
   full run costs more than a review cycle.
+- **judge** answers "better or worse", which identity and ranking cannot.
+  Only queries whose top-k lists (default 10) differ are judged: identical
+  lists are ties without a model call. For each one an LLM sees the query
+  and both lists as unlabelled A and B — each hit carrying the vault-relative
+  path, note title (first H1, else basename) and an excerpt read from the
+  vault at judge time, built identically for both sides — and answers JSON
+  `{"winner":"A"|"B"|"tie","reason":"..."}`. Every query is judged twice
+  with A and B swapped to cancel position bias; disagreeing verdicts count as
+  a tie, and unparseable output is retried once, then excluded as an error.
+  The candidate is the live run, or a second recording with
+  `--candidate other.json`.
+- The judge exits 1 when the pass rule fails: wins ≥ losses, the lower bound
+  of the 95% bootstrap CI (10k seeded resamples) of the net win rate (W−L)/N
+  above −0.05, and no exact-title loss (a query equal to a note's basename,
+  normalized, that was in the baseline top-k must stay in the candidate
+  top-k). With very few differing queries the bootstrap CI is necessarily
+  wide, so a tiny sample cannot clear the floor: that is intentional, the
+  gate wants enough judged pairs to be confident. The report also carries the
+  ranking metrics, the 10 worst losses
+  with both lists side by side plus the judge reasons, and calls, cache
+  hits, wall time and tokens.
+- `--judge-model` is required (there is no default model): use a fast one
+  during development and a strong one for the run that decides a merge.
+  `--judge-concurrency` (default 4) bounds concurrent calls, `--judge-cmd`
+  replaces the `pi` executable (tests use a fake), and verdicts are cached
+  under `$TMPDIR/napkin-search-eval-judge` (`--judge-cache`, `none`
+  disables), keyed by sha256 of model + prompt, so a re-run only pays for new
+  pairs.
+- The judge runs `pi -p --mode json --model <model>` with `--no-session
+  --no-extensions --no-skills --no-prompt-templates --no-context-files
+  --no-tools --no-themes` and the prompt on stdin. Loading extensions would
+  add hundreds of MB per call, so those flags matter.
+- **Privacy**: judge prompts carry note paths, titles and short excerpts, and
+  go to whatever model `--judge-model` names. Run judge mode locally on
+  private vaults only — never in CI. CI exercises it with a fake judge
+  command on the synthetic fixture vault.
 - CI runs the harness tests on a synthetic fixture vault in
   `scripts/fixtures/search-eval`; real query sets and real vaults stay
-  outside the repo.
+  outside the repo, and judge tests always inject a fake judge command — no
+  test or CI run touches the network or a real model.
 
 ## License
 

@@ -15,6 +15,12 @@ import { createTempVault } from "./test-helpers.js";
 
 const NOTE_A = "# Alpha\nkubernetes ingress routing policies cluster";
 const NOTE_A2 = "# Alpha\nsourdough fermentation hydration schedules levain";
+// Same byte length as the writes below, so the frozen-mtime case also holds
+// size constant: the per-folder fingerprint now covers path + mtime + SIZE
+// (same-tick edits can leave mtime untouched), so an invisible-rewrite test
+// must freeze both signals. Deliberate update of this pin.
+const PADDED_LENGTH = 120;
+
 const NOTE_B = "# Beta\npayroll withholding contractors ledger invoices";
 
 const FIXED_TIME = new Date("2024-06-01T12:00:00Z");
@@ -36,16 +42,20 @@ describe("overview cache", () => {
     }
   });
 
-  test("cache hit: frozen-mtime rewrite is invisible", () => {
+  test("cache hit: frozen-mtime, same-size rewrite is invisible", () => {
     const vault = createTempVault({ "notes/a.md": NOTE_A });
     const notePath = path.join(vault.vaultPath, "notes/a.md");
     try {
+      // Both writes are padded to one length: the whole-vault (fast-path)
+      // fingerprint is path + mtime, and the per-folder fingerprints add size,
+      // so "invisible" now means neither signal moved.
+      fs.writeFileSync(notePath, NOTE_A.padEnd(PADDED_LENGTH, " "));
       freezeMtime(notePath);
       const first = getOverview(vault.vaultPath, vault.vaultPath);
       expect(first.overview[0].keywords).toContain("kubernetes");
 
-      // rewrite content but keep the identical mtime → fingerprint unchanged
-      fs.writeFileSync(notePath, NOTE_A2);
+      // rewrite content but keep the identical mtime AND size → no fingerprint moves
+      fs.writeFileSync(notePath, NOTE_A2.padEnd(PADDED_LENGTH, " "));
       freezeMtime(notePath);
 
       const second = getOverview(vault.vaultPath, vault.vaultPath);
