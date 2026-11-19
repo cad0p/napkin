@@ -70,7 +70,6 @@ interface DocRecord {
   /** Vault-relative file path (used as id). */
   file: string;
   basename: string;
-  content: string;
   mtime: number;
   size: number;
   /** Outgoing wikilink targets (for backlink recompute on incremental). */
@@ -95,10 +94,11 @@ const BASENAME_INDEX_OPTIONS = {
 // benefit (and no harm) since the cache dies with the process.
 //
 // The hybrid architecture: MiniSearch indexes ONLY `basename` (fast ~84ms
-// build for 2700 files), while content matching is done via an in-memory
-// substring scan (~130ms over 26MB). This avoids the ~8s cost of indexing
-// full content into MiniSearch's inverted index. Content is kept in-memory
-// for snippet extraction (already needed for the scan).
+// build for 2700 files), while content matching is a substring scan that
+// streams each note from disk at query time. This avoids the ~8s cost of
+// indexing full content into MiniSearch's inverted index and — since #85 —
+// keeps note text out of this cache entirely: one process on a large vault
+// would otherwise retain hundreds of MB of UTF-16 note text for its life.
 interface CachedVaultIndex {
   basenameIndex: MiniSearch;
   docs: Map<string, DocRecord>;
@@ -149,6 +149,22 @@ export function resetSearchIndexForTests(): void {
   memoryCache.clear();
 }
 
+/**
+ * Test-only hook: the live in-memory record for a cached file, so tests can
+ * assert what the cache retains (no note text — #85). Not exported by the SDK.
+ */
+export function getCachedDocForTests(
+  contentPath: string,
+  file: string,
+): DocRecord | undefined {
+  for (const [cacheKey, cache] of memoryCache) {
+    if (cacheKey.startsWith(`${contentPath}\0`)) {
+      return cache.docs.get(file);
+    }
+  }
+  return undefined;
+}
+
 // ── Index building (cold path) ────────────────────────────────────
 
 interface BuildResult {
@@ -158,6 +174,28 @@ interface BuildResult {
   basenameIndex: MiniSearch;
 }
 
+/**
+ * Copy a string into a flat, self-owned V8 string.
+ *
+ * Wikilink targets are regex captures + trimmed slices: V8 keeps them as
+ * sliced/thin strings that retain their parent — the whole note text. Those
+ * targets live in the index for the process lifetime, so a single link per
+ * note would keep every note's content alive and defeat #85 (measured: 510 MB
+ * retained on a 28.7k-note vault even after DocRecord.content was removed).
+ * Re-encoding through a Buffer yields a fresh sequential string that owns its
+ * bytes. Link targets are tiny, so the copy is cheap.
+ */
+function ownString(value: string): string {
+  return Buffer.from(value, "utf-8").toString("utf-8");
+}
+
+/**
+ * Read one note's metadata for the index.
+ *
+ * The file is read once to extract outgoing wikilinks, then the text is
+ * dropped: the memory cache and the disk cache hold metadata only (#85).
+ * Content is read again, per query, by `contentScan` and snippet extraction.
+ */
 function readDoc(vaultPath: string, file: string): DocRecord {
   const fullPath = path.join(vaultPath, file);
   const content = fs.readFileSync(fullPath, "utf-8");
@@ -167,11 +205,25 @@ function readDoc(vaultPath: string, file: string): DocRecord {
   return {
     file,
     basename,
-    content,
     mtime: stat.mtimeMs,
     size: stat.size,
-    outgoingLinks: wikilinks,
+    // Own the targets: see ownString — sliced strings would retain content.
+    outgoingLinks: wikilinks.map(ownString),
   };
+}
+
+/**
+ * Read a note's text for the content scan or snippet extraction.
+ * Returns null when the file vanished or became unreadable after the index
+ * walk — the caller treats it as a non-match / empty snippet rather than
+ * failing the whole search.
+ */
+function readNoteContent(vaultPath: string, file: string): string | null {
+  try {
+    return fs.readFileSync(path.join(vaultPath, file), "utf-8");
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -183,9 +235,10 @@ function readDoc(vaultPath: string, file: string): DocRecord {
  * `listFiles` walk. Shallowest-path-first tie-break matches the old semantics.
  *
  * Content is NOT indexed into MiniSearch — that takes ~8s for 26MB. Instead,
- * content matching is done at query time via an in-memory substring scan
- * (~130ms). This trades ~8s cold index build for ~130ms per-query scan,
- * a massive win for cold path latency.
+ * content matching is done at query time by reading each note from disk and
+ * scanning it, then dropping the text. This trades ~8s cold index build for
+ * a per-query disk scan (the OS page cache keeps the bytes shared and
+ * reclaimable across processes), and retains no note text in memory.
  */
 function buildDocsAndBacklinks(
   vaultPath: string,
@@ -333,14 +386,21 @@ function relativeTime(mtimeMs: number): string {
 // ── Content scan (hybrid search) ──────────────────────────────────
 
 /**
- * Scan in-memory content for query terms, returning term frequency per file.
- * ~130ms for 26MB of content across 2700 files — far cheaper than building
- * a MiniSearch content index (~8s) on every cold build.
+ * Scan note text for query terms, returning term frequency per file.
+ *
+ * Each candidate note is read from disk, lowercased, counted, and dropped —
+ * one file at a time, nothing retained (#85). The OS page cache holds the
+ * raw bytes once for every process, instead of each process holding a
+ * separate UTF-16 copy. Still far cheaper than building a MiniSearch content
+ * index (~8s) on every cold build.
  *
  * Uses case-insensitive substring matching (matches napkin's prior
- * `extractSnippets` behavior and MiniSearch's `prefix: true` recall).
+ * `extractSnippets` behavior and MiniSearch's `prefix: true` recall). A
+ * file deleted or made unreadable between the index walk and this scan is
+ * skipped silently.
  */
 function contentScan(
+  contentPath: string,
   docs: Map<string, DocRecord>,
   terms: string[],
 ): Map<string, number> {
@@ -348,7 +408,9 @@ function contentScan(
   if (terms.length === 0) return tf;
   const lowerTerms = terms.map((t) => t.toLowerCase());
   for (const doc of docs.values()) {
-    const lo = doc.content.toLowerCase();
+    const content = readNoteContent(contentPath, doc.file);
+    if (content === null) continue;
+    const lo = content.toLowerCase();
     let total = 0;
     for (const term of lowerTerms) {
       const i = 0;
@@ -504,10 +566,6 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
       docs.set(d.file, {
         file: d.file,
         basename: d.basename,
-        // Content IS persisted in the disk cache (fixes #22) so the warm
-        // path can run contentScan with correct recall. Old caches that
-        // omit `content` are rejected by loadSearchCache and rebuilt.
-        content: d.content,
         mtime: d.mtime,
         size: d.size,
         outgoingLinks: cache.outgoingLinks[d.file] ?? [],
@@ -531,9 +589,9 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
  * to the in-memory index. Returns null when the cache is fully up-to-date
  * (no I/O beyond the stat walk).
  *
- * Changed docs are read from disk (content needed for the content scan),
- * added/removed from the basename MiniSearch index, and backlinks are
- * recomputed in-memory.
+ * Changed docs are re-read from disk (for their outgoing links and stat
+ * signature), added/removed from the basename MiniSearch index, and
+ * backlinks are recomputed in-memory.
  */
 function applyIncrementalDiff(
   vaultPath: string,
@@ -618,8 +676,9 @@ function recomputeBacklinks(
  *
  * Cold and incremental paths both call this with the same in-memory shape, so
  * the on-disk format is a single full snapshot either way — a cache written
- * incrementally loads exactly like one built cold. Keep the format unchanged
- * (docs[].content included) so caches from older versions still load.
+ * incrementally loads exactly like one built cold. Note text is never
+ * written: docs carry metadata only (#85), so the snapshot stays small and a
+ * process that loads it retains no content.
  *
  * Best-effort: search works without a cache, so failures are swallowed.
  */
@@ -643,7 +702,6 @@ function persistCache(
       docs: docsArr.map((d) => ({
         file: d.file,
         basename: d.basename,
-        content: d.content,
         mtime: d.mtime,
         size: d.size,
       })),
@@ -775,8 +833,8 @@ export function searchVault(
     basenameScores.set(id, r.score);
   }
 
-  // Content substring scan (in-memory, ~130ms for 26MB), restricted to
-  // in-scope docs — out-of-folder docs are never candidates.
+  // Content substring scan (one note at a time, read from disk), restricted
+  // to in-scope docs — out-of-folder docs are never candidates.
   const terms = query
     .toLowerCase()
     .split(/\s+/)
@@ -788,7 +846,7 @@ export function searchVault(
       if (inScope(file)) scanDocs.set(file, doc);
     }
   }
-  const contentTf = contentScan(scanDocs, terms);
+  const contentTf = contentScan(contentPath, scanDocs, terms);
 
   // Merge basename + content hits.
   const allHits = new Set([...basenameScores.keys(), ...contentTf.keys()]);
@@ -833,12 +891,10 @@ export function searchVault(
 
   const contextLines = opts?.contextLines ?? config.search.contextLines;
 
-  // Read content + extract snippets ONLY for the top-N results.
+  // Read content + extract snippets ONLY for the top-N results. Note text is
+  // never cached, so this is always a disk read (top-N files, not the vault).
   const withSnippets: SearchResult[] = topN.map((s) => {
-    const doc = docs.get(s.file);
-    // Warm-path docs have empty content (deferred read). Read on demand.
-    const content =
-      doc?.content || fs.readFileSync(path.join(contentPath, s.file), "utf-8");
+    const content = readNoteContent(contentPath, s.file) ?? "";
     return {
       file: s.file,
       score: Math.round(s.composite * 10) / 10,

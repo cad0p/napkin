@@ -3,7 +3,11 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { loadSearchCache } from "../utils/search-cache.js";
 import { createTempVault } from "../utils/test-helpers.js";
-import { resetSearchIndexForTests, searchVault } from "./search.js";
+import {
+  getCachedDocForTests,
+  resetSearchIndexForTests,
+  searchVault,
+} from "./search.js";
 
 let v: { path: string; vaultPath: string; cleanup: () => void };
 
@@ -255,9 +259,10 @@ describe("incremental cache persistence", () => {
       size: stat.size,
     });
     expect(cache?.docs.map((d) => d.file)).toContain("Projects/gamma.md");
-    expect(
-      cache?.docs.find((d) => d.file === "Projects/alpha.md")?.content,
-    ).toContain("alpha-updated");
+    // Metadata only: the persisted diff must not carry note text (#85).
+    const alphaDoc = cache?.docs.find((d) => d.file === "Projects/alpha.md");
+    expect(alphaDoc?.basename).toBe("alpha");
+    expect(alphaDoc).not.toHaveProperty("content");
   });
 
   test("a folder-scoped search persists a whole-vault snapshot", () => {
@@ -286,44 +291,33 @@ describe("incremental cache persistence", () => {
     });
   });
 
-  test.skipIf(process.getuid?.() === 0)(
-    "a fresh process serves unchanged notes from the persisted cache",
-    () => {
-      vi.useFakeTimers();
-      searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
-      fs.writeFileSync(
-        path.join(v.vaultPath, "Projects/delta.md"),
-        "# Delta\ndelta-note-marker\n",
-      );
-      searchVault(v.vaultPath, v.vaultPath, "delta-note-marker");
-      vi.advanceTimersByTime(30_000);
+  test("a fresh process reads note text from disk after a disk-cache hit", () => {
+    vi.useFakeTimers();
+    searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
+    fs.writeFileSync(
+      path.join(v.vaultPath, "Projects/delta.md"),
+      "# Delta\ndelta-note-marker\n",
+    );
+    searchVault(v.vaultPath, v.vaultPath, "delta-note-marker");
+    vi.advanceTimersByTime(30_000);
 
-      // Simulate a new process: the on-disk cache is all that survives.
-      resetSearchIndexForTests();
+    // Simulate a new process: the on-disk cache is all that survives.
+    resetSearchIndexForTests();
 
-      // A re-read of this unchanged note would throw EACCES; the cache hit
-      // serves its persisted content instead.
-      const betaPath = path.join(v.vaultPath, "Projects/beta.md");
-      fs.chmodSync(betaPath, 0o000);
-      try {
-        const beta = searchVault(
-          v.vaultPath,
-          v.vaultPath,
-          "beta-project-marker",
-        );
-        expect(beta.map((r) => r.file)).toContain("Projects/beta.md");
-        // The note added by the previous process is in the cache too.
-        const delta = searchVault(
-          v.vaultPath,
-          v.vaultPath,
-          "delta-note-marker",
-        );
-        expect(delta.map((r) => r.file)).toContain("Projects/delta.md");
-      } finally {
-        fs.chmodSync(betaPath, 0o600);
-      }
-    },
-  );
+    // The cache serves unchanged metadata without re-reading notes for the
+    // index — and without holding note text, so both the old and the new
+    // note still match by reading them from disk during the content scan.
+    const cachePath = path.join(v.vaultPath, "search-cache.json");
+    const oldMtime = new Date("2000-01-01T00:00:00Z");
+    fs.utimesSync(cachePath, oldMtime, oldMtime);
+    const beta = searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
+    expect(beta.map((r) => r.file)).toContain("Projects/beta.md");
+    // The note added by the previous process is in the cache too.
+    const delta = searchVault(v.vaultPath, v.vaultPath, "delta-note-marker");
+    expect(delta.map((r) => r.file)).toContain("Projects/delta.md");
+    // A cold rebuild would have rewritten the cache file.
+    expect(fs.statSync(cachePath).mtimeMs).toBe(oldMtime.getTime());
+  });
 
   test("throttles: leading edge for the first diff, one trailing write after", () => {
     vi.useFakeTimers();
@@ -369,4 +363,116 @@ describe("incremental cache persistence", () => {
     searchVault(v.vaultPath, v.vaultPath, "alpha-v5-even-longer");
     expect(vi.getTimerCount()).toBe(1);
   });
+});
+
+// ── Contentless caches (#85) ─────────────────────────────────────
+// Note text used to live in both caches: ~580 MB of retained heap per
+// process on a 28.7k-note vault and a ~270 MB snapshot rewrite per persist.
+// The caches now hold metadata only; the content scan and snippet extraction
+// read notes from disk, one at a time.
+
+describe("contentless caches", () => {
+  const cachePath = () => path.join(v.vaultPath, "search-cache.json");
+  // In-memory DocRecord also carries the parsed wikilinks; the disk cache
+  // keeps those in the separate outgoingLinks map.
+  const DOC_KEYS = ["basename", "file", "mtime", "outgoingLinks", "size"];
+  const CACHED_DOC_KEYS = ["basename", "file", "mtime", "size"];
+  const LEGACY_MTIME = new Date("2000-01-01T00:00:00Z");
+
+  test("the in-memory index retains no note text", () => {
+    searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
+
+    const doc = getCachedDocForTests(v.vaultPath, "Projects/alpha.md");
+    expect(doc).toBeDefined();
+    expect(Object.keys(doc ?? {}).sort()).toEqual(DOC_KEYS);
+    expect(doc).not.toHaveProperty("content");
+  });
+
+  test("the disk cache snapshot carries no note text", () => {
+    searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
+
+    const raw = fs.readFileSync(cachePath(), "utf-8");
+    expect(raw).not.toContain('"content"');
+    const parsed = JSON.parse(raw);
+    expect(parsed.docs.length).toBeGreaterThan(0);
+    for (const doc of parsed.docs) {
+      expect(Object.keys(doc).sort()).toEqual(CACHED_DOC_KEYS);
+    }
+  });
+
+  test("a legacy content-bearing cache loads and its text is discarded", () => {
+    searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
+
+    // Rewrite the snapshot in the pre-#85 shape: every doc carries content.
+    const raw = JSON.parse(fs.readFileSync(cachePath(), "utf-8"));
+    const legacy = {
+      ...raw,
+      docs: raw.docs.map((doc: Record<string, unknown>) => ({
+        ...doc,
+        content: "# Alpha\nlegacy-embedded alpha-project-marker\n",
+      })),
+    };
+    fs.writeFileSync(cachePath(), JSON.stringify(legacy));
+    fs.utimesSync(cachePath(), LEGACY_MTIME, LEGACY_MTIME);
+
+    // Fresh process: only the legacy snapshot survives.
+    resetSearchIndexForTests();
+
+    // The cache is accepted (not rebuilt — the file is untouched) and the
+    // marker is found by reading the real note from disk.
+    const results = searchVault(
+      v.vaultPath,
+      v.vaultPath,
+      "alpha-project-marker",
+    );
+    expect(results.map((r) => r.file)).toEqual(["Projects/alpha.md"]);
+    expect(fs.statSync(cachePath()).mtimeMs).toBe(LEGACY_MTIME.getTime());
+
+    // The loader strips the field; it never reaches the memory cache.
+    expect(
+      getCachedDocForTests(v.vaultPath, "Projects/alpha.md"),
+    ).not.toHaveProperty("content");
+    for (const cached of loadSearchCache(v.vaultPath)?.docs ?? []) {
+      expect(cached).not.toHaveProperty("content");
+    }
+  });
+
+  test("a note deleted after indexing is skipped silently", () => {
+    // Index once, then remove the note: the next search's mtime+size diff
+    // drops it before the scan, and nothing in the scan may throw.
+    searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
+    fs.unlinkSync(path.join(v.vaultPath, "Projects/alpha.md"));
+
+    const results = searchVault(
+      v.vaultPath,
+      v.vaultPath,
+      "alpha-project-marker",
+    );
+    expect(results.map((r) => r.file)).not.toContain("Projects/alpha.md");
+    // The untouched note still matches.
+    expect(
+      searchVault(v.vaultPath, v.vaultPath, "beta-project-marker").map(
+        (r) => r.file,
+      ),
+    ).toEqual(["Projects/beta.md"]);
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "an unreadable note is skipped by the content scan instead of failing",
+    () => {
+      // Warm the index so the note is a candidate with unchanged mtime+size;
+      // the failure must happen in the scan's read, not the index diff.
+      searchVault(v.vaultPath, v.vaultPath, "alpha");
+      const alphaPath = path.join(v.vaultPath, "Projects/alpha.md");
+      fs.chmodSync(alphaPath, 0o000);
+      try {
+        // "project-marker" is in the text of alpha and beta but in neither
+        // basename, so the result set is exactly the content-scan hits.
+        const results = searchVault(v.vaultPath, v.vaultPath, "project-marker");
+        expect(results.map((r) => r.file)).toEqual(["Projects/beta.md"]);
+      } finally {
+        fs.chmodSync(alphaPath, 0o600);
+      }
+    },
+  );
 });
