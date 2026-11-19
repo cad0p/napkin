@@ -114,6 +114,8 @@ function bm25(
 interface Hit {
   path: string;
   score: number;
+  /** Distinct query terms that matched (MiniSearch's `queryTerms`). */
+  terms: Set<string>;
 }
 
 /**
@@ -141,7 +143,12 @@ export function searchNames(
           weight * NAME_BOOST * bm25(p.tf, df, docs, p.nameLen, avg);
         const hit = perTerm.get(p.fileId);
         if (hit) hit.score += score;
-        else perTerm.set(p.fileId, { path: p.path, score });
+        else
+          perTerm.set(p.fileId, {
+            path: p.path,
+            score,
+            terms: new Set([term]),
+          });
       }
     };
     const groupByTerm = (postings: NamePosting[]): NamePosting[][] => {
@@ -203,12 +210,24 @@ export function searchNames(
 
     for (const [fileId, hit] of perTerm) {
       const existing = combined.get(fileId);
-      if (existing) existing.score += hit.score;
-      else combined.set(fileId, hit);
+      if (existing) {
+        existing.score += hit.score;
+        for (const t of hit.terms) existing.terms.add(t);
+      } else {
+        combined.set(fileId, hit);
+      }
     }
   }
 
-  const ranked = [...combined.values()].sort((a, b) => b.score - a.score);
+  // MiniSearch's search() multiplies the sum by the number of distinct query
+  // terms the document matched ("quality"), so matching both words of a
+  // two-word query outranks matching one word twice as well.
+  const ranked = [...combined.values()]
+    .map((hit) => ({
+      path: hit.path,
+      score: hit.score * (hit.terms.size || 1),
+    }))
+    .sort((a, b) => b.score - a.score);
   for (const hit of ranked) out.set(hit.path, hit.score);
   return out;
 }

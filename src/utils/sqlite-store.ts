@@ -338,7 +338,8 @@ function tryOpen(
     db.prepare("SELECT term FROM name_vocab LIMIT 0").get();
     db.prepare("SELECT src, target FROM links LIMIT 0").get();
     return db;
-  } catch {
+  } catch (error) {
+    lastOpenError = error instanceof Error ? error.message : String(error);
     try {
       db?.close();
     } catch {
@@ -347,6 +348,9 @@ function tryOpen(
     return null;
   }
 }
+
+/** Why the last `tryOpen` failed, so a reopen failure can say corrupt vs busy. */
+let lastOpenError = "";
 
 export class SqliteStore implements QueryableIndexStore, NameSource {
   /**
@@ -383,7 +387,7 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
         return;
       }
     }
-    throw new Error(`cannot reopen index db ${this.dbPath}`);
+    throw new Error(`cannot reopen index db ${this.dbPath}: ${lastOpenError}`);
   }
 
   private closeDb(): void {
