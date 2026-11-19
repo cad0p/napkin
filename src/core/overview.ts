@@ -17,6 +17,13 @@ import {
   saveOverviewCache,
   saveOverviewFoldersCache,
 } from "../utils/overview-cache.js";
+import {
+  createOverviewStore,
+  type RawFolderTerms,
+  reportOverviewStoreFailure,
+  type SqliteOverviewStore,
+  type StoredFolderRow,
+} from "../utils/overview-store.js";
 
 export interface OverviewFolder {
   path: string;
@@ -432,10 +439,20 @@ function isCandidateKeyword(
   return !headingOnly.has(term) || (headingLineCount.get(term) || 0) >= 2;
 }
 
+/**
+ * One scored-candidate input row: a term, its weighted in-folder frequency,
+ * and its document frequency across the run's post-collapse folders.
+ * Iterated in the folder's first-occurrence order — ties in the stable sort
+ * below break on it, so the iteration order is behavior.
+ */
+interface KeywordCandidate {
+  term: string;
+  tf: number;
+  df: number;
+}
+
 function extractKeywordsTFIDF(
-  folderTF: TermPairs,
-  terms: string[],
-  documentFrequency: Map<number, number>,
+  candidates: Iterable<KeywordCandidate>,
   totalFolders: number,
   maxKeywords: number,
   folderPath: string,
@@ -445,16 +462,13 @@ function extractKeywordsTFIDF(
   const folderTokens = folderKeywordTokens(folderPath);
   const scored: [string, number][] = [];
 
-  for (let i = 0; i < folderTF.length; i += 2) {
-    const term = terms[folderTF[i]];
-    const tf = folderTF[i + 1];
+  for (const { term, tf, df } of candidates) {
     if (
       !isCandidateKeyword(term, tf, folderTokens, headingLineCount, headingOnly)
     ) {
       continue;
     }
 
-    const df = documentFrequency.get(folderTF[i]) || 1;
     const idf = Math.log(1 + totalFolders / df);
     scored.push([term, tf * idf]);
   }
@@ -479,6 +493,25 @@ function extractKeywordsTFIDF(
 }
 
 /**
+ * Candidates over a flattened term map (the JSON-cache path): resolves each
+ * pair through the shared dictionary and the in-memory df map, in pair order.
+ */
+function* pairCandidates(
+  pairs: TermPairs,
+  terms: string[],
+  documentFrequency: Map<number, number>,
+): IterableIterator<KeywordCandidate> {
+  for (let i = 0; i < pairs.length; i += 2) {
+    const index = pairs[i];
+    yield {
+      term: terms[index],
+      tf: pairs[i + 1],
+      df: documentFrequency.get(index) || 1,
+    };
+  }
+}
+
+/**
  * Top-N (term index, count) entries of one flattened term map. The sort is
  * stable, so terms with equal counts keep first-occurrence order — the same
  * tie-break the Map iteration this replaced provided.
@@ -493,10 +526,11 @@ function topTermPairs(pairs: TermPairs): [number, number][] {
     .slice(0, COLLAPSE_COSINE_TOP_TERMS);
 }
 
-/** Cosine similarity over the top-N terms of two TF maps. */
-function tfCosine(a: TermPairs, b: TermPairs): number {
-  const ta = topTermPairs(a);
-  const tb = topTermPairs(b);
+/**
+ * Cosine similarity over two folders' top-N body term lists — the lists
+ * topTermPairs produces (stable count-desc, first-occurrence tie order).
+ */
+function topCosine(ta: [number, number][], tb: [number, number][]): number {
   const tbByTerm = new Map(tb);
   let dot = 0;
   let na = 0;
@@ -509,6 +543,11 @@ function tfCosine(a: TermPairs, b: TermPairs): number {
   }
   if (na === 0 || nb === 0) return 0;
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/** Cosine similarity over the top-N terms of two TF maps. */
+function tfCosine(a: TermPairs, b: TermPairs): number {
+  return topCosine(topTermPairs(a), topTermPairs(b));
 }
 
 /**
@@ -643,12 +682,28 @@ function groupFilesByFolder(
   return folderFiles;
 }
 
-function buildFolderData(
+/**
+ * Top-N body terms of a folder — the list the sibling-collapse cosine reads.
+ * Stable count-desc order with first-occurrence ties, exactly what
+ * topTermPairs produces from the same data; the SQLite store persists this
+ * per folder so a collapse check never loads the whole body map.
+ */
+function topBodyTerms(bodyTF: Map<string, number>): [string, number][] {
+  return [...bodyTF.entries()]
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, COLLAPSE_COSINE_TOP_TERMS);
+}
+
+/**
+ * Every term-derived signal of one folder, as string-keyed maps straight
+ * from the notes — the form both stores consume: the JSON path encodes the
+ * maps against its dictionary, the SQLite path interns them per row.
+ */
+function collectFolderTerms(
   vaultPath: string,
   folderFileList: string[],
   warnings: string[],
-  dict: TermDictionary,
-): FolderData {
+): RawFolderTerms {
   const allTags = new Set<string>();
   // Term counts per unique heading text (first-seen order), computed once and
   // reused for both bodyTF (per occurrence) and heading signals (per unique).
@@ -717,14 +772,32 @@ function buildFolderData(
   }
 
   return {
-    // Cold-built folders land in the same packed form as cached ones, so the
-    // pipeline (and the cache writer) has exactly one representation to handle.
-    tf: encodeTermCounts(tf, dict),
-    bodyTF: encodeTermCounts(bodyTF, dict),
+    tf,
+    bodyTF,
     headingLineCount: headingSignals.lineCount,
     headingOnly,
     tags: allTags,
     noteCount: folderFileList.length,
+    bodyTop: topBodyTerms(bodyTF),
+  };
+}
+
+function buildFolderData(
+  vaultPath: string,
+  folderFileList: string[],
+  warnings: string[],
+  dict: TermDictionary,
+): FolderData {
+  const raw = collectFolderTerms(vaultPath, folderFileList, warnings);
+  return {
+    // Cold-built folders land in the same packed form as cached ones, so the
+    // pipeline (and the cache writer) has exactly one representation to handle.
+    tf: encodeTermCounts(raw.tf, dict),
+    bodyTF: encodeTermCounts(raw.bodyTF, dict),
+    headingLineCount: raw.headingLineCount,
+    headingOnly: raw.headingOnly,
+    tags: raw.tags,
+    noteCount: raw.noteCount,
   };
 }
 
@@ -1061,9 +1134,7 @@ function buildOverviewRows(
       path: folder,
       notes: data.noteCount,
       keywords: extractKeywordsTFIDF(
-        data.tf,
-        terms,
-        documentFrequency,
+        pairCandidates(data.tf, terms, documentFrequency),
         totalFolders,
         maxKeywords,
         folder,
@@ -1078,6 +1149,367 @@ function buildOverviewRows(
   }
 
   return folders;
+}
+
+// ─── SQLite-backed pipeline (#112) ─────────────────────────────────
+//
+// The same collect → collapse → TF-IDF pipeline as above, but the per-folder
+// data lives in .napkin/cache/overview-v1.db (SqliteOverviewStore) and is
+// streamed per folder instead of being held whole. Invariants that make the
+// output byte-identical to the in-memory path:
+//
+//  - pair order: folder_tf rows carry pos, the first-occurrence index the
+//    Map-based encoding produced; scoring iterates ORDER BY pos, so the
+//    stable keyword-sort ties break identically.
+//  - document frequency: terms.df counts every STORED folder containing a
+//    term. The run's df is df minus terms counted only via beyond-depth or
+//    collapse-removed folders, plus each merged parent's union — all three
+//    corrections land in one Int32Array keyed by term id.
+//  - merge order: children merge in listing order (the order folderFiles
+//    lists folders), parent row first, exactly like the Map-based pipeline.
+
+/** Materialize one stored folder's full FolderData (term-id keyed pairs). */
+function loadStoredFolderData(
+  store: SqliteOverviewStore,
+  row: StoredFolderRow,
+): FolderData {
+  const tf: TermPairs = [];
+  for (const r of store.streamTfPairs(row.id)) tf.push(r.id, r.tf);
+  const bodyTF: TermPairs = [];
+  for (const r of store.streamBody(row.id)) bodyTF.push(r.id, r.tf);
+  const { lineCount, headingOnly } = store.headRows(row.id);
+  return {
+    tf,
+    bodyTF,
+    headingLineCount: lineCount,
+    headingOnly,
+    tags: new Set(JSON.parse(row.tags) as string[]),
+    noteCount: row.notes,
+  };
+}
+
+/**
+ * The whole miss path over the SQLite store: synchronise stored rows against
+ * the fresh stat walk (a changed folder rewrites only its own rows), decide
+ * sibling collapse one group at a time, then score each output row by
+ * streaming that folder's terms.
+ */
+function overviewFromStore(
+  store: SqliteOverviewStore,
+  vaultPath: string,
+  ignoreFingerprint: string,
+  templatesFolder: string,
+  maxDepth: number,
+  maxKeywords: number,
+  collapse: boolean,
+  collapseDepth: number,
+  maxRows: number,
+  folderFiles: Map<string, string[]>,
+  sigs: Map<string, OverviewFileSig>,
+): { folders: OverviewFolder[]; warnings: string[] } {
+  // ── Sync phase: find stale rows ──────────────────────────────────
+  const meta = store.metaState();
+  // Same rule as the JSON cache: a format, ignore-state, or templates-folder
+  // change discards the whole store — it shapes every FolderData entry.
+  const wipe =
+    meta.format !== OVERVIEW_CACHE_VERSION ||
+    meta.ignoreFp !== ignoreFingerprint ||
+    meta.templatesFolder !== templatesFolder;
+
+  const toBuild: string[] = [];
+  const toDelete: string[] = [];
+
+  if (wipe) {
+    for (const folder of folderFiles.keys()) {
+      if (folderDepth(folder) <= maxDepth) toBuild.push(folder);
+    }
+  } else {
+    const stored = store.folderMeta();
+    const storedByPath = new Map(stored.map((r) => [r.path, r]));
+    for (const [folder, files] of folderFiles) {
+      const row = storedByPath.get(folder);
+      const sig = folderFingerprint(files, sigs);
+      if (folderDepth(folder) > maxDepth) {
+        // Not part of this run's rows: keep a still-valid entry for a
+        // deeper run; a stale one is dropped rather than trusted.
+        if (row && row.sig !== sig) toDelete.push(folder);
+        continue;
+      }
+      if (!row || row.sig !== sig) toBuild.push(folder);
+    }
+    for (const row of stored) {
+      if (!folderFiles.has(row.path)) toDelete.push(row.path);
+    }
+  }
+
+  if (wipe || toBuild.length > 0 || toDelete.length > 0) {
+    store.beginWrite();
+    try {
+      if (wipe) {
+        store.resetData(
+          OVERVIEW_CACHE_VERSION,
+          ignoreFingerprint,
+          templatesFolder,
+        );
+      } else {
+        store.setMeta(ignoreFingerprint, templatesFolder);
+      }
+      for (const folder of toBuild) {
+        const files = folderFiles.get(folder) ?? [];
+        const warnings: string[] = [];
+        const raw = collectFolderTerms(vaultPath, files, warnings);
+        store.writeFolder(
+          folder,
+          folderDepth(folder),
+          folderFingerprint(files, sigs),
+          raw,
+          warnings,
+        );
+      }
+      for (const folder of toDelete) store.deleteFolder(folder);
+      store.endWrite(true);
+    } catch (err) {
+      store.endWrite(false);
+      throw err;
+    }
+  }
+
+  // ── Read phase ───────────────────────────────────────────────────
+  return store.readSnapshot(() => {
+    const stored = store.folderMeta();
+    const rowByPath = new Map(stored.map((r) => [r.path, r]));
+
+    // The run's folder set: listing folders within depth, in listing order.
+    const run: StoredFolderRow[] = [];
+    for (const folder of folderFiles.keys()) {
+      if (folderDepth(folder) > maxDepth) continue;
+      const row = rowByPath.get(folder);
+      if (row === undefined) {
+        throw new Error("overview store missing folder row: " + folder);
+      }
+      run.push(row);
+    }
+    const runPaths = new Set(run.map((r) => r.path));
+    const runRowByPath = new Map(run.map((r) => [r.path, r]));
+
+    // ── Collapse decision (mirror of collapseHomogeneousSiblings) ──
+    const removed = new Set<string>();
+    const mergedData = new Map<string, FolderData>();
+    const collapsedCounts = new Map<string, number>();
+    // Stored folders whose df contribution no longer maps to an output row:
+    // absorbed children and merge-target parents (their terms count once via
+    // the merged row instead).
+    const dfAdjustedIds = new Set<number>();
+
+    if (collapse) {
+      const byParent = new Map<string, string[]>();
+      for (const r of run) {
+        if (r.path === "/") continue;
+        const idx = r.path.lastIndexOf("/");
+        const parent = idx === -1 ? "/" : r.path.slice(0, idx);
+        let list = byParent.get(parent);
+        if (!list) {
+          list = [];
+          byParent.set(parent, list);
+        }
+        list.push(r.path);
+      }
+      // Deepest parents first so collapses can cascade upward.
+      const parents = [...byParent.keys()].sort(
+        (a, b) => b.split("/").length - a.split("/").length,
+      );
+
+      const dataOf = (p: string): FolderData | undefined => {
+        const merged = mergedData.get(p);
+        if (merged) return merged;
+        const row = runRowByPath.get(p);
+        if (!row || removed.has(p)) return undefined;
+        return loadStoredFolderData(store, row);
+      };
+
+      for (const parent of parents) {
+        // Root is depth 0 and always skipped; parents shallower than
+        // collapseDepth can never be collapse targets.
+        if (parent === "/" || folderDepth(parent) < collapseDepth) continue;
+        const children = (byParent.get(parent) || []).filter(
+          (c) => runPaths.has(c) && !removed.has(c),
+        );
+        if (children.length < COLLAPSE_MIN_CHILDREN) continue;
+
+        const cap = Math.min(children.length, COLLAPSE_PAIRWISE_CAP);
+        // One sibling group's similarity data at a time — the persisted
+        // top-60 body pairs, not the whole body maps.
+        const tops: [number, number][][] = [];
+        for (let i = 0; i < cap; i++) {
+          const row = runRowByPath.get(children[i]);
+          tops.push(row ? store.bodyTop(row.id) : []);
+        }
+        let sum = 0;
+        let pairs = 0;
+        for (let i = 0; i < cap; i++) {
+          for (let j = i + 1; j < cap; j++) {
+            sum += topCosine(tops[i], tops[j]);
+            pairs++;
+          }
+        }
+        if (pairs === 0 || sum / pairs < COLLAPSE_SIMILARITY) continue;
+
+        const toMerge: FolderData[] = [];
+        let mergedFolderCount = 0;
+        for (const child of children) {
+          const d = dataOf(child);
+          if (!d) continue;
+          toMerge.push(d);
+          mergedFolderCount += 1 + (collapsedCounts.get(child) || 0);
+          removed.add(child);
+          mergedData.delete(child);
+          collapsedCounts.delete(child);
+          const childRow = runRowByPath.get(child);
+          if (childRow) dfAdjustedIds.add(childRow.id);
+        }
+        const existing = dataOf(parent);
+        const parentRow = runRowByPath.get(parent);
+        if (existing && parentRow) dfAdjustedIds.add(parentRow.id);
+        const merged = existing
+          ? mergeFolderData([existing, ...toMerge])
+          : mergeFolderData(toMerge);
+        mergedData.set(parent, merged);
+        collapsedCounts.set(
+          parent,
+          (collapsedCounts.get(parent) || 0) + mergedFolderCount,
+        );
+      }
+    }
+
+    // ── Document-frequency correction ──────────────────────────────
+    //
+    // terms.df counts all STORED folders. The run counts the post-collapse
+    // set: subtract folders beyond this run's depth, subtract the stored
+    // contribution of every folder absorbed into or replaced by a merge,
+    // and add one per merged parent that survives.
+    const adj = new Int32Array(store.maxTermId() + 1);
+    for (const r of store.deepTermCounts(maxDepth)) adj[r.id] += r.n;
+    for (const folderId of dfAdjustedIds) {
+      for (const termId of store.storedTermIds(folderId)) adj[termId]++;
+    }
+    for (const data of mergedData.values()) {
+      for (let i = 0; i < data.tf.length; i += 2) adj[data.tf[i]]--;
+    }
+
+    // ── Final row list (same ordering rules as buildOverviewRows) ──
+    interface Entry {
+      path: string;
+      notes: number;
+      row?: StoredFolderRow;
+      data?: FolderData;
+    }
+    const entries: Entry[] = [];
+    for (const r of run) {
+      if (removed.has(r.path)) continue;
+      const merged = mergedData.get(r.path);
+      entries.push(
+        merged
+          ? { path: r.path, notes: merged.noteCount, data: merged }
+          : { path: r.path, notes: r.notes, row: r },
+      );
+    }
+    for (const [p, d] of mergedData) {
+      if (!runPaths.has(p)) {
+        entries.push({ path: p, notes: d.noteCount, data: d });
+      }
+    }
+    entries.sort((a, b) => {
+      if (maxRows > 0) {
+        const depthDiff = folderDepth(a.path) - folderDepth(b.path);
+        if (depthDiff !== 0) return depthDiff;
+        if (a.notes !== b.notes) return b.notes - a.notes;
+      }
+      return a.path.localeCompare(b.path);
+    });
+    const totalFolders = entries.length;
+
+    // Warnings replay in cold order: folder listing order, then file order —
+    // exactly what each folder stored when it was (re)built.
+    const warnings: string[] = [];
+    for (const r of run) {
+      for (const w of JSON.parse(r.warn) as string[]) warnings.push(w);
+    }
+
+    // A capped listing only needs keywords on the rows that survive the
+    // cut: the sort keys (depth, notes, path) are known without scoring.
+    // With no cap (maxRows 0) every row is scored, like upstream.
+    const scored =
+      maxRows > 0 ? Math.min(maxRows, entries.length) : entries.length;
+    const folders: OverviewFolder[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      let keywords: string[] = [];
+      if (i < scored) {
+        if (e.data) {
+          // Merged parent: pairs are in memory; resolve term text and the
+          // maintained df for its vocabulary in one batch.
+          const ids: number[] = [];
+          for (let j = 0; j < e.data.tf.length; j += 2) ids.push(e.data.tf[j]);
+          const resolved = store.termsBatch(ids);
+          const tf = e.data.tf;
+          const candidates = (function* (): IterableIterator<KeywordCandidate> {
+            for (let j = 0; j < tf.length; j += 2) {
+              const id = tf[j];
+              const r = resolved.get(id);
+              if (r === undefined) continue;
+              yield {
+                term: r.term,
+                tf: tf[j + 1],
+                df: Math.max(1, r.df - adj[id]),
+              };
+            }
+          })();
+          keywords = extractKeywordsTFIDF(
+            candidates,
+            totalFolders,
+            maxKeywords,
+            e.path,
+            e.data.headingLineCount,
+            e.data.headingOnly,
+          );
+        } else if (e.row) {
+          const row = e.row;
+          const { lineCount, headingOnly } = store.headRows(row.id);
+          const candidates = (function* (): IterableIterator<KeywordCandidate> {
+            for (const r of store.streamTf(row.id)) {
+              yield {
+                term: r.term,
+                tf: r.tf,
+                df: Math.max(1, r.df - adj[r.id]),
+              };
+            }
+          })();
+          keywords = extractKeywordsTFIDF(
+            candidates,
+            totalFolders,
+            maxKeywords,
+            e.path,
+            lineCount,
+            headingOnly,
+          );
+        }
+      }
+      const tags = e.data
+        ? [...e.data.tags].sort()
+        : [...(JSON.parse(e.row?.tags ?? "[]") as string[])].sort();
+      folders.push({
+        path: e.path,
+        notes: e.notes,
+        keywords,
+        tags,
+        ...(collapsedCounts.has(e.path)
+          ? { collapsedFolders: collapsedCounts.get(e.path) }
+          : {}),
+      });
+    }
+
+    return { folders, warnings };
+  });
 }
 
 interface OverviewFileSig {
@@ -1181,24 +1613,62 @@ export function getOverview(
     stats.map(({ file }) => file),
     templatesFolder,
   );
-  const collected = collectFolderData(
-    contentPath,
-    configPath,
-    ignoreFingerprint,
-    templatesFolder,
-    maxDepth,
-    folderFiles,
-    sigs,
-  );
-  const folders = buildOverviewRows(
-    collected.folderData,
-    collected.terms,
-    maxKeywords,
-    collapse,
-    collapseDepth,
-    maxRows,
-  );
-  const warnings = collected.warnings;
+
+  // The per-folder term data lives in the SQLite store
+  // (.napkin/cache/overview-v1.db) whenever it can be opened; the JSON
+  // folder cache is the fallback for setups where SQLite cannot run — the
+  // same split the search index made in #106. A store that fails mid-run is
+  // reported and the run falls back to the JSON path, never to an error.
+  let folders: OverviewFolder[] = [];
+  let warnings: string[] = [];
+  let foldersCache: OverviewFoldersCacheData | null = null;
+  const store = createOverviewStore(configPath);
+  let done = false;
+  if (store) {
+    try {
+      const out = overviewFromStore(
+        store,
+        contentPath,
+        ignoreFingerprint,
+        templatesFolder,
+        maxDepth,
+        maxKeywords,
+        collapse,
+        collapseDepth,
+        maxRows,
+        folderFiles,
+        sigs,
+      );
+      folders = out.folders;
+      warnings = out.warnings;
+      done = true;
+    } catch (error) {
+      reportOverviewStoreFailure(configPath, store, error);
+    } finally {
+      store.release();
+    }
+  }
+  if (!done) {
+    const collected = collectFolderData(
+      contentPath,
+      configPath,
+      ignoreFingerprint,
+      templatesFolder,
+      maxDepth,
+      folderFiles,
+      sigs,
+    );
+    folders = buildOverviewRows(
+      collected.folderData,
+      collected.terms,
+      maxKeywords,
+      collapse,
+      collapseDepth,
+      maxRows,
+    );
+    warnings = collected.warnings;
+    foldersCache = collected.cache;
+  }
 
   const contextPath = path.join(contentPath, "NAPKIN.md");
   const context = fs.existsSync(contextPath)
@@ -1234,7 +1704,7 @@ export function getOverview(
       ignoreFingerprint,
       result,
     },
-    collected.cache,
+    foldersCache,
   );
   return result;
 }
