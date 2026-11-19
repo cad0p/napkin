@@ -16,7 +16,9 @@ Search indexes filenames with [MiniSearch](https://github.com/lucaong/minisearch
 (BM25) and scans note contents in memory for substring matches, ranking by a
 composite of basename BM25, content term frequency, backlink count, and
 recency. Results are cached with incremental invalidation (`.napkin/search-cache.json`),
-so repeat searches stay fast even on large vaults.
+so repeat searches stay fast even on large vaults. The cache is a full
+snapshot, re-written atomically (temp file + rename) after a change is
+detected — at most once every 30 s per process.
 
 The package ships a compiled `dist/` (JS + `.d.ts` + source maps) built by the
 `prepare` script — no jiti runtime; the CLI and the SDK both run on plain Node.
