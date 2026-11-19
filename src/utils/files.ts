@@ -51,6 +51,15 @@ export interface ListFilesOptions {
   ext?: string;
   /** When supplied, ignored files/dirs are excluded from the listing. */
   ignore?: Ignorer;
+  /**
+   * When supplied, directories deeper than this many levels below the walk
+   * root (vaultPath, or vaultPath/folder when set) are neither reported nor
+   * entered — files in them are never listed. Depth is counted in path
+   * segments of the listed path (the symlink path for linked subtrees), so
+   * it matches the folder depth a caller derives from the returned paths.
+   * Omit for an unbounded walk.
+   */
+  maxDepth?: number;
 }
 
 /**
@@ -257,6 +266,7 @@ export function listFiles(
   if (!fs.existsSync(baseDir)) return results;
 
   const ignore = opts?.ignore;
+  const maxDepth = opts?.maxDepth;
   walkDir(baseDir, {
     onEntry: (fullPath, _entry, kind) => {
       if (kind !== "file") return;
@@ -275,6 +285,16 @@ export function listFiles(
         results.push(rel);
       }
     },
+    // Bound the descent when requested: a directory deeper than maxDepth
+    // (relative to baseDir) is neither reported nor walked. Composes with
+    // the ignore pruning below — a dir inside the bound is still ignored,
+    // a dir outside it is skipped before ignore is consulted.
+    shouldEnter:
+      maxDepth === undefined
+        ? undefined
+        : (fullPath) =>
+            path.relative(baseDir, fullPath).split(path.sep).length <=
+            maxDepth,
     // When an ignorer is supplied, prune ignored dirs at descent and drop
     // ignored files before onEntry. relToRoot is relative to the walk root
     // (baseDir), which may be vaultPath/folder for folder-scoped calls —

@@ -66,6 +66,27 @@ describe("listFiles", () => {
     const files = listFiles(vault.vaultPath, { folder: "Nope" });
     expect(files).toEqual([]);
   });
+
+  test("maxDepth lists only folders within the bound", () => {
+    // Depth 1: depth-2 folders (K Logic, Runbooks, Daily) are not entered.
+    const shallow = listFiles(vault.vaultPath, { maxDepth: 1 });
+    expect(shallow.sort()).toEqual([
+      "Projects/Active Projects.md",
+      "README.md",
+      "Templates/Daily Note.md",
+      "Templates/Meeting Note.md",
+      "image.png",
+    ]);
+
+    // Depth 0: only root files.
+    expect(listFiles(vault.vaultPath, { maxDepth: 0 })).toEqual([
+      "README.md",
+      "image.png",
+    ]);
+
+    // Depth 2: the whole vault.
+    expect(listFiles(vault.vaultPath, { maxDepth: 2 }).length).toBe(8);
+  });
 });
 
 describe("listFolders", () => {
