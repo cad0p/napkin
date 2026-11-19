@@ -288,6 +288,14 @@ function termFlags(term: string): number {
 
 export class SqliteOverviewStore {
   private closed = false;
+  /**
+   * Whether this store opened a transaction that is still open. Tracked by
+   * hand because DatabaseSync#isTransaction is missing on the Node 22.13
+   * engines floor (later 22.x and 24.x have it): there it is undefined, so a check on it never
+   * committed and the next BEGIN failed ("cannot start a transaction within
+   * a transaction"), silently pinning the overview to the JSON fallback.
+   */
+  private txOpen = false;
   private flagsValue: Uint8Array | null = null;
   private maxId = -1;
   /** Cold-build interning: an in-memory dict while the whole vault is
@@ -328,6 +336,7 @@ export class SqliteOverviewStore {
     } catch {
       // Already closed.
     }
+    this.txOpen = false;
     this.closed = true;
   }
 
@@ -580,10 +589,13 @@ export class SqliteOverviewStore {
   beginWrite(): void {
     this.ensureOpen();
     this.db.exec("BEGIN IMMEDIATE");
+    this.txOpen = true;
   }
 
   endWrite(commit: boolean): void {
-    if (this.db.isTransaction) this.db.exec(commit ? "COMMIT" : "ROLLBACK");
+    if (this.closed || !this.txOpen) return;
+    this.txOpen = false;
+    this.db.exec(commit ? "COMMIT" : "ROLLBACK");
   }
 
   /** Drop every row and record the validation keys (whole-store miss). */
@@ -699,10 +711,14 @@ export class SqliteOverviewStore {
   readSnapshot<T>(fn: () => T): T {
     this.ensureOpen();
     this.db.exec("BEGIN DEFERRED");
+    this.txOpen = true;
     try {
       return fn();
     } finally {
-      if (!this.closed && this.db.isTransaction) this.db.exec("COMMIT");
+      if (!this.closed && this.txOpen) {
+        this.txOpen = false;
+        this.db.exec("COMMIT");
+      }
     }
   }
 
