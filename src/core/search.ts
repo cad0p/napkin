@@ -28,6 +28,7 @@ import {
 } from "../utils/search-cache.js";
 import {
   isFreshnessWindowOpen,
+  markSearchWalkStale,
   recordSearchWalk,
   resetSearchFreshnessForTests,
   takeSearchFreshness,
@@ -1497,6 +1498,11 @@ export function searchVault(
     } catch (error) {
       reportIndexStoreFailure(configPath, store, error);
       fallback = new JsonStore(configPath);
+      // The freshness window was opened by a walk of the SQLite store, and
+      // the failed refresh may already have taken this process's dirty
+      // paths. Neither describes the JSON snapshot the fallback loads (it
+      // can be arbitrarily old), so the fallback walks the vault.
+      markSearchWalkStale(contentPath);
     } finally {
       store.release();
     }
