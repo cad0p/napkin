@@ -3,8 +3,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     // Mirror the old `bun test` discovery surface: every *.test.ts under
-    // src/. tsx resolves extensionless TS imports.
-    include: ["src/**/*.test.ts"],
+    // src/, plus the dev-only scripts (the search eval harness, #90).
+    // tsx resolves extensionless TS imports.
+    include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
     // Default pool (forks) runs each test file in its own process in
     // parallel. napkin's tests are parallel-safe: createTempVault() makes
     // a per-test mkdtempSync under os.tmpdir(), and the search cache lives

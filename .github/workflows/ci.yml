@@ -24,7 +24,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: ./node_modules/.bin/biome check src/
+        run: ./node_modules/.bin/biome check src/ scripts/search-eval/
       - name: Type check
         run: ./node_modules/.bin/tsc --noEmit
       - name: Run tests
@@ -46,7 +46,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: ./node_modules/.bin/biome check src/
+        run: ./node_modules/.bin/biome check src/ scripts/search-eval/
       - name: Type check
         run: ./node_modules/.bin/tsc --noEmit
       - name: Run tests

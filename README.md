@@ -385,6 +385,49 @@ pnpm test
 pnpm check
 ```
 
+### Search eval harness
+
+Search ranks by a composite of basename BM25, content term frequency,
+backlinks and recency, so a change to matching or ranking needs evidence
+rather than a couple of fixtures. `scripts/search-eval` records ranked
+results for a query set and compares a later run against them.
+
+```bash
+# Record a baseline (one query per line; blank lines and # comments ignored)
+pnpm eval:search --vault /path/to/vault --queries /path/to/queries.txt \
+  --record /data/eval/baseline.json
+
+# Behaviour-preserving gate: same files, same order, same scores
+pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json
+
+# Intended ranking change: metrics, latency, worst queries
+pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json \
+  --mode ranking --report /data/eval/report.md
+```
+
+- **identity** (default) is the gate for changes meant to be
+  behaviour-preserving (#85, delta backlinks, freshness, the store seam):
+  exit 1 if any query returns a different file, a different order, or a
+  score differing by more than `--epsilon` (default 1e-9).
+- **ranking** is for intended matching/ranking changes: it reports recall,
+  recall@10, top-10 Jaccard, rank-biased overlap (p=0.9) and Kendall tau on
+  the shared files, aggregated as mean/median/p10, plus the worst 20 queries
+  with the baseline files missing from the candidate top-10.
+- Both modes report latency (cold first query, p50, p95) and peak RSS.
+- Search goes through `Napkin.search`, so the harness measures what SDK and
+  CLI users get; snippets are disabled because they do not affect ranking.
+- Record and compare must see the same vault. Each baseline stores a
+  fingerprint of the indexed files (path + size + mtime) and a mismatch is
+  reported (`--strict-vault` fails instead). Recency is normalised inside
+  the result set rather than against the clock, so scores are stable, and
+  the harness drops `.napkin/search-cache.json` before each run
+  (`--reuse-cache` keeps it) so both runs build the same index.
+- `--sample N --seed S` records a reproducible subset, for query sets whose
+  full run costs more than a review cycle.
+- CI runs the harness tests on a synthetic fixture vault in
+  `scripts/fixtures/search-eval`; real query sets and real vaults stay
+  outside the repo.
+
 ## License
 
 MIT

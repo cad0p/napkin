@@ -29,5 +29,10 @@ bench/results/
 .napkin/
 thread-draft.md
 
+# Search-eval fixture vault (#90): its config is part of the fixture, the
+# caches a run writes next to it are not.
+!scripts/fixtures/search-eval/vault/.napkin/
+!scripts/fixtures/search-eval/vault/.napkin/config.json
+
 # bun rebuilds (fork dropped bun builds; keep for accidental rebuilds)
 *.bun-build

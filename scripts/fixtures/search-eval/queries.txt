@@ -1,0 +1,16 @@
+# Synthetic query set for the search-eval harness (#90).
+# Format: one query per line; blank lines and # comments are ignored.
+# Queries are deliberately short and overlapping so small ranking changes
+# move the metrics; the last entries exercise empty and single-hit results.
+search cache
+cache invalidation
+alpha marker
+beta marker
+search pipeline
+benchmark harness
+recency backlinks
+search rewrite
+gamma gardening
+greenhouse tomatoes
+tomatoes compost greenhouse spring warm
+zzzz-no-such-term-anywhere
