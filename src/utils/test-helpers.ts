@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_CONFIG, saveConfig, updateConfig } from "./config.js";
+import { DEFAULT_CONFIG, saveConfig } from "./config.js";
+import { forceJsonIndexStoreForTests } from "./index-store.js";
 import { NAPKIN_MARKER } from "./vault.js";
 
 /**
@@ -55,10 +56,12 @@ export function createTempVault(files?: Record<string, string>): {
 /**
  * Pin the vault's search index store to JSON (#106): for tests that assert
  * on `search-cache.json` itself — its bytes, its mtime, its throttle — now
- * that the default store is SQLite (`.napkin/cache/index-v1.db`).
+ * that the store is SQLite (`.napkin/cache/index-v1.db`). Test-only seam:
+ * there is no user-facing store selection, the pin lives in index-store
+ * module state keyed by this vault's config dir.
  */
 export function useJsonIndexStore(vaultPath: string): void {
-  updateConfig(vaultPath, { search: { indexStore: "json" } });
+  forceJsonIndexStoreForTests(vaultPath);
 }
 
 /**

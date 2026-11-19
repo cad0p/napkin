@@ -48,12 +48,11 @@ import { SqliteStore } from "./sqlite-store.js";
  *  - `markDirty(path)` plus a shared `last_scan_at`: the freshness state
  *    `search-freshness.ts` keeps in process memory today.
  *
- * `JsonStore` stays as the fallback: an older Node without `node:sqlite`, a
- * vault on a network filesystem, a read-only cache dir.
+ * `JsonStore` stays as the automatic fallback: an older Node without
+ * `node:sqlite`, a vault on a network filesystem, a read-only cache dir.
+ * There is no user-facing choice — SQLite is THE store and the fallback
+ * engages only when the database genuinely cannot be used.
  */
-
-/** Store kinds selectable via config / SDK option. */
-export type IndexStoreKind = "json" | "sqlite";
 
 export interface IndexStore {
   /** The stored whole-vault snapshot, or null when there is none to use. */
@@ -179,20 +178,17 @@ export interface IndexSnapshot {
 /**
  * Select the store for a vault's config directory.
  *
- * The one place an implementation is chosen. `kind` comes from the
- * `search.indexStore` config / SDK option; `"sqlite"` falls back to
- * `JsonStore` whenever the database cannot be opened — `node:sqlite`
- * missing, a read-only or network filesystem, an unrecoverable file — so a
- * vault on an exotic setup keeps working.
+ * The one place an implementation is chosen — automatically. `SqliteStore`
+ * is the store; `JsonStore` engages only when the database cannot be
+ * opened (`node:sqlite` missing, a read-only or network filesystem, an
+ * unrecoverable file), so a vault on an exotic setup keeps working.
  *
- * Stores are cached per (configPath, kind): a long-lived consumer constructs
- * a `Napkin` per call, and reopening the database (plus its prepared
+ * Stores are cached per configPath: a long-lived consumer constructs a
+ * `Napkin` per call, and reopening the database (plus its prepared
  * statements) on every search would cost a few ms each time.
  */
-export function createIndexStore(
-  configPath: string,
-  kind: IndexStoreKind = "json",
-): IndexStore {
+export function createIndexStore(configPath: string): IndexStore {
+  const kind = forcedJsonConfigs.has(configPath) ? "json" : "sqlite";
   const key = `${configPath}${kind}`;
   const cached = stores.get(key);
   if (cached) return cached;
@@ -205,6 +201,21 @@ export function createIndexStore(
 }
 
 const stores = new Map<string, IndexStore>();
+
+/**
+ * Test-only seam: config dirs pinned to `JsonStore` (see
+ * `useJsonIndexStore` in test-helpers). Keyed per configPath — every
+ * `createTempVault` gets a unique path, so pins never leak between tests,
+ * and `resetIndexStoresForTests` deliberately leaves them in place: a test
+ * that pins JSON and then resets mid-test (a simulated fresh process)
+ * must still observe the pinned store.
+ */
+const forcedJsonConfigs = new Set<string>();
+
+/** Test-only: pin one vault's config dir to `JsonStore`. */
+export function forceJsonIndexStoreForTests(configPath: string): void {
+  forcedJsonConfigs.add(configPath);
+}
 
 /**
  * Test-only hook: drop the cached store objects, so a test observes a fresh

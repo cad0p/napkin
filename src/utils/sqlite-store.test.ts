@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { createIndexStore } from "./index-store.js";
+import {
+  createIndexStore,
+  forceJsonIndexStoreForTests,
+} from "./index-store.js";
 import { JsonStore } from "./json-store.js";
 import { loadSqlite, SqliteStore } from "./sqlite-store.js";
 import { createTempVault } from "./test-helpers.js";
@@ -281,19 +284,22 @@ describe("SqliteStore", () => {
 });
 
 describe("createIndexStore selection", () => {
-  test("kind 'json' selects JsonStore, 'sqlite' selects SqliteStore", () => {
+  test("SqliteStore is the store; JsonStore only via the test pin", () => {
     const v = makeVault();
-    expect(createIndexStore(v.vaultPath, "json")).toBeInstanceOf(JsonStore);
-    const sqlite = createIndexStore(v.vaultPath, "sqlite");
+    const sqlite = createIndexStore(v.vaultPath);
     expect(sqlite).toBeInstanceOf(SqliteStore);
     if (sqlite instanceof SqliteStore) stores.push(sqlite);
+
+    const pinned = makeVault();
+    forceJsonIndexStoreForTests(pinned.vaultPath);
+    expect(createIndexStore(pinned.vaultPath)).toBeInstanceOf(JsonStore);
   });
 
-  test("'sqlite' falls back to JsonStore when the cache dir is unwritable", () => {
+  test("falls back to JsonStore when the cache dir is unwritable", () => {
     const v = makeVault();
     fs.chmodSync(v.vaultPath, 0o555);
     try {
-      expect(createIndexStore(v.vaultPath, "sqlite")).toBeInstanceOf(JsonStore);
+      expect(createIndexStore(v.vaultPath)).toBeInstanceOf(JsonStore);
     } finally {
       fs.chmodSync(v.vaultPath, 0o755);
     }

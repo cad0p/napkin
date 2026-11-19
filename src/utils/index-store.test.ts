@@ -3,12 +3,15 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createIndexStore, type IndexSnapshot } from "./index-store.js";
 import { JsonStore } from "./json-store.js";
-import { createTempVault } from "./test-helpers.js";
+import { createTempVault, useJsonIndexStore } from "./test-helpers.js";
 
 let vault: { path: string; vaultPath: string; cleanup: () => void };
 
 beforeEach(() => {
   vault = createTempVault({ "README.md": "# Vault\nWelcome" });
+  // These tests assert on JsonStore behaviour — pin the fallback, since
+  // automatic selection picks SqliteStore (#106).
+  useJsonIndexStore(vault.vaultPath);
 });
 
 afterEach(() => {
@@ -28,7 +31,7 @@ function snapshot(ignoreFingerprint = "fp-test"): IndexSnapshot {
 }
 
 describe("createIndexStore", () => {
-  test("selects a JsonStore", () => {
+  test("selects the pinned JsonStore", () => {
     expect(createIndexStore(vault.vaultPath)).toBeInstanceOf(JsonStore);
   });
 

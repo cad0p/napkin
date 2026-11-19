@@ -222,8 +222,8 @@ describe("folder-scoped search over the whole-vault index", () => {
 });
 
 // ── SQLite store persistence (#106) ────────────────────────────
-// Counterparts of the store-agnostic JSON tests above: the default store
-// (sqlite via search.indexStore) must persist the same whole-vault view.
+// Counterparts of the store-agnostic JSON tests above: the sqlite store
+// must persist the same whole-vault view.
 // "No rebuild" is proven by meta.gen — a cold rebuild calls save(), which
 // bumps the generation, while a disk hit leaves it alone. The non-null-
 // folder miss test has no counterpart: the SQLite schema has no folder

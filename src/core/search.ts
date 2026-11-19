@@ -10,7 +10,6 @@ import {
   type IndexDiffDoc,
   type IndexSnapshot,
   type IndexStore,
-  type IndexStoreKind,
   isIncrementalIndexStore,
   resetIndexStoresForTests,
 } from "../utils/index-store.js";
@@ -87,14 +86,6 @@ export interface SearchOptions {
    * search. Overrides `search.freshnessMs` from the vault config.
    */
   freshnessMs?: number;
-  /**
-   * Which index store persists the search index (#106): `"sqlite"` uses
-   * `.napkin/cache/index-v1.db` with per-file diff writes, `"json"` uses
-   * the whole-snapshot `search-cache.json`. Falls back to JSON whenever
-   * the database cannot be opened. Overrides `search.indexStore` from the
-   * vault config.
-   */
-  indexStore?: IndexStoreKind;
 }
 
 export interface PaginatedSearchResults {
@@ -252,7 +243,6 @@ export function getBasenameScoresForTests(
     ignorer,
     fingerprint,
     resolveFreshnessMs(config.search.freshnessMs, undefined),
-    resolveIndexStoreKind(config.search.indexStore, undefined),
   );
   const scores = new Map<string, number>();
   for (const result of basenameIndex.search(query)) {
@@ -682,14 +672,13 @@ function resolveVaultIndex(
   ignorer: Ignorer,
   ignoreFp: string,
   freshnessMs: number,
-  indexStoreKind: IndexStoreKind,
 ): ResolvedIndex {
   // One index per vault (#87): folder scoping is a query-time filter in
   // searchVault, so the memory key and the store never depend on a folder.
   const memKey = memoryCacheKey(contentPath, ignoreFp);
   // The store choice lives behind this call (#94): search.ts never learns
   // whether the snapshot comes from a JSON file or a SQLite database.
-  const store = createIndexStore(configPath, indexStoreKind);
+  const store = createIndexStore(configPath);
 
   const cached = memoryCache.get(memKey);
   if (cached) {
@@ -1486,20 +1475,6 @@ function resolveFreshnessMs(
   return Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 
-/**
- * Resolve the index store kind (#106): per-call option > vault config >
- * `"sqlite"`. The SqliteStore's per-file diff writes make it strictly
- * better than the whole-snapshot rewrite on every measured axis (see #106);
- * `createIndexStore` falls back to `JsonStore` whenever the database
- * cannot be opened, so selecting it is safe on any filesystem.
- */
-function resolveIndexStoreKind(
-  configValue: IndexStoreKind | undefined,
-  optionValue: IndexStoreKind | undefined,
-): IndexStoreKind {
-  return optionValue ?? configValue ?? "sqlite";
-}
-
 export function searchVault(
   contentPath: string,
   configPath: string,
@@ -1521,7 +1496,6 @@ export function searchVault(
     ignorer,
     ignoreFp,
     resolveFreshnessMs(config.search.freshnessMs, opts?.freshnessMs),
-    resolveIndexStoreKind(config.search.indexStore, opts?.indexStore),
   );
 
   // Folder scope is a query-time filter over the whole-vault index (#87):
