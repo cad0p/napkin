@@ -914,8 +914,10 @@ interface FolderDataCollection {
  * for what changed instead of for a full tokenization pass.
  *
  * Entries for folders that disappeared are dropped. Entries for folders
- * beyond maxDepth are kept — they are still valid — but never built: a
- * shallow run must not cost as much as a deep one.
+ * beyond maxDepth are carried over untouched — the bounded walk (#117)
+ * cannot re-verify their files on a shallow run, and a deeper run re-checks
+ * their sig before reusing them — but never built: a shallow run must not
+ * cost as much as a deep one.
  *
  * Everything that shapes FolderData besides the files themselves (ignore
  * state, templates folder, cache version) is validated when the file is
@@ -946,18 +948,13 @@ function collectFolderData(
   // on disk no longer describes this listing.
   let dirty = loaded === null;
 
+  // The walk is bounded to maxDepth (#117), so folderFiles holds only
+  // folders this run can use — the folderDepth > maxDepth guard the
+  // unbounded walk needed is gone.
   for (const [folder, folderFileList] of folderFiles) {
     const sig = folderFingerprint(folderFileList, sigs);
     const previous = loaded?.folders.get(folder);
     const cached = previous?.sig === sig ? previous : undefined;
-
-    if (folderDepth(folder) > maxDepth) {
-      // Not part of this run's rows. Retain a still-valid entry for a deeper
-      // run; a stale one is dropped rather than rewritten.
-      if (cached) folders[folder] = cached;
-      else if (previous) dirty = true;
-      continue;
-    }
 
     const reused = cached ? decodeFolderData(cached, dict.terms) : null;
     if (cached && reused) {
@@ -981,10 +978,18 @@ function collectFolderData(
   }
 
   // Folders that no longer hold any visible .md file never reach the loop
-  // above, so their entries would otherwise live on forever.
+  // above, so their entries would otherwise live on forever. Entries deeper
+  // than maxDepth are a different case: the bounded walk cannot see whether
+  // they disappeared, so they are carried over (their sig is re-verified on
+  // the next run deep enough to reach them).
   if (loaded) {
-    for (const folder of loaded.folders.keys()) {
-      if (!folderFiles.has(folder)) dirty = true;
+    for (const [folder, entry] of loaded.folders) {
+      if (folderFiles.has(folder)) continue;
+      if (folderDepth(folder) > maxDepth) {
+        folders[folder] = entry;
+      } else {
+        dirty = true;
+      }
     }
   }
 
@@ -1092,20 +1097,28 @@ interface OverviewFileSig {
  * search-cache helper hashes size too (its own tradeoff); the overview cache
  * must treat a frozen-mtime content rewrite as invisible, so it
  * fingerprints independently.
+ *
+ * The walk is bounded to maxDepth: notes in folders deeper than the
+ * configured overview depth can never reach the output (collectFolderData
+ * only builds folders up to maxDepth, and the collapse only sees that set),
+ * so they are not walked, not statted, and do not feed either fingerprint —
+ * a deep write no longer invalidates a shallow result (#117). The bound uses
+ * walkDir's shouldEnter, so symlink and ignore semantics are unchanged.
  */
 function statOverviewFiles(
   contentPath: string,
-  ignore?: Ignorer,
+  ignore: Ignorer | undefined,
+  maxDepth: number,
 ): OverviewFileSig[] {
   const entries: OverviewFileSig[] = [];
-  for (const file of listFiles(contentPath, { ext: "md", ignore })) {
+  for (const file of listFiles(contentPath, { ext: "md", ignore, maxDepth })) {
     const stat = fs.statSync(path.join(contentPath, file));
     entries.push({ file, mtime: stat.mtimeMs, size: stat.size });
   }
   return entries;
 }
 
-/** Whole-vault fingerprint: every note path + mtime. */
+/** Whole-vault fingerprint: every reachable note path + mtime. */
 function vaultFingerprint(entries: OverviewFileSig[]): string {
   const hash = crypto.createHash("md5");
   for (const { file, mtime } of entries) hash.update(`${file}:${mtime}\n`);
@@ -1159,11 +1172,12 @@ export function getOverview(
 
   // One stat pass feeds both cache layers: the whole-vault fingerprint (does
   // the cached RESULT still apply?) and the per-folder fingerprints (which
-  // FolderData must be rebuilt?). Any file add/remove/touch changes the
-  // whole-vault fingerprint; NAPKIN.md is a vault .md file, so context
-  // changes invalidate too. Resolved options are part of the result key
-  // because they change the output.
-  const stats = statOverviewFiles(contentPath, ignorer);
+  // FolderData must be rebuilt?). Any file add/remove/touch at or within
+  // maxDepth changes the whole-vault fingerprint — deeper notes are outside
+  // the bounded walk and invisible to the result (#117); NAPKIN.md is a
+  // vault .md file at the root, so context changes invalidate too. Resolved
+  // options are part of the result key because they change the output.
+  const stats = statOverviewFiles(contentPath, ignorer, maxDepth);
   const fingerprint = vaultFingerprint(stats);
   const optionsKey = `${maxDepth}|${maxKeywords}|${collapse}|${collapseDepth}|${maxRows}|${templatesFolder}`;
 

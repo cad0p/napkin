@@ -10,8 +10,12 @@ const FOLDERS_CACHE_FILE = "overview-folders-cache.json";
  * shape or the computation behind it changes: an unknown version is a miss,
  * never an error. One constant for both files on purpose — the folder data
  * feeds the result, so a tokenizer/FolderData change invalidates both.
+ *
+ * v3 (#117): the vault walk is bounded to the configured overview depth, so
+ * fingerprints cover only the files the overview can use — a v2 fingerprint
+ * (whole vault) must never be compared against a v3 one (bounded).
  */
-export const OVERVIEW_CACHE_VERSION = 2;
+export const OVERVIEW_CACHE_VERSION = 3;
 
 // ─── Whole-result cache ─────────────────────────────────────────────
 
