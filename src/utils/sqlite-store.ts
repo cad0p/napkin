@@ -463,19 +463,26 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
         | undefined;
       if (typeof fp?.v !== "string") return false;
       const links = new Map<number, string[]>();
-      for (const row of v1
-        .prepare("SELECT src, target FROM links ORDER BY rowid")
-        .iterate() as Iterable<{ src: number; target: string }>) {
+      // Each statement is used again after its loop (holdUntilHere): on
+      // Node 22.13 an iterator does not keep its statement alive, and GC can
+      // finalize it mid-loop ("statement has been finalized").
+      const linkStmt = v1.prepare(
+        "SELECT src, target FROM links ORDER BY rowid",
+      );
+      for (const row of linkStmt.iterate() as Iterable<{
+        src: number;
+        target: string;
+      }>) {
         const list = links.get(row.src);
         if (list) list.push(row.target);
         else links.set(row.src, [row.target]);
       }
+      holdUntilHere(linkStmt);
       const docs: IndexDiffDoc[] = [];
-      for (const row of v1
-        .prepare(
-          "SELECT id, path, basename, mtime, size FROM files ORDER BY path",
-        )
-        .iterate() as Iterable<{
+      const fileStmt = v1.prepare(
+        "SELECT id, path, basename, mtime, size FROM files ORDER BY path",
+      );
+      for (const row of fileStmt.iterate() as Iterable<{
         id: number;
         path: string;
         basename: string;
@@ -490,6 +497,7 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
           outgoingLinks: links.get(row.id) ?? [],
         });
       }
+      holdUntilHere(fileStmt);
       if (docs.length === 0) return false;
       this.replaceAll(docs, fp.v);
       return true;
@@ -716,9 +724,14 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
     for (const entry of current) byFile.set(entry.file, entry);
     const unchanged = new Set<string>();
     const toRemove: string[] = [];
-    const rows = this.db
-      .prepare("SELECT path, mtime, size FROM files")
-      .iterate() as Iterable<{ path: string; mtime: number; size: number }>;
+    // Used again after the loop (Node 22.13's iterator does not keep its
+    // statement alive; see holdUntilHere).
+    const stmt = this.db.prepare("SELECT path, mtime, size FROM files");
+    const rows = stmt.iterate() as Iterable<{
+      path: string;
+      mtime: number;
+      size: number;
+    }>;
     for (const row of rows) {
       const entry = byFile.get(row.path);
       if (entry === undefined) toRemove.push(row.path);
@@ -726,6 +739,7 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
         unchanged.add(row.path);
       }
     }
+    holdUntilHere(stmt);
     const toAdd = current.filter((entry) => !unchanged.has(entry.file));
     return {
       toAdd,
@@ -749,6 +763,7 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
         : stmt.iterate(`${folderScope}/`, `${folderScope}0`)
     ) as Iterable<{ path: string }>;
     for (const row of rows) yield row.path;
+    holdUntilHere(stmt);
   }
 
   /**
@@ -1083,4 +1098,17 @@ export function prefixUpperBound(prefix: string): string {
   let next = (cps.pop() as number) + 1;
   if (next >= 0xd800 && next <= 0xdfff) next = 0xe000;
   return String.fromCodePoint(...cps, next);
+}
+
+let heldSql = "";
+/**
+ * A use of `stmt` after its iteration loop, so the statement stays reachable
+ * for the whole loop. Node 22.13's `StatementSync.iterate()` iterator does
+ * not reference its statement; a statement only reachable through the
+ * iterator can be garbage-collected and finalized mid-loop ("statement has
+ * been finalized", seen in the Node-floor CI job). Newer Node versions keep
+ * it alive; this is harmless there.
+ */
+function holdUntilHere(stmt: { sourceSQL: string }): void {
+  heldSql = stmt.sourceSQL;
 }
