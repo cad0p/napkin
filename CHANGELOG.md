@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - *(vault)* Export findAncestorConfigDir alongside findAncestorVault (closes #74)
 - *(vault)* Export NAPKIN_MARKER, single-source the marker name (closes #76)
 - *(vault)* Prohibit $HOME/.napkin as a vault root (closes #78)
+- *(scripts)* Search eval harness for accuracy and ranking (closes #90) ([#98](https://github.com/cad0p/napkin/pull/98))
 
 ### 🐛 Bug Fixes
 
