@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { loadConfig } from "../utils/config.js";
 import { listFiles, resolveFile } from "../utils/files.js";
 import { loadIgnorer } from "../utils/ignore.js";
+import { markSearchPathsDirty } from "../utils/search-freshness.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 function getTemplateFolder(configPath: string): string {
@@ -97,6 +98,7 @@ export function insertTemplate(
   const targetPath = path.join(v.contentPath, targetResolved.path);
   const existing = fs.readFileSync(targetPath, "utf-8");
   fs.writeFileSync(targetPath, existing + templateContent);
+  markSearchPathsDirty(v.contentPath, targetResolved.path);
 
   return { file: targetResolved.path, template: templateName, inserted: true };
 }

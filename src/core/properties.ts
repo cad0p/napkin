@@ -7,6 +7,7 @@ import {
   setProperty as setProp,
 } from "../utils/frontmatter.js";
 import type { Ignorer } from "../utils/ignore.js";
+import { markSearchPathsDirty } from "../utils/search-freshness.js";
 
 export function collectProperties(
   vaultPath: string,
@@ -56,6 +57,7 @@ export function setProperty(
 
   const updated = setProp(content, name, parsedValue);
   fs.writeFileSync(fullPath, updated);
+  markSearchPathsDirty(vaultPath, resolved.path);
 
   return { path: resolved.path, property: name, value: parsedValue };
 }
@@ -75,6 +77,7 @@ export function removeProperty(
   const content = fs.readFileSync(fullPath, "utf-8");
   const updated = removeProp(content, name);
   fs.writeFileSync(fullPath, updated);
+  markSearchPathsDirty(vaultPath, resolved.path);
 
   return { path: resolved.path, removed: name };
 }

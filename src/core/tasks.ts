@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { listFiles, resolveFile } from "../utils/files.js";
 import { loadIgnorer } from "../utils/ignore.js";
 import { extractTasks, type Task } from "../utils/markdown.js";
+import { markSearchPathsDirty } from "../utils/search-freshness.js";
 import type { VaultInfo } from "../utils/vault.js";
 import { getDailyPath } from "./daily.js";
 
@@ -149,6 +150,7 @@ export function updateTask(
 
   lines[lineNum - 1] = `${taskMatch[1]}${newStatus}${taskMatch[3]}`;
   fs.writeFileSync(fullPath, lines.join("\n"));
+  markSearchPathsDirty(vaultPath, filePath);
 
   return {
     file: filePath,

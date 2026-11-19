@@ -24,7 +24,29 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: ./node_modules/.bin/biome check src/
+        run: ./node_modules/.bin/biome check src/ scripts/search-eval/
+      - name: Type check
+        run: ./node_modules/.bin/tsc --noEmit
+      - name: Run tests
+        run: ./node_modules/.bin/vitest run
+
+  # The declared engines floor (>=22.13: node:sqlite without a flag, needed by
+  # the index store, #94). A separate job, not a matrix, so the required
+  # `test` check keeps its name.
+  test-node-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.13"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: ./node_modules/.bin/biome check src/ scripts/search-eval/
       - name: Type check
         run: ./node_modules/.bin/tsc --noEmit
       - name: Run tests

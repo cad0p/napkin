@@ -1,12 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import {
-  computeFingerprint,
-  diffFileMtimes,
-  loadSearchCache,
-  saveSearchCache,
-} from "./search-cache.js";
+import { loadSearchCache, saveSearchCache } from "./json-store.js";
+import { computeFingerprint, diffFileMtimes } from "./search-cache.js";
 import { createTempVault } from "./test-helpers.js";
 
 let vault: { path: string; vaultPath: string; cleanup: () => void };
@@ -112,7 +108,6 @@ describe("saveSearchCache / loadSearchCache", () => {
         {
           file: "README.md",
           basename: "README",
-          content: "# readme body",
           mtime: 1000,
           size: 42,
         },
@@ -146,7 +141,6 @@ describe("saveSearchCache / loadSearchCache", () => {
         {
           file: "README.md",
           basename: "README",
-          content: "# readme body",
           mtime: 1000,
           size: 42,
         },
@@ -159,18 +153,46 @@ describe("saveSearchCache / loadSearchCache", () => {
     expect(loadSearchCache(vault.vaultPath)).toBeNull();
   });
 
-  test("rejects content-less caches (legacy format) so cold-rebuild restores recall", () => {
-    // v0.10.0 wrote caches WITHOUT doc.content; on the warm path contentScan
-    // then matched nothing and recall collapsed (bug #22). Such caches must be
-    // rejected here so searchVault falls back to a cold rebuild in the new
-    // (content-bearing) format instead of loading and silently degrading recall.
+  test("loads a legacy content-bearing cache but discards note text", () => {
+    // Pre-#85 caches persisted docs[].content (the #22 fix). They must keep
+    // loading — rejecting them would force a needless cold rebuild on every
+    // upgrade — but the text is dropped on load instead of retained (#85).
     const data = {
       folder: null,
       fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
       index: '{"serialized":"index"}',
-      docs: [{ file: "README.md", basename: "README", mtime: 1000, size: 42 }],
+      docs: [
+        {
+          file: "README.md",
+          basename: "README",
+          content: "# readme body",
+          mtime: 1000,
+          size: 42,
+        },
+      ],
       backlinkCounts: { "README.md": 2 },
       outgoingLinks: { "README.md": [] },
+      ignoreFingerprint: "fp-test",
+    };
+
+    saveSearchCache(vault.vaultPath, data);
+    const loaded = loadSearchCache(vault.vaultPath);
+
+    expect(loaded).not.toBeNull();
+    expect(loaded?.docs).toEqual([
+      { file: "README.md", basename: "README", mtime: 1000, size: 42 },
+    ]);
+    expect(loaded?.docs[0]).not.toHaveProperty("content");
+  });
+
+  test("rejects a cache whose doc metadata is malformed", () => {
+    const data = {
+      folder: null,
+      fileMtimes: { "README.md": { mtime: 1000, size: 42 } },
+      index: '{"serialized":"index"}',
+      docs: [{ file: "README.md", basename: "README" }],
+      backlinkCounts: {},
+      outgoingLinks: {},
       ignoreFingerprint: "fp-test",
     };
 
@@ -244,7 +266,6 @@ describe("saveSearchCache atomicity", () => {
         {
           file: "README.md",
           basename: "README",
-          content: "# readme body",
           mtime: 1000,
           size: 42,
         },

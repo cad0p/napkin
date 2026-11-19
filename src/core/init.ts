@@ -7,7 +7,8 @@ import {
   type NapkinConfig,
   saveConfig,
 } from "../utils/config.js";
-import { NAPKIN_MARKER } from "../utils/vault.js";
+import { markSearchWalkStale } from "../utils/search-freshness.js";
+import { findVault, NAPKIN_MARKER } from "../utils/vault.js";
 
 export interface InitResult {
   status: string;
@@ -140,6 +141,24 @@ export interface ScaffoldResult {
   files: string[];
 }
 
+/**
+ * Mark a template bulk write as "the search index needs a walk" (#93).
+ *
+ * Scaffolding creates dozens of notes at once, so enumerating every path for
+ * the search dirty set is not worth it — one walk on the next search is
+ * cheaper. The walk target is the vault's content root, resolved from the
+ * layout (the sibling layout roots content at the scaffold target, the
+ * embedded layout at `<target>/.napkin`); a vault whose config cannot be read
+ * falls back to the target directory.
+ */
+function markTemplateFilesStale(targetDir: string): void {
+  try {
+    markSearchWalkStale(findVault(targetDir).contentPath);
+  } catch {
+    markSearchWalkStale(targetDir);
+  }
+}
+
 export function scaffoldVault(
   targetPath: string,
   template?: string,
@@ -180,6 +199,7 @@ export function scaffoldVault(
       );
     }
     files = scaffoldTemplate(contentRoot, TEMPLATES[template]);
+    markTemplateFilesStale(contentRoot);
   }
 
   return {
@@ -213,6 +233,7 @@ export function addTemplate(
   }
 
   const files = scaffoldTemplate(resolved, TEMPLATES[template]);
+  markTemplateFilesStale(resolved);
   return { template, files };
 }
 

@@ -5,6 +5,7 @@ import { listFiles, resolveFile } from "../utils/files.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import { extractSection } from "../utils/markdown.js";
+import { markSearchPathsDirty } from "../utils/search-freshness.js";
 import type { VaultInfo } from "../utils/vault.js";
 
 /**
@@ -191,6 +192,7 @@ export function createFile(v: VaultInfo, opts: CreateOptions): CreateResult {
 
   fs.mkdirSync(path.dirname(fullPath), { recursive: true });
   fs.writeFileSync(fullPath, content);
+  markSearchPathsDirty(v.contentPath, targetPath);
 
   return { path: targetPath, created: true };
 }
@@ -211,6 +213,7 @@ export function appendFile(
   const existing = fs.readFileSync(fullPath, "utf-8");
   const separator = inline ? "" : "\n";
   fs.writeFileSync(fullPath, existing + separator + content);
+  markSearchPathsDirty(vaultPath, resolved.path);
 
   return resolved.path;
 }
@@ -238,6 +241,7 @@ export function prependFile(
   } else {
     fs.writeFileSync(fullPath, content + separator + existing);
   }
+  markSearchPathsDirty(vaultPath, resolved.path);
 
   return resolved.path;
 }
@@ -262,6 +266,8 @@ export function moveFile(
   const destFull = path.join(vaultPath, destPath);
   fs.mkdirSync(path.dirname(destFull), { recursive: true });
   fs.renameSync(srcFull, destFull);
+  // Both ends: the source leaves the index, the destination is new to it.
+  markSearchPathsDirty(vaultPath, resolved.path, destPath);
 
   return { from: resolved.path, to: destPath };
 }
@@ -282,6 +288,7 @@ export function renameFile(
   const srcFull = path.join(vaultPath, resolved.path);
   const destFull = path.join(vaultPath, destPath);
   fs.renameSync(srcFull, destFull);
+  markSearchPathsDirty(vaultPath, resolved.path, destPath);
 
   return { from: resolved.path, to: destPath };
 }
@@ -307,6 +314,9 @@ export function deleteFile(
     const trashPath = path.join(trashDir, path.basename(resolved.path));
     fs.renameSync(fullPath, trashPath);
   }
+  // Dirty either way: a missing path is dropped from the index, and the trash
+  // copy is not a vault note.
+  markSearchPathsDirty(vaultPath, resolved.path);
 
   return { path: resolved.path, deleted: true, permanent: !!permanent };
 }
