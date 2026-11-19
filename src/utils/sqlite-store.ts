@@ -229,11 +229,10 @@ function prepareAll(db: DatabaseSync): Stmts {
     allFiles: db.prepare(
       "SELECT id, path, basename, mtime, size, gen FROM files",
     ),
-    allLinks: db.prepare(
-      "SELECT f.path AS path, l.target AS target " +
-        "FROM links l JOIN files f ON f.id = l.src " +
-        "ORDER BY f.path, l.rowid",
-    ),
+    // Ordered by the links_src index (src ASC, then rowid within src) —
+    // an index scan with no temp b-tree sort over ~200k rows, which keeps
+    // the load cheap. Per-file target order stays rowid order.
+    allLinks: db.prepare("SELECT src, target FROM links ORDER BY src"),
     tombsSince: db.prepare(
       "SELECT path, basename FROM tombstones WHERE gen > ? ORDER BY path",
     ),
@@ -277,7 +276,11 @@ function tryOpen(
     db.exec(`PRAGMA journal_mode = ${journalMode}`);
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA busy_timeout = 5000");
-    db.exec("PRAGMA cache_size = -16000");
+    // 2 MB page cache: enough for the per-file write path, and after a
+    // full-snapshot load the DB does no more reads — a bigger cache would
+    // retain tens of MB of vault pages as anonymous RSS per process (#106
+    // review). The cross-process read path can revisit this.
+    db.exec("PRAGMA cache_size = -512");
     db.exec("PRAGMA foreign_keys = OFF");
     const row = db.prepare("PRAGMA user_version").get() as
       | { user_version: number }
@@ -309,11 +312,51 @@ function tryOpen(
 }
 
 export class SqliteStore implements IncrementalIndexStore {
+  /**
+   * True while `db` is closed. The connection is closed at the end of
+   * `load()` — the one bulk read — and lazily reopened by `ensureOpen()`
+   * on the next write: an open connection costs ~15 MB of sqlite-side memory
+   * per process (page cache, statements, wal-index), which a long-lived
+   * reader process would otherwise hold forever (#106 review).
+   */
+  private closed = false;
+
   private constructor(
     private readonly configPath: string,
-    private readonly db: DatabaseSync,
-    private readonly stmts: Stmts,
+    private readonly dbPath: string,
+    private db: DatabaseSync,
+    private stmts: Stmts,
   ) {}
+
+  /**
+   * Reopen the database if it was closed after a `load()`. Reopen cost is
+   * a few ms (pragmas + idempotent DDL + prepare) — only paid once per
+   * operation, and diffs are rare compared to searches.
+   */
+  private ensureOpen(): void {
+    if (!this.closed) return;
+    const sqlite = loadSqlite();
+    if (sqlite === null) throw new Error("node:sqlite unavailable");
+    for (const mode of ["WAL", "DELETE"] as const) {
+      const db = tryOpen(sqlite, this.dbPath, mode);
+      if (db !== null) {
+        this.db = db;
+        this.stmts = prepareAll(db);
+        this.closed = false;
+        return;
+      }
+    }
+    throw new Error(`cannot reopen index db ${this.dbPath}`);
+  }
+
+  private closeDb(): void {
+    try {
+      this.db.close();
+    } catch {
+      // Already closed.
+    }
+    this.closed = true;
+  }
 
   /**
    * Open the vault's SQLite store, creating it when missing.
@@ -365,7 +408,7 @@ export class SqliteStore implements IncrementalIndexStore {
       if (db === null) return null;
     }
 
-    const store = new SqliteStore(configPath, db, prepareAll(db));
+    const store = new SqliteStore(configPath, dbPath, db, prepareAll(db));
     store.migrateFromJson();
     return store;
   }
@@ -378,6 +421,7 @@ export class SqliteStore implements IncrementalIndexStore {
    */
   private migrateFromJson(): void {
     try {
+      this.ensureOpen();
       const count = this.stmts.fileCount.get() as { n: number } | undefined;
       if ((count?.n ?? 0) > 0) return;
       if (this.stmts.blobGet.get(BASENAME_BLOB_KEY) !== undefined) return;
@@ -394,6 +438,7 @@ export class SqliteStore implements IncrementalIndexStore {
    * the JSON store's replace-everything semantics.
    */
   save(snapshot: IndexSnapshot): void {
+    this.ensureOpen();
     const db = this.db;
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -433,6 +478,7 @@ export class SqliteStore implements IncrementalIndexStore {
    * caller sets it iff the basename set changed.
    */
   saveDiff(diff: IndexDiff): void {
+    this.ensureOpen();
     const db = this.db;
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -478,6 +524,7 @@ export class SqliteStore implements IncrementalIndexStore {
    */
   load(): IndexSnapshot | null {
     try {
+      this.ensureOpen();
       const meta = this.readMeta();
       const blob = this.stmts.blobGet.get(BASENAME_BLOB_KEY) as
         | { gen: number; v: unknown }
@@ -486,15 +533,15 @@ export class SqliteStore implements IncrementalIndexStore {
       if (blob === undefined || meta.ignoreFp === undefined) return null;
       const index = typeof blob.v === "string" ? blob.v : String(blob.v);
 
-      const files = this.stmts.allFiles.all() as unknown as FileRow[];
-      // JS string sort (UTF-16 code units) — the same order listFiles'
-      // results.sort() produces, so the doc order — and every tie-break that
-      // depends on it — matches a JSON snapshot byte for byte. SQLite's
-      // BINARY collation can differ on non-ASCII paths.
-      files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      // Streamed, not .all(): materialising 200k row objects at once was
+      // ~45 MB of transient heap that V8 then retains as arena. iterate()
+      // hands each row over one at a time.
       const docs: IndexedDoc[] = [];
       const fileMtimes: IndexSnapshot["fileMtimes"] = {};
-      for (const row of files) {
+      const outgoingLinks: IndexSnapshot["outgoingLinks"] = {};
+      const idToPath = new Map<number, string>();
+      const add: string[] = [];
+      for (const row of this.stmts.allFiles.iterate() as Iterable<FileRow>) {
         docs.push({
           file: row.path,
           basename: row.basename,
@@ -502,24 +549,32 @@ export class SqliteStore implements IncrementalIndexStore {
           size: row.size,
         });
         fileMtimes[row.path] = { mtime: row.mtime, size: row.size };
-      }
-      // Every file gets an entry, even without links — the JSON snapshot
-      // carries explicit empty arrays and loadFromDiskCache merges the map.
-      const outgoingLinks: IndexSnapshot["outgoingLinks"] = {};
-      for (const row of files) outgoingLinks[row.path] = [];
-      for (const row of this.stmts.allLinks.all() as unknown as {
-        path: string;
-        target: string;
-      }[]) {
-        const list = outgoingLinks[row.path] ?? [];
-        list.push(row.target);
-        outgoingLinks[row.path] = list;
-      }
-
-      const add: string[] = [];
-      for (const row of files) {
+        idToPath.set(row.id, row.path);
+        // Every file gets an entry, even without links — the JSON snapshot
+        // carries explicit empty arrays and loadFromDiskCache merges the map.
+        outgoingLinks[row.path] = [];
         if (row.gen > blob.gen) add.push(row.path);
       }
+      // JS string sort (UTF-16 code units) — the same order listFiles'
+      // results.sort() produces, so the doc order — and every tie-break that
+      // depends on it — matches a JSON snapshot byte for byte. SQLite's
+      // BINARY collation can differ on non-ASCII paths.
+      docs.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+      for (const row of this.stmts.allLinks.iterate() as Iterable<{
+        src: number;
+        target: string;
+      }>) {
+        const file = idToPath.get(row.src);
+        if (file !== undefined) outgoingLinks[file].push(row.target);
+      }
+      // Hand the page cache and freed SQL memory back to malloc — the bulk
+      // load just touched every page, and no more reads are coming.
+      try {
+        this.db.exec("PRAGMA shrink_memory");
+      } catch {
+        // Older SQLite builds may lack it; memory stays cached, still fine.
+      }
+
       const remove = (
         this.stmts.tombsSince.all(blob.gen) as unknown as {
           path: string;
@@ -540,6 +595,9 @@ export class SqliteStore implements IncrementalIndexStore {
       };
     } catch {
       return null;
+    } finally {
+      // See the closed flag docs: release the connection after the bulk read.
+      this.closeDb();
     }
   }
 
@@ -551,6 +609,7 @@ export class SqliteStore implements IncrementalIndexStore {
   }
 
   private readMeta(): { ignoreFp?: string } {
+    this.ensureOpen();
     const row = this.db
       .prepare("SELECT v FROM meta WHERE k = 'ignore_fp'")
       .get() as { v: unknown } | undefined;
@@ -631,11 +690,12 @@ export class SqliteStore implements IncrementalIndexStore {
 
   /** Close the underlying database handle (tests; stores are cached). */
   close(): void {
-    this.db.close();
+    this.closeDb();
   }
 
   /** Test-only: the persisted per-target link tallies. */
   linkCountsForTests(): Record<string, number> {
+    this.ensureOpen();
     const rows = this.db
       .prepare("SELECT key, n FROM link_counts ORDER BY key")
       .all() as unknown as { key: string; n: number }[];
@@ -650,6 +710,7 @@ export class SqliteStore implements IncrementalIndexStore {
     linkCount: number;
     tombstones: number;
   } {
+    this.ensureOpen();
     const scalar = (sql: string): number => {
       const row = this.db.prepare(sql).get() as { n: number } | undefined;
       return row?.n ?? 0;

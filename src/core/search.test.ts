@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { loadSearchCache } from "../utils/json-store.js";
+import { SqliteStore } from "../utils/sqlite-store.js";
 import { createTempVault, useJsonIndexStore } from "../utils/test-helpers.js";
 import {
   getCachedDocForTests,
@@ -217,6 +218,73 @@ describe("folder-scoped search over the whole-vault index", () => {
     expect(loadSearchCache(v.vaultPath)?.folder).toBeNull();
     expect(results.map((r) => r.file)).toContain("Resources/guide.md");
     expect(results.map((r) => r.file)).toContain("Projects/alpha.md");
+  });
+});
+
+// ── SQLite store persistence (#106) ────────────────────────────
+// Counterparts of the store-agnostic JSON tests above: the default store
+// (sqlite via search.indexStore) must persist the same whole-vault view.
+// "No rebuild" is proven by meta.gen — a cold rebuild calls save(), which
+// bumps the generation, while a disk hit leaves it alone. The non-null-
+// folder miss test has no counterpart: the SQLite schema has no folder
+// field, so a stale per-folder snapshot is impossible by construction.
+
+describe("sqlite store persistence", () => {
+  afterEach(() => {
+    resetSearchIndexForTests();
+  });
+
+  /** meta.gen of the vault's index db — bumped by every persisted write. */
+  function indexGen(): number {
+    const store = SqliteStore.open(v.vaultPath);
+    if (store === null) throw new Error("sqlite store expected");
+    try {
+      return store.inspectForTests().gen;
+    } finally {
+      store.close();
+    }
+  }
+
+  test("a folder search persists a whole-vault snapshot reusable in a fresh process", () => {
+    // Default store is sqlite — no pin needed.
+    const scoped = searchVault(v.vaultPath, v.vaultPath, "alpha", {
+      path: "Projects",
+    });
+    expect(scoped.map((r) => r.file)).toEqual(["Projects/alpha.md"]);
+    const genAfterBuild = indexGen();
+
+    // Simulate a fresh process: only the disk cache survives.
+    resetSearchIndexForTests();
+
+    // A whole-vault search is a pure disk hit: results include out-of-folder
+    // docs, and the generation does not move (no rebuild happened).
+    const results = searchVault(v.vaultPath, v.vaultPath, "alpha");
+    expect(results.map((r) => r.file)).toContain("Resources/guide.md");
+    expect(results.map((r) => r.file)).toContain("Projects/alpha.md");
+    expect(indexGen()).toBe(genAfterBuild);
+  });
+
+  test("a fresh process reads note text from disk after a disk-cache hit", () => {
+    searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
+    fs.writeFileSync(
+      path.join(v.vaultPath, "Projects/delta.md"),
+      "# Delta\ndelta-note-marker\n",
+    );
+    // The added file is persisted by the diff write — immediately, no
+    // throttle for sqlite.
+    searchVault(v.vaultPath, v.vaultPath, "delta-note-marker");
+    const genAfterDiff = indexGen();
+
+    // Simulate a new process: the on-disk store is all that survives.
+    resetSearchIndexForTests();
+
+    const beta = searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
+    expect(beta.map((r) => r.file)).toContain("Projects/beta.md");
+    // The note added by the previous process is in the store too.
+    const delta = searchVault(v.vaultPath, v.vaultPath, "delta-note-marker");
+    expect(delta.map((r) => r.file)).toContain("Projects/delta.md");
+    // Served from disk, not rebuilt.
+    expect(indexGen()).toBe(genAfterDiff);
   });
 });
 
