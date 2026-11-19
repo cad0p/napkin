@@ -701,6 +701,7 @@ function topBodyTerms(bodyTF: Map<string, number>): [string, number][] {
  */
 function collectFolderTerms(
   vaultPath: string,
+  folder: string,
   folderFileList: string[],
   warnings: string[],
 ): RawFolderTerms {
@@ -771,6 +772,26 @@ function collectFolderTerms(
     if (!nonHeadingTerms.has(term)) headingOnly.add(term);
   }
 
+  // Keyword candidates are fully folder-local (bigram counts, the folder's
+  // own tokens, heading corroboration), so the filter can run at write time:
+  // the SQLite store persists only these terms as scorable rows. The JSON
+  // path ignores the set — it re-applies the same filter at scoring time.
+  const candidates = new Set<string>();
+  const folderTokens = folderKeywordTokens(folder);
+  for (const [term, count] of tf) {
+    if (
+      isCandidateKeyword(
+        term,
+        count,
+        folderTokens,
+        headingSignals.lineCount,
+        headingOnly,
+      )
+    ) {
+      candidates.add(term);
+    }
+  }
+
   return {
     tf,
     bodyTF,
@@ -779,16 +800,18 @@ function collectFolderTerms(
     tags: allTags,
     noteCount: folderFileList.length,
     bodyTop: topBodyTerms(bodyTF),
+    candidates,
   };
 }
 
 function buildFolderData(
   vaultPath: string,
+  folder: string,
   folderFileList: string[],
   warnings: string[],
   dict: TermDictionary,
 ): FolderData {
-  const raw = collectFolderTerms(vaultPath, folderFileList, warnings);
+  const raw = collectFolderTerms(vaultPath, folder, folderFileList, warnings);
   return {
     // Cold-built folders land in the same packed form as cached ones, so the
     // pipeline (and the cache writer) has exactly one representation to handle.
@@ -1044,6 +1067,7 @@ function collectFolderData(
     const folderWarnings: string[] = [];
     const data = buildFolderData(
       vaultPath,
+      folder,
       folderFileList,
       folderWarnings,
       dict,
@@ -1257,7 +1281,7 @@ function overviewFromStore(
       for (const folder of toBuild) {
         const files = folderFiles.get(folder) ?? [];
         const warnings: string[] = [];
-        const raw = collectFolderTerms(vaultPath, files, warnings);
+        const raw = collectFolderTerms(vaultPath, folder, files, warnings);
         store.writeFolder(
           folder,
           folderDepth(folder),
@@ -1476,7 +1500,7 @@ function overviewFromStore(
           const row = e.row;
           const { lineCount, headingOnly } = store.headRows(row.id);
           const candidates = (function* (): IterableIterator<KeywordCandidate> {
-            for (const r of store.streamTf(row.id)) {
+            for (const r of store.streamCand(row.id)) {
               yield {
                 term: r.term,
                 tf: r.tf,

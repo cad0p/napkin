@@ -49,6 +49,14 @@ import { loadSqlite } from "./sqlite-store.js";
  *                                           the headingOnly terms (a strict
  *                                           subset of the head keys, since
  *                                           every heading term is also in tf)
+ *   folder_cand(folder_id, pos,
+ *               term_id, tf)                the folder's keyword CANDIDATES —
+ *                                           every isCandidateKeyword input is
+ *                                           folder-local (bigram counts, the
+ *                                           folder's own tokens, heading
+ *                                           corroboration), so the filter runs
+ *                                           at write time and scoring reads a
+ *                                           fraction of folder_tf
  *
  * Everything is keyed by integer term id — there is no in-memory whole-vault
  * dictionary or term→index map: building a folder interns each of its terms
@@ -85,6 +93,7 @@ const SCHEMA_DDL =
     "CREATE TABLE IF NOT EXISTS folder_body(folder_id INTEGER NOT NULL, pos INTEGER NOT NULL, term_id INTEGER NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS folder_bodytop(folder_id INTEGER NOT NULL, rank INTEGER NOT NULL, term_id INTEGER NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY(folder_id, rank)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS folder_head(folder_id INTEGER NOT NULL, pos INTEGER NOT NULL, term_id INTEGER NOT NULL, n INTEGER NOT NULL, only INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS folder_cand(folder_id INTEGER NOT NULL, pos INTEGER NOT NULL, term_id INTEGER NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
   ].join(";\n") + ";";
 
 interface Stmts {
@@ -107,6 +116,8 @@ interface Stmts {
   bodyTopInsert: StatementSync;
   headDelete: StatementSync;
   headInsert: StatementSync;
+  candDelete: StatementSync;
+  candInsert: StatementSync;
 }
 
 function prepareAll(db: DatabaseSync): Stmts {
@@ -171,6 +182,11 @@ function prepareAll(db: DatabaseSync): Stmts {
       "INSERT INTO folder_head(folder_id, pos, term_id, n, only) " +
         "VALUES(?, ?, ?, ?, ?)",
     ),
+    candDelete: db.prepare("DELETE FROM folder_cand WHERE folder_id = ?"),
+    candInsert: db.prepare(
+      "INSERT INTO folder_cand(folder_id, pos, term_id, tf) " +
+        "VALUES(?, ?, ?, ?)",
+    ),
   };
 }
 
@@ -201,6 +217,13 @@ export interface RawFolderTerms {
    * checks load ~60 rows instead of the folder's whole body map.
    */
   bodyTop: [string, number][];
+  /**
+   * The folder's keyword candidates — the terms that pass the folder-local
+   * isCandidateKeyword checks. Membership only: the write loop stores the
+   * (term id, tf) pair when the tf map visits a candidate, so first-occurrence
+   * order is the tf order itself.
+   */
+  candidates: Set<string>;
 }
 
 /** Why the last tryOpen failed, so a reopen failure can say corrupt vs busy. */
@@ -263,6 +286,9 @@ function tryOpen(
     ).get();
     db.prepare(
       "SELECT folder_id, pos, term_id, n, only FROM folder_head LIMIT 0",
+    ).get();
+    db.prepare(
+      "SELECT folder_id, pos, term_id, tf FROM folder_cand LIMIT 0",
     ).get();
     return db;
   } catch (error) {
@@ -394,6 +420,7 @@ export class SqliteOverviewStore {
   /** Drop every row and record the validation keys (whole-store miss). */
   resetData(format: number, ignoreFp: string, templatesFolder: string): void {
     for (const table of [
+      "folder_cand",
       "folder_head",
       "folder_bodytop",
       "folder_body",
@@ -451,14 +478,21 @@ export class SqliteOverviewStore {
     // no meaning beyond identity, so that is harmless.
     this.stmts.dfDecrement.run(folderId);
     this.stmts.orphanSweep.run(folderId);
+    this.stmts.candDelete.run(folderId);
     this.stmts.headDelete.run(folderId);
     this.stmts.bodyTopDelete.run(folderId);
     this.stmts.bodyDelete.run(folderId);
     this.stmts.tfDelete.run(folderId);
 
     let pos = 0;
+    let candPos = 0;
     for (const [term, tf] of raw.tf) {
-      this.stmts.tfInsert.run(folderId, pos++, this.intern(term), tf);
+      const termId = this.intern(term);
+      this.stmts.tfInsert.run(folderId, pos++, termId, tf);
+      // Candidates ride along on the tf interning pass — no second lookup.
+      if (raw.candidates.has(term)) {
+        this.stmts.candInsert.run(folderId, candPos++, termId, tf);
+      }
     }
     pos = 0;
     for (const [term, tf] of raw.bodyTF) {
@@ -490,6 +524,7 @@ export class SqliteOverviewStore {
     const folderId = row.id;
     this.stmts.dfDecrement.run(folderId);
     this.stmts.orphanSweep.run(folderId);
+    this.stmts.candDelete.run(folderId);
     this.stmts.headDelete.run(folderId);
     this.stmts.bodyTopDelete.run(folderId);
     this.stmts.bodyDelete.run(folderId);
@@ -516,33 +551,10 @@ export class SqliteOverviewStore {
   }
 
   /**
-   * Stream one folder's weighted term rows in stored (first-occurrence)
-   * order, each row carrying the resolved term text and the maintained
-   * all-stored-folders df. The caller folds the run-time df correction in.
-   */
-  *streamTf(
-    folderId: number,
-  ): IterableIterator<{ id: number; tf: number; term: string; df: number }> {
-    this.ensureOpen();
-    const stmt = this.db.prepare(
-      "SELECT t.term_id AS id, t.tf AS tf, e.term AS term, e.df AS df " +
-        "FROM folder_tf t JOIN terms e ON e.id = t.term_id " +
-        "WHERE t.folder_id = ? ORDER BY t.pos",
-    );
-    const rows = stmt.iterate(folderId) as IterableIterator<{
-      id: number;
-      tf: number;
-      term: string;
-      df: number;
-    }>;
-    for (const row of rows) yield row;
-    holdUntilHere(stmt);
-  }
-
-  /**
    * One folder's weighted term pairs (id-keyed, first-occurrence order),
    * without term text — the form mergeFolderData consumes. Keyword scoring
-   * uses streamTf (which joins term text and df) instead.
+   * uses streamCand (the persisted candidate subset, joined to term text
+   * and the maintained df) instead.
    */
   *streamTfPairs(
     folderId: number,
@@ -589,6 +601,29 @@ export class SqliteOverviewStore {
       )
       .all(folderId) as unknown as { id: number; tf: number }[];
     return rows.map((r) => [r.id, r.tf]);
+  }
+
+  /**
+   * Stream one folder's keyword candidates in stored (first-occurrence)
+   * order — the same join as streamTf over the much smaller candidate set.
+   */
+  *streamCand(
+    folderId: number,
+  ): IterableIterator<{ id: number; term: string; tf: number; df: number }> {
+    this.ensureOpen();
+    const stmt = this.db.prepare(
+      "SELECT c.term_id AS id, c.tf AS tf, e.term AS term, e.df AS df " +
+        "FROM folder_cand c JOIN terms e ON e.id = c.term_id " +
+        "WHERE c.folder_id = ? ORDER BY c.pos",
+    );
+    const rows = stmt.iterate(folderId) as IterableIterator<{
+      id: number;
+      term: string;
+      tf: number;
+      df: number;
+    }>;
+    for (const row of rows) yield row;
+    holdUntilHere(stmt);
   }
 
   /**
@@ -639,10 +674,13 @@ export class SqliteOverviewStore {
     maxDepth: number,
   ): IterableIterator<{ id: number; n: number }> {
     this.ensureOpen();
+    // CROSS JOIN pins the join order: scan the (few hundred) folder rows
+    // for deep ones first, then probe each deep folder's term rows — a
+    // vault whose whole tree fits the depth limit pays nothing at all.
     const stmt = this.db.prepare(
-      "SELECT t.term_id AS id, COUNT(*) AS n FROM folder_tf t " +
-        "JOIN folders f ON f.id = t.folder_id WHERE f.depth > ? " +
-        "GROUP BY t.term_id",
+      "SELECT t.term_id AS id, COUNT(*) AS n FROM folders f " +
+        "CROSS JOIN folder_tf t ON t.folder_id = f.id " +
+        "WHERE f.depth > ? GROUP BY t.term_id",
     );
     const rows = stmt.iterate(maxDepth) as IterableIterator<{
       id: number;
