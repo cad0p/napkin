@@ -26,6 +26,10 @@ All notable changes to this project will be documented in this file.
 
 - Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
 
+### ⚡ Performance
+
+- *(search)* Update backlink counts by delta in the incremental diff (closes #92) ([#99](https://github.com/cad0p/napkin/pull/99))
+
 ### ⚙️ Miscellaneous Tasks
 
 - Drop pkg.pr.new preview publishing (closes #78) ([#80](https://github.com/cad0p/napkin/pull/80))
