@@ -227,7 +227,7 @@ function prepareAll(db: DatabaseSync): Stmts {
     ),
     blobGet: db.prepare("SELECT gen, v FROM blobs WHERE k = ?"),
     allFiles: db.prepare(
-      "SELECT id, path, basename, mtime, size, gen FROM files ORDER BY path",
+      "SELECT id, path, basename, mtime, size, gen FROM files",
     ),
     allLinks: db.prepare(
       "SELECT f.path AS path, l.target AS target " +
@@ -487,6 +487,11 @@ export class SqliteStore implements IncrementalIndexStore {
       const index = typeof blob.v === "string" ? blob.v : String(blob.v);
 
       const files = this.stmts.allFiles.all() as unknown as FileRow[];
+      // JS string sort (UTF-16 code units) — the same order listFiles'
+      // results.sort() produces, so the doc order — and every tie-break that
+      // depends on it — matches a JSON snapshot byte for byte. SQLite's
+      // BINARY collation can differ on non-ASCII paths.
+      files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
       const docs: IndexedDoc[] = [];
       const fileMtimes: IndexSnapshot["fileMtimes"] = {};
       for (const row of files) {
