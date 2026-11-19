@@ -30,6 +30,7 @@ napkin config set --key search.limit --value 50
 | `search.contextLines` | `5` | Context lines around matches. 0 = match-only |
 | `search.resultsPerPage` | `10` | Max results returned per page. Use `--page N` to paginate. |
 | `search.freshnessMs` | `0` | Freshness window for the search index walk. `0` = validate against disk on every search; N = reuse the index for N ms (see below) |
+| `search.indexStore` | `"sqlite"` | Where the search index persists: `"sqlite"` keeps `.napkin/cache/index-v1.db` updated by per-file diff (one transaction per change; ~1 ms and ~30 KB for a single-file diff vs ~35 MB full rewrites). `"json"` uses the whole-snapshot `search-cache.json`. Falls back to JSON automatically when the database cannot be opened (read-only or network filesystem, no `node:sqlite`). Per-call SDK override: `search(q, { indexStore })` / `new Napkin(path, { searchIndexStore })` |
 
 #### Search freshness
 
