@@ -445,6 +445,66 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
   }
 
   /**
+   * Import file rows and links from a valid v1 database (#106 layout), so the
+   * move to v2 does not cost a cold build. The v1 file is only read and is
+   * left in place: older napkin processes keep writing it until they restart.
+   * Name postings are derived from the basenames by `replaceAll`.
+   */
+  private importV1(): boolean {
+    const v1Path = path.join(path.dirname(this.dbPath), "index-v1.db");
+    if (!fs.existsSync(v1Path)) return false;
+    const sqlite = loadSqlite();
+    if (sqlite === null) return false;
+    let v1: DatabaseSync | undefined;
+    try {
+      v1 = new sqlite.DatabaseSync(v1Path, { readOnly: true, timeout: 2000 });
+      const fp = v1.prepare("SELECT v FROM meta WHERE k = 'ignore_fp'").get() as
+        | { v: unknown }
+        | undefined;
+      if (typeof fp?.v !== "string") return false;
+      const links = new Map<number, string[]>();
+      for (const row of v1
+        .prepare("SELECT src, target FROM links ORDER BY rowid")
+        .iterate() as Iterable<{ src: number; target: string }>) {
+        const list = links.get(row.src);
+        if (list) list.push(row.target);
+        else links.set(row.src, [row.target]);
+      }
+      const docs: IndexDiffDoc[] = [];
+      for (const row of v1
+        .prepare(
+          "SELECT id, path, basename, mtime, size FROM files ORDER BY path",
+        )
+        .iterate() as Iterable<{
+        id: number;
+        path: string;
+        basename: string;
+        mtime: number;
+        size: number;
+      }>) {
+        docs.push({
+          file: row.path,
+          basename: row.basename,
+          mtime: row.mtime,
+          size: row.size,
+          outgoingLinks: links.get(row.id) ?? [],
+        });
+      }
+      if (docs.length === 0) return false;
+      this.replaceAll(docs, fp.v);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      try {
+        v1?.close();
+      } catch {
+        // Read-only handle; nothing to flush.
+      }
+    }
+  }
+
+  /**
    * One-shot migration: an empty database adopts a valid JSON snapshot
    * instead of forcing the first SqliteStore search into a cold build.
    * The JSON file is left in place — it is still the fallback store's cache,
@@ -456,6 +516,7 @@ export class SqliteStore implements QueryableIndexStore, NameSource {
       const count = this.stmts.fileCount.get() as { n: number } | undefined;
       if ((count?.n ?? 0) > 0) return;
       if (this.readMeta().ignoreFp !== undefined) return;
+      if (this.importV1()) return;
       const snapshot = new JsonStore(this.configPath).load();
       if (snapshot !== null) this.save(snapshot);
     } catch {

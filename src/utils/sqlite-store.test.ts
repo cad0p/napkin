@@ -185,6 +185,32 @@ describe("SqliteStore", () => {
     expect(loaded?.docs).toEqual(snapshot().docs);
   });
 
+  test("first open imports a v1 database instead of cold-building", () => {
+    const v = makeVault();
+    fs.mkdirSync(path.join(v.vaultPath, "cache"), { recursive: true });
+    const sqlite = loadSqlite();
+    if (sqlite === null) throw new Error("node:sqlite unavailable in test");
+    const raw = new sqlite.DatabaseSync(
+      path.join(v.vaultPath, "cache", "index-v1.db"),
+    );
+    raw.exec(
+      "CREATE TABLE meta(k TEXT PRIMARY KEY, v);" +
+        "CREATE TABLE files(id INTEGER PRIMARY KEY, path TEXT, basename TEXT, mtime REAL, size INTEGER);" +
+        "CREATE TABLE links(src INTEGER, target TEXT);" +
+        "INSERT INTO meta VALUES('ignore_fp','fp');" +
+        "INSERT INTO files VALUES(1,'a/one.md','one',1000,10),(2,'b/two.md','two',2000,20);" +
+        "INSERT INTO links VALUES(2,'one');",
+    );
+    raw.close();
+    const store = openStore(v.vaultPath);
+    expect(store.isReady("fp")).toBe(true);
+    expect(store.inspectForTests().nameTerms).toBe(2);
+    expect(store.linkCountsForTests()).toEqual({ one: 1 });
+    expect(fs.existsSync(path.join(v.vaultPath, "cache", "index-v1.db"))).toBe(
+      true,
+    );
+  });
+
   test("a mid-diff write failure rolls the transaction back", () => {
     const v = makeVault();
     const store = openStore(v.vaultPath);
