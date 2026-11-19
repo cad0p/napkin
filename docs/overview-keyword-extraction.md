@@ -87,6 +87,19 @@ The walk is bounded to the configured `depth`: notes in deeper folders can
 never reach the output, so they are not walked, not statted, and do not
 invalidate the cache (#117).
 
+On a miss, the per-folder data comes from
+`.napkin/cache/overview-v2.db` (#118): one row per note holding that
+note's term data as an Int32 blob, plus a derived row per folder (tf id
+list, precomputed keyword candidates, and full term data only where the
+sibling collapse could merge it). A changed note costs a re-tokenization
+of that note plus a re-aggregation of its folder — from note blobs, in
+sorted path order, which reproduces the exact term order a cold build
+produces — instead of re-tokenizing every note in the folder. Document
+frequency is recomputed on each miss from the folders' term-id blobs, so
+it is exact by construction. The JSON `overview-folders-cache.json`
+remains only as the fallback for environments where `node:sqlite` is
+unavailable.
+
 ## Configuration
 
 | Flag | Default | Description |
