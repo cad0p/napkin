@@ -45,7 +45,9 @@ import {
   dropSearchCache,
   formatIdentityReport,
   formatRankingMarkdown,
+  type MetricAggregate,
   peakRssMb,
+  type QueryRecord,
   readQueries,
   recordRun,
   sampleQueries,
@@ -54,6 +56,14 @@ import {
   vaultFingerprint,
   worstQueries,
 } from "./harness.js";
+import {
+  defaultJudgeCacheDir,
+  exactTitleLosses,
+  formatJudgeMarkdown,
+  judgeJsonReport,
+  runJudge,
+  summariseJudge,
+} from "./judge.js";
 
 const EXIT_DIFFERENT = 1;
 const EXIT_USAGE = 2;
@@ -70,7 +80,8 @@ interface Options {
   folder: string | null;
   record: string | null;
   compare: string | null;
-  mode: "identity" | "ranking";
+  candidate: string | null;
+  mode: "identity" | "ranking" | "judge";
   report: string | null;
   sample: number | null;
   seed: number;
@@ -80,6 +91,12 @@ interface Options {
   rboP: number;
   reuseCache: boolean;
   strictVault: boolean;
+  judgeModel: string | null;
+  judgeConcurrency: number;
+  judgeCmd: string;
+  judgeCache: string | null;
+  judgeJson: string | null;
+  judgeTimeoutMs: number;
 }
 
 function usageText(): string {
@@ -89,7 +106,8 @@ function usageText(): string {
   --queries <file>      one query per line; blank lines and # comments ignored
   --record <out.json>   run every query, write the ranked lists + latency
   --compare <file>      re-run and compare against a recorded baseline
-  --mode <m>            identity (default; exit 1 on any difference) | ranking
+  --mode <m>            identity (default; exit 1 on any difference) | ranking |
+                        judge
   --limit <n>           results per query (default: config search.limit, min ${MIN_LIMIT})
   --folder <path>       restrict search to a vault folder
   --report <out.md>     write the ranking report as markdown
@@ -102,6 +120,21 @@ function usageText(): string {
   --reuse-cache         keep the on-disk search index (default: dropped, so
                         both runs cold-build the same index)
   --strict-vault        fail when the vault fingerprint differs from the baseline
+
+  judge mode (--mode judge, always needs --compare <baseline.json>):
+  --candidate <file>    compare two recordings instead of re-running the
+                        candidate live (fingerprint is still checked)
+  --judge-model <m>     provider/model for the judge (required; never
+                        defaulted — the operator picks the quality/cost point)
+  --judge-concurrency   judge calls in flight (default 4)
+  --judge-cmd <path>    judge executable (default "pi"; tests pass a fake)
+  --judge-cache <dir>   verdict cache dir (default $TMPDIR/napkin-search-eval-
+                        judge); "none" disables
+  --judge-timeout <s>   per-call timeout in seconds (default 120)
+  --judge-json <file>   write the machine-readable judge report
+
+  Judge prompts carry the query, note paths, titles and short excerpts read
+  from the vault — run locally on private vaults, never in CI.
   --help`;
 }
 
@@ -124,6 +157,7 @@ function parseArgs(argv: string[]): Options {
     folder: null,
     record: null,
     compare: null,
+    candidate: null,
     mode: "identity",
     report: null,
     sample: null,
@@ -134,6 +168,12 @@ function parseArgs(argv: string[]): Options {
     rboP: 0.9,
     reuseCache: false,
     strictVault: false,
+    judgeModel: null,
+    judgeConcurrency: 4,
+    judgeCmd: "pi",
+    judgeCache: null, // null means "use the default tmpdir location"
+    judgeJson: null,
+    judgeTimeoutMs: 120_000,
   };
 
   const value = (flag: string, i: number): string => {
@@ -174,12 +214,33 @@ function parseArgs(argv: string[]): Options {
         break;
       case "--mode": {
         const raw = value(arg, ++i);
-        if (raw !== "identity" && raw !== "ranking") {
-          usage("--mode must be identity or ranking");
+        if (raw !== "identity" && raw !== "ranking" && raw !== "judge") {
+          usage("--mode must be identity, ranking or judge");
         }
         opts.mode = raw;
         break;
       }
+      case "--candidate":
+        opts.candidate = value(arg, ++i);
+        break;
+      case "--judge-model":
+        opts.judgeModel = value(arg, ++i);
+        break;
+      case "--judge-concurrency":
+        opts.judgeConcurrency = num(arg, value(arg, ++i));
+        break;
+      case "--judge-cmd":
+        opts.judgeCmd = value(arg, ++i);
+        break;
+      case "--judge-cache":
+        opts.judgeCache = value(arg, ++i);
+        break;
+      case "--judge-json":
+        opts.judgeJson = value(arg, ++i);
+        break;
+      case "--judge-timeout":
+        opts.judgeTimeoutMs = num(arg, value(arg, ++i)) * 1000;
+        break;
       case "--report":
         opts.report = value(arg, ++i);
         break;
@@ -219,6 +280,15 @@ function parseArgs(argv: string[]): Options {
   if (!opts.record && !opts.compare)
     usage("one of --record or --compare is required");
   if (opts.record && !opts.queries) usage("--record needs --queries");
+  if (opts.candidate && opts.mode !== "judge") {
+    usage("--candidate is only meaningful in judge mode");
+  }
+  if (opts.mode === "judge") {
+    if (!opts.compare) usage("judge mode needs --compare <baseline.json>");
+    if (!opts.judgeModel) usage("judge mode needs --judge-model");
+    if (opts.judgeCache === null) opts.judgeCache = defaultJudgeCacheDir();
+    else if (opts.judgeCache === "none") opts.judgeCache = null;
+  }
   return opts;
 }
 
@@ -302,7 +372,33 @@ function checkVaultUnchanged(
   }
 }
 
-function main(): number {
+function aggregateRow(name: string, agg: MetricAggregate): string {
+  return `| ${name} | ${agg.mean.toFixed(4)} | ${agg.median.toFixed(4)} | ${agg.p10.toFixed(4)} |`;
+}
+
+function rankingBlock(
+  baseline: QueryRecord[],
+  candidate: QueryRecord[],
+  k: number,
+  rboP: number,
+): string {
+  const summary = summariseRanking(
+    compareRanking(baseline, candidate, { k, rboP }),
+  );
+  const lines = [
+    "| metric | mean | median | p10 |",
+    "| --- | ---: | ---: | ---: |",
+    aggregateRow("recall", summary.recall),
+    aggregateRow(`recall@${k}`, summary.recallAt10),
+    aggregateRow(`jaccard@${k}`, summary.jaccardAt10),
+    aggregateRow("rbo", summary.rbo),
+  ];
+  if (summary.kendallTau)
+    lines.push(aggregateRow("kendall tau", summary.kendallTau));
+  return lines.join("\n");
+}
+
+async function main(): Promise<number> {
   const opts = parseArgs(process.argv.slice(2));
   const napkin = new Napkin(opts.vault);
 
@@ -318,7 +414,9 @@ function main(): number {
 
   // Both modes must start from the same index state: a cold build here, a
   // loaded cache there, can order score ties differently (see harness.ts).
-  if (!opts.reuseCache) {
+  // A recorded --candidate needs no index at all: nothing searches.
+  const needsIndex = !(opts.mode === "judge" && opts.candidate !== null);
+  if (!opts.reuseCache && needsIndex) {
     const dropped = dropSearchCache(napkin);
     console.error(
       dropped
@@ -399,6 +497,103 @@ function main(): number {
   console.error(
     `comparing ${queries.length} queries, limit ${limit}${folder ? `, folder ${folder}` : ""}, mode ${opts.mode}`,
   );
+
+  if (opts.mode === "judge") {
+    let candidateRecords: QueryRecord[];
+    if (opts.candidate) {
+      const cand = loadBaseline(opts.candidate);
+      const candQueries = cand.queries.map((r) => r.query);
+      if (
+        candQueries.length !== queries.length ||
+        candQueries.some((query, i) => query !== queries[i])
+      ) {
+        usage("--candidate query list differs from the baseline's");
+      }
+      if (cand.vault.digest !== baseline.vault.digest) {
+        console.error(
+          "warning: candidate recording's vault fingerprint differs from the baseline's",
+        );
+      }
+      checkVaultUnchanged(cand.vault, currentVault, opts.strictVault);
+      candidateRecords = cand.queries;
+      console.error(`candidate: recording ${opts.candidate}`);
+    } else {
+      const run = recordRun(search, queries);
+      candidateRecords = run.queries;
+      console.error(
+        `candidate: live run, p50 ${run.latency.p50Ms.toFixed(0)} ms, p95 ${run.latency.p95Ms.toFixed(0)} ms`,
+      );
+    }
+
+    console.error(
+      `judging with ${opts.judgeModel}, k=${opts.topK}, concurrency ${opts.judgeConcurrency}`,
+    );
+    const {
+      judged,
+      identicalCount,
+      usage: judgeUsage,
+    } = await runJudge(baseline.queries, candidateRecords, {
+      judgeCmd: opts.judgeCmd,
+      model: opts.judgeModel as string,
+      concurrency: opts.judgeConcurrency,
+      timeoutMs: opts.judgeTimeoutMs,
+      cacheDir: opts.judgeCache,
+      k: opts.topK,
+      vaultRoot: napkin.vault.contentPath,
+      onProgress: (done, total) => {
+        if (done === total || done % 10 === 0) {
+          console.error(`judged ${done}/${total}`);
+        }
+      },
+    });
+    const exactLosses = exactTitleLosses(
+      baseline.queries,
+      candidateRecords,
+      opts.topK,
+    );
+    const summary = summariseJudge(
+      baseline.queries.length,
+      identicalCount,
+      judged,
+      exactLosses,
+      opts.seed,
+    );
+    const report = formatJudgeMarkdown(summary, judged, {
+      model: opts.judgeModel as string,
+      k: opts.topK,
+      usage: judgeUsage,
+      rankingBlock: rankingBlock(
+        baseline.queries,
+        candidateRecords,
+        opts.topK,
+        opts.rboP,
+      ),
+    });
+    if (opts.report) {
+      fs.mkdirSync(path.dirname(path.resolve(opts.report)), {
+        recursive: true,
+      });
+      fs.writeFileSync(opts.report, report);
+      console.log(`judge report written to ${opts.report}`);
+    } else {
+      console.log(report);
+    }
+    if (opts.judgeJson) {
+      writeJson(
+        opts.judgeJson,
+        judgeJsonReport(summary, judged, judgeUsage, {
+          model: opts.judgeModel as string,
+          k: opts.topK,
+        }),
+      );
+      console.log(`judge JSON written to ${opts.judgeJson}`);
+    }
+    console.log(
+      `judge: ${summary.wins}W/${summary.ties}T/${summary.losses}L (${summary.errors} errors), net ${summary.netWinRate.toFixed(4)}, CI [${summary.ci95[0].toFixed(4)}, ${summary.ci95[1].toFixed(4)}], p=${summary.signTestP.toFixed(4)} -> ${summary.pass ? "PASS" : "FAIL"}`,
+    );
+    return summary.pass ? 0 : EXIT_DIFFERENT;
+  }
+
   const { queries: records, latency } = recordRun(search, queries);
 
   if (opts.mode === "identity") {
@@ -444,4 +639,9 @@ function main(): number {
   return 0;
 }
 
-process.exit(main());
+main()
+  .then((code) => process.exit(code))
+  .catch((error: unknown) => {
+    console.error(`error: ${(error as Error).message}`);
+    process.exit(EXIT_USAGE);
+  });
