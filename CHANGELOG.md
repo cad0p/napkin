@@ -40,6 +40,7 @@ All notable changes to this project will be documented in this file.
 - *(overview)* Cache FolderData per folder, rebuild only changed folders (closes #86) ([#107](https://github.com/cad0p/napkin/pull/107))
 - *(search)* Query the SQLite store per search instead of loading the index (closes #109) ([#113](https://github.com/cad0p/napkin/pull/113))
 - *(overview)* Walk the vault only to the configured depth (closes #117) ([#119](https://github.com/cad0p/napkin/pull/119))
+- *(overview)* Per-note term blobs so a miss re-reads only the changed notes (closes #118) ([#120](https://github.com/cad0p/napkin/pull/120))
 
 ### ⚙️ Miscellaneous Tasks
 
