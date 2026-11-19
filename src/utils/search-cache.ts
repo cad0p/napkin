@@ -187,10 +187,37 @@ export function loadSearchCache(configPath: string): SearchCacheData | null {
 
 /**
  * Save search index cache to disk.
+ *
+ * Atomic: the snapshot is written to a temp file in the same directory and
+ * renamed over the target, so a reader never observes a half-written cache
+ * and a crash mid-write leaves the previous snapshot intact. Concurrent
+ * writers are safe without locking — every write is a full snapshot that
+ * `loadSearchCache` re-validates against file mtime+size, so last-writer-wins
+ * is correct.
+ *
+ * Throws on I/O failure (after removing the temp file); callers that treat
+ * persistence as best-effort swallow it.
  */
 export function saveSearchCache(
   configPath: string,
   data: SearchCacheData,
 ): void {
-  fs.writeFileSync(path.join(configPath, CACHE_FILE), JSON.stringify(data));
+  const cachePath = path.join(configPath, CACHE_FILE);
+  // pid + random suffix: two writers (or a run that crashed mid-write) never
+  // share a temp path, so one cannot clobber the other's half-written file.
+  const tmpPath = path.join(
+    configPath,
+    `${CACHE_FILE}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+  );
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(data));
+    fs.renameSync(tmpPath, cachePath);
+  } catch (err) {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort cleanup; the write error below is the one that matters.
+    }
+    throw err;
+  }
 }
