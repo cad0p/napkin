@@ -454,9 +454,12 @@ pnpm eval:search --vault /path/to/vault --compare /data/eval/baseline.json \
   of the 95% bootstrap CI (10k seeded resamples) of the net win rate (W−L)/N
   above −0.05, and no exact-title loss (a query equal to a note's basename,
   normalized, that was in the baseline top-k must stay in the candidate
-  top-k). The report also carries the ranking metrics, the 10 worst losses
-  with both lists side by side plus the judge reasons, and calls, cache hits,
-  wall time and tokens.
+  top-k). With very few differing queries the bootstrap CI is necessarily
+  wide, so a tiny sample cannot clear the floor: that is intentional, the
+  gate wants enough judged pairs to be confident. The report also carries the
+  ranking metrics, the 10 worst losses
+  with both lists side by side plus the judge reasons, and calls, cache
+  hits, wall time and tokens.
 - `--judge-model` is required (there is no default model): use a fast one
   during development and a strong one for the run that decides a merge.
   `--judge-concurrency` (default 4) bounds concurrent calls, `--judge-cmd`

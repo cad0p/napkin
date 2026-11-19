@@ -472,4 +472,57 @@ describe("CLI judge mode end-to-end", () => {
     },
     { timeout: 60_000 },
   );
+
+  test(
+    "judge mode can run the candidate live against the vault",
+    () => {
+      const baselinePath = path.join(dir, "live-baseline.json");
+      expect(
+        run([
+          "--vault",
+          vault,
+          "--queries",
+          fixtureQueries,
+          "--record",
+          baselinePath,
+        ]).status,
+      ).toBe(0);
+
+      // Empty the top hit for a couple of queries: the live run disagrees.
+      const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf-8")) as {
+        queries: Array<{ query: string; results: Array<{ file: string }> }>;
+      };
+      let emptied = 0;
+      for (const q of baseline.queries) {
+        if (q.results.length >= 2 && emptied < 2) {
+          q.results = q.results.slice(1);
+          emptied++;
+        }
+      }
+      expect(emptied).toBe(2);
+      fs.writeFileSync(baselinePath, JSON.stringify(baseline));
+
+      const live = run([
+        "--vault",
+        vault,
+        "--compare",
+        baselinePath,
+        "--mode",
+        "judge",
+        "--judge-model",
+        "fake/model",
+        "--judge-cmd",
+        fakeJudge(),
+        "--judge-cache",
+        path.join(dir, "live-cache"),
+      ]);
+      expect(live.output).toContain("candidate: live run");
+      expect(live.output).toContain("2 differing queries");
+      // The exact W/L split depends on the fixture ranking; what matters is
+      // that the live path judged both and the wide n=2 CI kept it a FAIL.
+      expect(live.output).toMatch(/[0-9]W\/[0-9]T\/[0-9]L/);
+      expect(live.status).toBe(1);
+    },
+    { timeout: 60_000 },
+  );
 });
