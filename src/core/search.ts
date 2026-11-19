@@ -93,17 +93,20 @@ interface CachedVaultIndex {
   docs: Map<string, DocRecord>;
   backlinkCounts: Map<string, number>;
   fileMtimes: Map<string, FileStatSig>;
-  folder: string | null;
 }
 
 const memoryCache = new Map<string, CachedVaultIndex>();
 
-function memoryCacheKey(
-  contentPath: string,
-  folder: string | undefined,
-  ignoreFp: string,
-): string {
-  return `${contentPath}\0${folder ?? ""}\0${ignoreFp}`;
+function memoryCacheKey(contentPath: string, ignoreFp: string): string {
+  return `${contentPath}\0${ignoreFp}`;
+}
+
+/**
+ * Test-only hook: clear the process-scope memory cache so a test can
+ * simulate a fresh process (where only the disk cache survives).
+ */
+export function resetSearchIndexForTests(): void {
+  memoryCache.clear();
 }
 
 // ── Index building (cold path) ────────────────────────────────────
@@ -146,10 +149,9 @@ function readDoc(vaultPath: string, file: string): DocRecord {
  */
 function buildDocsAndBacklinks(
   vaultPath: string,
-  folder?: string,
   ignore?: Ignorer,
 ): BuildResult {
-  const files = listFiles(vaultPath, { folder, ext: "md", ignore });
+  const files = listFiles(vaultPath, { ext: "md", ignore });
 
   const basenameMap = new Map<string, string[]>();
   const docsArr: DocRecord[] = [];
@@ -352,16 +354,17 @@ interface ResolvedIndex {
 function resolveVaultIndex(
   contentPath: string,
   configPath: string,
-  folder: string | undefined,
   ignorer: Ignorer,
   ignoreFp: string,
 ): ResolvedIndex {
-  const memKey = memoryCacheKey(contentPath, folder, ignoreFp);
+  // One index per vault (#87): folder scoping is a query-time filter in
+  // searchVault, so the memory key and disk cache never depend on a folder.
+  const memKey = memoryCacheKey(contentPath, ignoreFp);
 
   const cached = memoryCache.get(memKey);
   if (cached) {
     return (
-      applyIncrementalDiff(contentPath, cached, folder, ignorer) ?? {
+      applyIncrementalDiff(contentPath, cached, ignorer) ?? {
         basenameIndex: cached.basenameIndex,
         docs: cached.docs,
         backlinkCounts: cached.backlinkCounts,
@@ -370,20 +373,21 @@ function resolveVaultIndex(
   }
 
   const diskCache = loadSearchCache(configPath);
-  const folderNorm = folder ?? null;
-  // The disk cache is only valid when the ignore state matches the current
-  // fingerprint — an ignore change can hide/unhide files that incremental
-  // diffing against fileMtimes would miss.
+  // The disk cache is only valid when it holds a whole-vault snapshot
+  // (folder === null; older per-folder caches are treated as a miss and
+  // replaced) AND the ignore state matches the current fingerprint — an
+  // ignore change can hide/unhide files that incremental diffing against
+  // fileMtimes would miss.
   if (
     diskCache &&
-    diskCache.folder === folderNorm &&
+    diskCache.folder === null &&
     diskCache.ignoreFingerprint === ignoreFp
   ) {
     const loaded = loadFromDiskCache(diskCache);
     if (loaded) {
       memoryCache.set(memKey, loaded);
       return (
-        applyIncrementalDiff(contentPath, loaded, folder, ignorer) ?? {
+        applyIncrementalDiff(contentPath, loaded, ignorer) ?? {
           basenameIndex: loaded.basenameIndex,
           docs: loaded.docs,
           backlinkCounts: loaded.backlinkCounts,
@@ -392,15 +396,14 @@ function resolveVaultIndex(
     }
   }
 
-  // Cold path — build from scratch and persist.
-  const built = buildDocsAndBacklinks(contentPath, folder, ignorer);
-  persistCache(configPath, folder, built, ignoreFp);
+  // Cold path — build the whole-vault index from scratch and persist.
+  const built = buildDocsAndBacklinks(contentPath, ignorer);
+  persistCache(configPath, built, ignoreFp);
   const cached2: CachedVaultIndex = {
     basenameIndex: built.basenameIndex,
     docs: built.docs,
     backlinkCounts: built.backlinkCounts,
     fileMtimes: built.fileMtimes,
-    folder: folder ?? null,
   };
   memoryCache.set(memKey, cached2);
   return {
@@ -443,7 +446,6 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
       docs,
       backlinkCounts,
       fileMtimes,
-      folder: cache.folder,
     };
   } catch {
     return null;
@@ -462,10 +464,9 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
 function applyIncrementalDiff(
   vaultPath: string,
   cache: CachedVaultIndex,
-  folder?: string,
   ignore?: Ignorer,
 ): ResolvedIndex | null {
-  const current = statAllFiles(vaultPath, folder, ignore);
+  const current = statAllFiles(vaultPath, undefined, ignore);
   const diff = diffFileMtimes(Object.fromEntries(cache.fileMtimes), current);
   if (diff.unchanged) {
     return null;
@@ -540,7 +541,6 @@ function recomputeBacklinks(
 
 function persistCache(
   configPath: string,
-  folder: string | null | undefined,
   built: BuildResult,
   ignoreFp: string,
 ): void {
@@ -549,7 +549,11 @@ function persistCache(
   for (const d of docsArr) outgoingLinks[d.file] = d.outgoingLinks;
   try {
     saveSearchCache(configPath, {
-      folder: folder ?? null,
+      // Kept for format compatibility (#87): the cache always holds a
+      // whole-vault snapshot now, so this is always null. A cache file
+      // with a non-null folder is an old per-folder snapshot and is
+      // treated as a miss.
+      folder: null,
       fileMtimes: Object.fromEntries(built.fileMtimes),
       index: JSON.stringify(built.basenameIndex),
       docs: docsArr.map((d) => ({
@@ -568,6 +572,32 @@ function persistCache(
   }
 }
 
+// ── Folder scoping (query-time filter) ──────────────────────────
+
+/**
+ * Normalise a user-supplied folder scope the way listFiles resolves it:
+ * joined under the vault root (path.join collapses leading/trailing
+ * slashes, "./" segments, and OS separators), then re-relativised to the
+ * vault root. Returns null when there is no effective scope (no path, or
+ * the path resolves to the vault root itself, e.g. ".").
+ *
+ * A scope that escapes the vault ("../x") yields a prefix no
+ * vault-relative file can match, so it returns no results — the
+ * whole-vault index cannot serve external directories the way the old
+ * folder-scoped walk could.
+ */
+function normalizeFolderScope(
+  contentPath: string,
+  folder: string | undefined,
+): string | null {
+  if (!folder) return null;
+  const rel = path
+    .relative(contentPath, path.join(contentPath, folder))
+    .split(path.sep)
+    .join("/");
+  return rel === "" ? null : rel;
+}
+
 // ── Public search API ─────────────────────────────────────────────
 
 export function searchVault(
@@ -577,7 +607,6 @@ export function searchVault(
   opts?: SearchOptions,
 ): SearchResult[] {
   const config = loadConfig(configPath);
-  const folder = opts?.path;
   // Single fingerprint computation: loadIgnorer computes it for its memo key
   // and returns it, so the disk-cache validity check, memoryCacheKey, and
   // persist all reuse the same value instead of re-hashing ignore files.
@@ -589,24 +618,43 @@ export function searchVault(
   const { basenameIndex, docs, backlinkCounts } = resolveVaultIndex(
     contentPath,
     configPath,
-    folder,
     ignorer,
     ignoreFp,
   );
 
-  // Basename BM25 search (fast).
+  // Folder scope is a query-time filter over the whole-vault index (#87):
+  // a path-segment prefix match so "foo" matches "foo/x.md" and
+  // "foo/bar/y.md" but NOT "foobar/x.md". A folder that does not exist
+  // yields no in-scope files — same empty result listFiles produced.
+  const folderScope = normalizeFolderScope(contentPath, opts?.path);
+  const inScope =
+    folderScope === null
+      ? null
+      : (file: string) => file.startsWith(`${folderScope}/`);
+
+  // Basename BM25 search (fast), restricted to in-scope files.
   const basenameResults = basenameIndex.search(query);
   const basenameScores = new Map<string, number>();
   for (const r of basenameResults) {
-    basenameScores.set(r.id as string, r.score);
+    const id = r.id as string;
+    if (inScope && !inScope(id)) continue;
+    basenameScores.set(id, r.score);
   }
 
-  // Content substring scan (in-memory, ~130ms for 26MB).
+  // Content substring scan (in-memory, ~130ms for 26MB), restricted to
+  // in-scope docs — out-of-folder docs are never candidates.
   const terms = query
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 0);
-  const contentTf = contentScan(docs, terms);
+  let scanDocs = docs;
+  if (inScope) {
+    scanDocs = new Map<string, DocRecord>();
+    for (const [file, doc] of docs) {
+      if (inScope(file)) scanDocs.set(file, doc);
+    }
+  }
+  const contentTf = contentScan(scanDocs, terms);
 
   // Merge basename + content hits.
   const allHits = new Set([...basenameScores.keys(), ...contentTf.keys()]);
@@ -623,6 +671,8 @@ export function searchVault(
     if (!doc) continue;
     const bm25 = basenameScores.get(file) || 0;
     const tf = contentTf.get(file) || 0;
+    // Backlink counts are whole-vault by design (#87): links from outside
+    // a folder scope still count — they reflect a note's real importance.
     const links = backlinkCounts.get(file) || 0;
     scored.push({
       file,

@@ -428,8 +428,9 @@ describe("search", () => {
     vault.cleanup();
   });
 
-  test("cache not used when searching a subfolder", async () => {
-    // Cache is folder-specific — searching with --path shouldn't use full-vault cache
+  test("folder search filters results from the shared whole-vault index", async () => {
+    // The index is whole-vault (#87); --path filters results at query time.
+    // Prime the index with a whole-vault search first.
     await captureJson(() =>
       search({ json: true, vault: v.path, query: "alpha" }),
     );

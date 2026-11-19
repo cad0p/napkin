@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { loadSearchCache } from "../utils/search-cache.js";
 import { createTempVault } from "../utils/test-helpers.js";
-import { searchVault } from "./search.js";
+import { resetSearchIndexForTests, searchVault } from "./search.js";
 
 let v: { path: string; vaultPath: string; cleanup: () => void };
 
@@ -109,5 +110,106 @@ describe("searchVault ignore support", () => {
     const alpha = results.find((r) => r.file === "Projects/alpha.md");
     expect(alpha).toBeDefined();
     expect(alpha?.links).toBe(0);
+  });
+});
+
+describe("folder-scoped search over the whole-vault index", () => {
+  // Distinctive mtime stamp used to prove the disk cache file was NOT
+  // rewritten (a cold rebuild would overwrite it with a fresh mtime).
+  const OLD_MTIME = new Date("2000-01-01T00:00:00Z");
+
+  test("results never include out-of-folder files; nested subfolders match, same-prefix siblings do not", () => {
+    const vault = createTempVault({
+      "foo/target.md": "# Target\nfolder-scope-marker\n",
+      "foo/bar/nested.md": "# Nested\nfolder-scope-marker\n",
+      "foobar/sibling.md": "# Target sibling\nfolder-scope-marker\n",
+      "other/target.md": "# Other target\nfolder-scope-marker\n",
+    });
+    try {
+      // Content-scan path: "folder-scope-marker" lives in every file.
+      const scoped = searchVault(
+        vault.vaultPath,
+        vault.vaultPath,
+        "folder-scope-marker",
+        { path: "foo" },
+      );
+      expect(scoped.map((r) => r.file).sort()).toEqual([
+        "foo/bar/nested.md",
+        "foo/target.md",
+      ]);
+
+      // Basename path: "target" is the basename of both foo/target.md and
+      // other/target.md — only the in-folder one may be returned.
+      const byName = searchVault(vault.vaultPath, vault.vaultPath, "target", {
+        path: "foo",
+      });
+      expect(byName.map((r) => r.file)).toEqual(["foo/target.md"]);
+    } finally {
+      vault.cleanup();
+    }
+  });
+
+  test("a nonexistent folder returns no results", () => {
+    // Matches prior listFiles behaviour: a missing base dir yields an
+    // empty file list, hence an empty result set (no throw).
+    const results = searchVault(v.vaultPath, v.vaultPath, "alpha", {
+      path: "no-such-folder",
+    });
+    expect(results).toEqual([]);
+  });
+
+  test("backlinks from outside the folder still count", () => {
+    // Resources/guide.md links to [[alpha]] — it is outside the search
+    // scope but still contributes to alpha's backlink count (#87).
+    const results = searchVault(v.vaultPath, v.vaultPath, "alpha", {
+      path: "Projects",
+    });
+    const alpha = results.find((r) => r.file === "Projects/alpha.md");
+    expect(alpha).toBeDefined();
+    expect(alpha?.links).toBe(1);
+  });
+
+  test("a folder search persists a whole-vault snapshot reusable in a fresh process", () => {
+    const scoped = searchVault(v.vaultPath, v.vaultPath, "alpha", {
+      path: "Projects",
+    });
+    expect(scoped.map((r) => r.file)).toEqual(["Projects/alpha.md"]);
+
+    // The persisted snapshot covers the WHOLE vault, not just the folder.
+    const cache = loadSearchCache(v.vaultPath);
+    expect(cache?.folder).toBeNull();
+    expect(cache?.docs.map((d) => d.file)).toContain("Resources/guide.md");
+
+    // Simulate a fresh process: only the disk cache survives.
+    resetSearchIndexForTests();
+
+    // A whole-vault search must be a pure disk hit — a cold rebuild would
+    // rewrite the cache file. Stamp an old mtime to detect any rewrite.
+    const cachePath = path.join(v.vaultPath, "search-cache.json");
+    fs.utimesSync(cachePath, OLD_MTIME, OLD_MTIME);
+    const results = searchVault(v.vaultPath, v.vaultPath, "alpha");
+    expect(fs.statSync(cachePath).mtimeMs).toBe(OLD_MTIME.getTime());
+    expect(results.map((r) => r.file)).toContain("Resources/guide.md");
+    expect(results.map((r) => r.file)).toContain("Projects/alpha.md");
+  });
+
+  test("a disk cache with a non-null folder is treated as a miss and rebuilt", () => {
+    // Build a real whole-vault cache, then mark it as an old-style
+    // per-folder snapshot.
+    searchVault(v.vaultPath, v.vaultPath, "alpha");
+    const cachePath = path.join(v.vaultPath, "search-cache.json");
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+    raw.folder = "Projects";
+    fs.writeFileSync(cachePath, JSON.stringify(raw));
+
+    resetSearchIndexForTests();
+    fs.utimesSync(cachePath, OLD_MTIME, OLD_MTIME);
+
+    const results = searchVault(v.vaultPath, v.vaultPath, "alpha");
+    // The stale snapshot was rejected and a whole-vault cache rewritten.
+    expect(fs.statSync(cachePath).mtimeMs).not.toBe(OLD_MTIME.getTime());
+    expect(loadSearchCache(v.vaultPath)?.folder).toBeNull();
+    expect(results.map((r) => r.file)).toContain("Resources/guide.md");
+    expect(results.map((r) => r.file)).toContain("Projects/alpha.md");
   });
 });
