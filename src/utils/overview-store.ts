@@ -50,13 +50,15 @@ import { loadSqlite } from "./sqlite-store.js";
  *                                           subset of the head keys, since
  *                                           every heading term is also in tf)
  *   folder_cand(folder_id, pos,
- *               term_id, tf)                the folder's keyword CANDIDATES —
+ *               term_id, tf, bigram)        the folder's keyword CANDIDATES —
  *                                           every isCandidateKeyword input is
  *                                           folder-local (bigram counts, the
  *                                           folder's own tokens, heading
  *                                           corroboration), so the filter runs
- *                                           at write time and scoring reads a
- *                                           fraction of folder_tf
+ *                                           at write time; scoring then only
+ *                                           needs (id, tf, df, is-bigram) —
+ *                                           term text is resolved for the ~8
+ *                                           selected keywords, not the rows
  *
  * Everything is keyed by integer term id — there is no in-memory whole-vault
  * dictionary or term→index map: building a folder interns each of its terms
@@ -93,7 +95,7 @@ const SCHEMA_DDL =
     "CREATE TABLE IF NOT EXISTS folder_body(folder_id INTEGER NOT NULL, pos INTEGER NOT NULL, term_id INTEGER NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS folder_bodytop(folder_id INTEGER NOT NULL, rank INTEGER NOT NULL, term_id INTEGER NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY(folder_id, rank)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS folder_head(folder_id INTEGER NOT NULL, pos INTEGER NOT NULL, term_id INTEGER NOT NULL, n INTEGER NOT NULL, only INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS folder_cand(folder_id INTEGER NOT NULL, pos INTEGER NOT NULL, term_id INTEGER NOT NULL, tf INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS folder_cand(folder_id, pos, term_id, tf INTEGER NOT NULL, bigram INTEGER NOT NULL, PRIMARY KEY(folder_id, pos)) WITHOUT ROWID",
   ].join(";\n") + ";";
 
 interface Stmts {
@@ -103,21 +105,21 @@ interface Stmts {
   folderByPath: StatementSync;
   folderUpsert: StatementSync;
   folderDelete: StatementSync;
-  termId: StatementSync;
-  termInsert: StatementSync;
+  termNewBatch: StatementSync;
+  termIdsBatch: StatementSync;
+  tfInsertBatch: StatementSync;
+  bodyInsertBatch: StatementSync;
+  bodyTopInsertBatch: StatementSync;
+  headInsertBatch: StatementSync;
+  candInsertBatch: StatementSync;
   dfDecrement: StatementSync;
   dfIncrement: StatementSync;
   orphanSweep: StatementSync;
   tfDelete: StatementSync;
-  tfInsert: StatementSync;
   bodyDelete: StatementSync;
-  bodyInsert: StatementSync;
   bodyTopDelete: StatementSync;
-  bodyTopInsert: StatementSync;
   headDelete: StatementSync;
-  headInsert: StatementSync;
   candDelete: StatementSync;
-  candInsert: StatementSync;
 }
 
 function prepareAll(db: DatabaseSync): Stmts {
@@ -141,54 +143,83 @@ function prepareAll(db: DatabaseSync): Stmts {
         "warn = excluded.warn RETURNING id",
     ),
     folderDelete: db.prepare("DELETE FROM folders WHERE id = ?"),
-    termId: db.prepare("SELECT id FROM terms WHERE term = ?"),
-    termInsert: db.prepare(
-      "INSERT INTO terms(term, df) VALUES(?, 0) RETURNING id",
+    // Bulk variants: a JSON array of terms/rows crosses the JS↔SQLite
+    // boundary once per ~5000 entries instead of once per entry — a 991-note
+    // folder inserts ~1M rows, where per-row .run() calls were the whole
+    // write cost.
+    termNewBatch: db.prepare(
+      "INSERT INTO terms(term, df) SELECT value, 0 FROM json_each(?) " +
+        "RETURNING id, term",
     ),
-    // df = number of stored folders containing the term. A folder rewrite
-    // decrements the old row set and increments the new one; each term
-    // appears at most once per folder, so plain +-1 is exact.
+    termIdsBatch: db.prepare(
+      "SELECT id, term FROM terms " +
+        "WHERE term IN (SELECT value FROM json_each(?))",
+    ),
+    tfInsertBatch: db.prepare(
+      "INSERT INTO folder_tf(folder_id, pos, term_id, tf) " +
+        "SELECT ?, json_extract(e.value,'$[0]'), " +
+        "json_extract(e.value,'$[1]'), json_extract(e.value,'$[2]') " +
+        "FROM json_each(?) e",
+    ),
+    bodyInsertBatch: db.prepare(
+      "INSERT INTO folder_body(folder_id, pos, term_id, tf) " +
+        "SELECT ?, json_extract(e.value,'$[0]'), " +
+        "json_extract(e.value,'$[1]'), json_extract(e.value,'$[2]') " +
+        "FROM json_each(?) e",
+    ),
+    bodyTopInsertBatch: db.prepare(
+      "INSERT INTO folder_bodytop(folder_id, rank, term_id, tf) " +
+        "SELECT ?, json_extract(e.value,'$[0]'), " +
+        "json_extract(e.value,'$[1]'), json_extract(e.value,'$[2]') " +
+        "FROM json_each(?) e",
+    ),
+    headInsertBatch: db.prepare(
+      "INSERT INTO folder_head(folder_id, pos, term_id, n, only) " +
+        "SELECT ?, json_extract(e.value,'$[0]'), " +
+        "json_extract(e.value,'$[1]'), json_extract(e.value,'$[2]'), " +
+        "json_extract(e.value,'$[3]') FROM json_each(?) e",
+    ),
+    candInsertBatch: db.prepare(
+      "INSERT INTO folder_cand(folder_id, pos, term_id, tf, bigram) " +
+        "SELECT ?, json_extract(e.value,'$[0]'), " +
+        "json_extract(e.value,'$[1]'), json_extract(e.value,'$[2]'), " +
+        "json_extract(e.value,'$[3]') FROM json_each(?) e",
+    ),
+    // df = number of stored folders containing the term. A folder
+    // rewrite applies the old-vs-new id diff (EXCEPT) while the old rows
+    // are still present: increment runs first so both sides see the OLD
+    // row set — an EXCEPT evaluated after the insert would find the new
+    // rows already there and add nothing. Params: (folder_id or json) as
+    // noted per statement.
     dfDecrement: db.prepare(
       "UPDATE terms SET df = df - 1 WHERE id IN " +
-        "(SELECT term_id FROM folder_tf WHERE folder_id = ?)",
+        "(SELECT term_id FROM folder_tf WHERE folder_id = ? " +
+        "EXCEPT SELECT value FROM json_each(?))",
     ),
     dfIncrement: db.prepare(
       "UPDATE terms SET df = df + 1 WHERE id IN " +
-        "(SELECT term_id FROM folder_tf WHERE folder_id = ?)",
+        "(SELECT value FROM json_each(?) " +
+        "EXCEPT SELECT term_id FROM folder_tf WHERE folder_id = ?)",
     ),
-    // Orphaned dictionary rows: df 0 means no folder's tf references the
-    // term. Every head term is also a tf term (buildFolderData folds heading
-    // terms into tf), so tf is the only table the sweep must consult.
+    // Orphaned dictionary rows among the REMOVED ids only: df 0 means no
+    // folder's tf references the term. Every head term is also a tf term
+    // (heading terms are folded into tf), so tf is the only table the sweep
+    // must consult.
     orphanSweep: db.prepare(
       "DELETE FROM terms WHERE df <= 0 AND id IN " +
-        "(SELECT term_id FROM folder_tf WHERE folder_id = ?)",
+        "(SELECT term_id FROM folder_tf WHERE folder_id = ? " +
+        "EXCEPT SELECT value FROM json_each(?))",
     ),
     tfDelete: db.prepare("DELETE FROM folder_tf WHERE folder_id = ?"),
-    tfInsert: db.prepare(
-      "INSERT INTO folder_tf(folder_id, pos, term_id, tf) VALUES(?, ?, ?, ?)",
-    ),
     bodyDelete: db.prepare("DELETE FROM folder_body WHERE folder_id = ?"),
-    bodyInsert: db.prepare(
-      "INSERT INTO folder_body(folder_id, pos, term_id, tf) " +
-        "VALUES(?, ?, ?, ?)",
-    ),
     bodyTopDelete: db.prepare("DELETE FROM folder_bodytop WHERE folder_id = ?"),
-    bodyTopInsert: db.prepare(
-      "INSERT INTO folder_bodytop(folder_id, rank, term_id, tf) " +
-        "VALUES(?, ?, ?, ?)",
-    ),
     headDelete: db.prepare("DELETE FROM folder_head WHERE folder_id = ?"),
-    headInsert: db.prepare(
-      "INSERT INTO folder_head(folder_id, pos, term_id, n, only) " +
-        "VALUES(?, ?, ?, ?, ?)",
-    ),
     candDelete: db.prepare("DELETE FROM folder_cand WHERE folder_id = ?"),
-    candInsert: db.prepare(
-      "INSERT INTO folder_cand(folder_id, pos, term_id, tf) " +
-        "VALUES(?, ?, ?, ?)",
-    ),
   };
 }
+
+/** Rows/terms per json_each bulk call. */
+const CHUNK = 5000;
 
 /** One folder's stored metadata row (no term data). */
 export interface StoredFolderRow {
@@ -288,7 +319,7 @@ function tryOpen(
       "SELECT folder_id, pos, term_id, n, only FROM folder_head LIMIT 0",
     ).get();
     db.prepare(
-      "SELECT folder_id, pos, term_id, tf FROM folder_cand LIMIT 0",
+      "SELECT folder_id, pos, term_id, tf, bigram FROM folder_cand LIMIT 0",
     ).get();
     return db;
   } catch (error) {
@@ -441,13 +472,58 @@ export class SqliteOverviewStore {
     this.stmts.metaSet.run("templates_folder", templatesFolder);
   }
 
-  /** Intern one term; returns its dictionary id. One indexed SELECT for a
-   *  known term, SELECT+INSERT for a new one — no in-memory dictionary. */
-  private intern(term: string): number {
-    const row = this.stmts.termId.get(term) as { id: number } | undefined;
-    if (row !== undefined) return row.id;
-    const inserted = this.stmts.termInsert.get(term) as { id: number };
-    return inserted.id;
+  /**
+   * Intern a folder's whole vocabulary in ~5000-term JSON chunks — one
+   * INSERT OR IGNORE + one id-resolving SELECT per chunk, no in-memory
+   * whole-vault dictionary (the returned map is folder-scoped).
+   */
+  private internAll(terms: Set<string>): Map<string, number> {
+    const list = [...terms];
+    const ids = new Map<string, number>();
+    const missing: string[] = [];
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const rows = this.stmts.termIdsBatch.all(
+        JSON.stringify(list.slice(i, i + CHUNK)),
+      ) as unknown as { id: number; term: string }[];
+      for (const r of rows) ids.set(r.term, r.id);
+      for (const term of list.slice(i, i + CHUNK)) {
+        if (!ids.has(term)) missing.push(term);
+      }
+    }
+    // Only genuinely new terms insert — on an incremental miss that is a
+    // handful, not the folder's whole vocabulary. RETURNING hands back the
+    // fresh ids in the same statement.
+    for (let i = 0; i < missing.length; i += CHUNK) {
+      const rows = this.stmts.termNewBatch.all(
+        JSON.stringify(missing.slice(i, i + CHUNK)),
+      ) as unknown as { id: number; term: string }[];
+      for (const r of rows) ids.set(r.term, r.id);
+    }
+    return ids;
+  }
+
+  /**
+   * A chunked row sink for one bulk insert: rows accumulate up to CHUNK and
+   * flush as one json_each insert-select — so a 1M-row folder never holds a
+   * 1M-entry JS array, only a ~5000-row buffer.
+   */
+  private rowSink(
+    stmt: StatementSync,
+    folderId: number,
+  ): { push(row: number[]): void; flush(): void } {
+    let buf: number[][] = [];
+    return {
+      push: (row: number[]) => {
+        buf.push(row);
+        if (buf.length >= CHUNK) {
+          stmt.run(folderId, JSON.stringify(buf));
+          buf = [];
+        }
+      },
+      flush: () => {
+        if (buf.length > 0) stmt.run(folderId, JSON.stringify(buf));
+      },
+    };
   }
 
   /**
@@ -461,6 +537,7 @@ export class SqliteOverviewStore {
     sig: string,
     raw: RawFolderTerms,
     warnings: string[],
+    storeBody: boolean,
   ): void {
     const folderRow = this.stmts.folderUpsert.get(
       folder,
@@ -472,47 +549,78 @@ export class SqliteOverviewStore {
     ) as { id: number };
     const folderId = folderRow.id;
 
-    // Retire the old row set: df counts move first, then orphaned terms are
-    // swept (while their old folder_tf rows still mark them), then the rows
-    // themselves go. A term re-interned below may get a fresh id — ids carry
-    // no meaning beyond identity, so that is harmless.
-    this.stmts.dfDecrement.run(folderId);
-    this.stmts.orphanSweep.run(folderId);
+    // Intern the folder's stored vocabulary at once: tf and head terms,
+    // body only when this folder is collapse-relevant. head ⊆ tf and
+    // candidates ⊆ tf by construction, so the tf map alone usually covers it.
+    const vocab = new Set<string>([
+      ...raw.tf.keys(),
+      ...(storeBody ? raw.bodyTF.keys() : []),
+      ...raw.headingLineCount.keys(),
+    ]);
+    const ids = this.internAll(vocab);
+
+    // The folder's new tf term-id set — needed before the row loops for the
+    // df diffs, which must see the OLD rows. An int array, not rows.
+    const tfIds: number[] = [];
+    for (const term of raw.tf.keys()) tfIds.push(ids.get(term) as number);
+
+    // df moves while the OLD rows are still present: the EXCEPT diffs
+    // compare new ids against them. +1 for ids only in the new set, -1 for
+    // ids only in the old one, then orphaned terms are swept (df 0 means
+    // nothing references them). A term re-interned later may get a fresh
+    // id — ids carry no meaning beyond identity, so that is harmless.
+    const newIdsJson = JSON.stringify(tfIds);
+    this.stmts.dfIncrement.run(newIdsJson, folderId);
+    this.stmts.dfDecrement.run(folderId, newIdsJson);
+    this.stmts.orphanSweep.run(folderId, newIdsJson);
     this.stmts.candDelete.run(folderId);
     this.stmts.headDelete.run(folderId);
     this.stmts.bodyTopDelete.run(folderId);
     this.stmts.bodyDelete.run(folderId);
     this.stmts.tfDelete.run(folderId);
 
+    // Only now may rows insert (the (folder_id, pos) keys would collide
+    // with the old set). The sinks flush every CHUNK rows, so the JS side
+    // never holds more than a ~5000-row buffer per table.
+    const tfRows = this.rowSink(this.stmts.tfInsertBatch, folderId);
+    const candRows = this.rowSink(this.stmts.candInsertBatch, folderId);
     let pos = 0;
     let candPos = 0;
     for (const [term, tf] of raw.tf) {
-      const termId = this.intern(term);
-      this.stmts.tfInsert.run(folderId, pos++, termId, tf);
-      // Candidates ride along on the tf interning pass — no second lookup.
+      const termId = ids.get(term) as number;
+      tfRows.push([pos++, termId, tf]);
+      // Candidates ride along on the tf pass — same pair, second table.
       if (raw.candidates.has(term)) {
-        this.stmts.candInsert.run(folderId, candPos++, termId, tf);
+        candRows.push([candPos++, termId, tf, term.includes(" ") ? 1 : 0]);
       }
     }
-    pos = 0;
-    for (const [term, tf] of raw.bodyTF) {
-      this.stmts.bodyInsert.run(folderId, pos++, this.intern(term), tf);
+    const bodyRows = this.rowSink(this.stmts.bodyInsertBatch, folderId);
+    if (storeBody) {
+      pos = 0;
+      for (const [term, tf] of raw.bodyTF) {
+        bodyRows.push([pos++, ids.get(term) as number, tf]);
+      }
     }
+    const topRows = this.rowSink(this.stmts.bodyTopInsertBatch, folderId);
     let rank = 0;
     for (const [term, tf] of raw.bodyTop) {
-      this.stmts.bodyTopInsert.run(folderId, rank++, this.intern(term), tf);
+      topRows.push([rank++, ids.get(term) as number, tf]);
     }
+    const headRows = this.rowSink(this.stmts.headInsertBatch, folderId);
     pos = 0;
     for (const [term, n] of raw.headingLineCount) {
-      this.stmts.headInsert.run(
-        folderId,
+      headRows.push([
         pos++,
-        this.intern(term),
+        ids.get(term) as number,
         n,
         raw.headingOnly.has(term) ? 1 : 0,
-      );
+      ]);
     }
-    this.stmts.dfIncrement.run(folderId);
+    tfRows.flush();
+    candRows.flush();
+    bodyRows.flush();
+    topRows.flush();
+    headRows.flush();
   }
 
   /** Delete one folder and every row derived from it (write txn open). */
@@ -522,8 +630,8 @@ export class SqliteOverviewStore {
       | undefined;
     if (row === undefined) return;
     const folderId = row.id;
-    this.stmts.dfDecrement.run(folderId);
-    this.stmts.orphanSweep.run(folderId);
+    this.stmts.dfDecrement.run(folderId, "[]");
+    this.stmts.orphanSweep.run(folderId, "[]");
     this.stmts.candDelete.run(folderId);
     this.stmts.headDelete.run(folderId);
     this.stmts.bodyTopDelete.run(folderId);
@@ -572,6 +680,16 @@ export class SqliteOverviewStore {
     holdUntilHere(stmt);
   }
 
+  /** True when the folder has stored body rows (collapse-relevant). */
+  hasBody(folderId: number): boolean {
+    this.ensureOpen();
+    return (
+      this.db
+        .prepare("SELECT 1 AS x FROM folder_body WHERE folder_id = ? LIMIT 1")
+        .get(folderId) !== undefined
+    );
+  }
+
   /** One folder's body term pairs (id-keyed, first-occurrence order). */
   *streamBody(folderId: number): IterableIterator<{ id: number; tf: number }> {
     this.ensureOpen();
@@ -604,26 +722,62 @@ export class SqliteOverviewStore {
   }
 
   /**
-   * Stream one folder's keyword candidates in stored (first-occurrence)
-   * order — the same join as streamTf over the much smaller candidate set.
+   * One folder's keyword candidates in stored (first-occurrence) order —
+   * the persisted subset of folder_tf that survives isCandidateKeyword.
    */
-  *streamCand(
+  streamCand(
     folderId: number,
-  ): IterableIterator<{ id: number; term: string; tf: number; df: number }> {
+  ): { id: number; tf: number; df: number; bigram: number }[] {
     this.ensureOpen();
-    const stmt = this.db.prepare(
-      "SELECT c.term_id AS id, c.tf AS tf, e.term AS term, e.df AS df " +
-        "FROM folder_cand c JOIN terms e ON e.id = c.term_id " +
-        "WHERE c.folder_id = ? ORDER BY c.pos",
-    );
-    const rows = stmt.iterate(folderId) as IterableIterator<{
+    // .all() over one folder's candidate rows: the C++ row reader is much
+    // cheaper per row than a JS-side iterate() loop, and the rows are pure
+    // integers — term text would cost a UTF-8 decode + string alloc per row
+    // (~2.7M of them vault-wide) and is only needed for the ~8 winners.
+    return this.db
+      .prepare(
+        "SELECT c.term_id AS id, c.tf AS tf, c.bigram AS bigram, e.df AS df " +
+          "FROM folder_cand c JOIN terms e ON e.id = c.term_id " +
+          "WHERE c.folder_id = ? ORDER BY c.pos",
+      )
+      .all(folderId) as unknown as {
       id: number;
-      term: string;
       tf: number;
       df: number;
-    }>;
-    for (const row of rows) yield row;
-    holdUntilHere(stmt);
+      bigram: number;
+    }[];
+  }
+
+  /**
+   * Resolve term text for a small set of term ids (selected keywords and
+   * bigram parts — at most a handful per scored folder).
+   */
+  termTexts(ids: number[]): Map<number, string> {
+    const out = new Map<number, string>();
+    if (ids.length === 0) return out;
+    this.ensureOpen();
+    const rows = this.db
+      .prepare(
+        "SELECT id, term FROM terms " +
+          "WHERE id IN (SELECT value FROM json_each(?))",
+      )
+      .all(JSON.stringify(ids)) as unknown as { id: number; term: string }[];
+    for (const row of rows) out.set(row.id, row.term);
+    return out;
+  }
+
+  /**
+   * Resolve term ids for term text (the unigram parts of a selected bigram,
+   * for suppression — a missing part suppresses nothing).
+   */
+  idsForTerms(terms: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (terms.length === 0) return out;
+    this.ensureOpen();
+    const rows = this.stmts.termIdsBatch.all(
+      JSON.stringify(terms),
+    ) as unknown as { id: number; term: string }[];
+    for (const row of rows) out.set(row.term, row.id);
+    return out;
   }
 
   /**

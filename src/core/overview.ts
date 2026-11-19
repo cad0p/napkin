@@ -1192,6 +1192,54 @@ function buildOverviewRows(
 //  - merge order: children merge in listing order (the order folderFiles
 //    lists folders), parent row first, exactly like the Map-based pipeline.
 
+/**
+ * Score a stored folder from its persisted candidate rows — integer term
+ * ids all the way down. Every row passed isCandidateKeyword at write time
+ * (the check is folder-local), so scoring needs neither term text nor the
+ * folder's heading rows: it scores id-keyed pairs, then resolves text only
+ * for the selected keywords and the unigram parts of selected bigrams
+ * (~maxKeywords small lookups per folder). The stable sort and the bigram
+ * suppression dance mirror extractKeywordsTFIDF exactly.
+ */
+function keywordsFromStoredCandidates(
+  store: SqliteOverviewStore,
+  row: StoredFolderRow,
+  adj: Int32Array,
+  totalFolders: number,
+  maxKeywords: number,
+): string[] {
+  const scored: [number, number, number][] = [];
+  for (const r of store.streamCand(row.id)) {
+    const df = Math.max(1, r.df - adj[r.id]);
+    const idf = Math.log(1 + totalFolders / df);
+    scored.push([r.id, r.tf * idf, r.bigram]);
+  }
+  scored.sort((a, b) => b[1] - a[1]);
+
+  const selected: number[] = [];
+  const suppressed = new Set<number>();
+  for (const [id, , bigram] of scored) {
+    if (selected.length >= maxKeywords) break;
+    if (suppressed.has(id)) continue;
+    selected.push(id);
+    if (bigram === 1) {
+      // Suppress the bigram's unigram parts, by term id — the same test the
+      // string-keyed path performs. A part absent from the dictionary
+      // suppresses nothing, like a string that matches no candidate.
+      const term = store.termTexts([id]).get(id);
+      if (term === undefined) continue;
+      const parts = term.split(" ");
+      const partIds = store.idsForTerms(parts);
+      for (const part of parts) {
+        const pid = partIds.get(part);
+        if (pid !== undefined) suppressed.add(pid);
+      }
+    }
+  }
+  const texts = store.termTexts(selected);
+  return selected.map((id) => texts.get(id) ?? "");
+}
+
 /** Materialize one stored folder's full FolderData (term-id keyed pairs). */
 function loadStoredFolderData(
   store: SqliteOverviewStore,
@@ -1243,6 +1291,38 @@ function overviewFromStore(
   const toBuild: string[] = [];
   const toDelete: string[] = [];
 
+  // Collapse-relevant folders need their full body term rows (merge and
+  // cascade cosine); every other folder never has its body map read, so
+  // those rows are skipped entirely — on this vault shape that is most of
+  // the ~2.7M body entries. Relevance mirrors the collapse gate below:
+  // parent != root, parent depth >= collapseDepth, >= COLLAPSE_MIN_CHILDREN
+  // in-run siblings. Children removed by an earlier (deeper) merge only
+  // shrink a group, so a group that reaches 5 at read time had >=5 here —
+  // relevance computed this way never misses a folder a merge needs.
+  const relevant = new Set<string>();
+  if (collapse) {
+    const childCount = new Map<string, number>();
+    for (const folder of folderFiles.keys()) {
+      if (folder === "/" || folderDepth(folder) > maxDepth) continue;
+      const idx = folder.lastIndexOf("/");
+      const parent = idx === -1 ? "/" : folder.slice(0, idx);
+      childCount.set(parent, (childCount.get(parent) ?? 0) + 1);
+    }
+    for (const folder of folderFiles.keys()) {
+      if (folder === "/" || folderDepth(folder) > maxDepth) continue;
+      const idx = folder.lastIndexOf("/");
+      const parent = idx === -1 ? "/" : folder.slice(0, idx);
+      if (
+        parent !== "/" &&
+        folderDepth(parent) >= collapseDepth &&
+        (childCount.get(parent) ?? 0) >= COLLAPSE_MIN_CHILDREN
+      ) {
+        relevant.add(folder); // potential merge member — needs body rows
+        relevant.add(parent); // merge target — the merged row needs them too
+      }
+    }
+  }
+
   if (wipe) {
     for (const folder of folderFiles.keys()) {
       if (folderDepth(folder) <= maxDepth) toBuild.push(folder);
@@ -1259,7 +1339,13 @@ function overviewFromStore(
         if (row && row.sig !== sig) toDelete.push(folder);
         continue;
       }
-      if (!row || row.sig !== sig) toBuild.push(folder);
+      if (!row || row.sig !== sig) {
+        toBuild.push(folder);
+      } else if (relevant.has(folder) && !store.hasBody(row.id)) {
+        // Became collapse-relevant since it was written: the merge would
+        // need body rows it does not have, so rebuild it.
+        toBuild.push(folder);
+      }
     }
     for (const row of stored) {
       if (!folderFiles.has(row.path)) toDelete.push(row.path);
@@ -1288,6 +1374,7 @@ function overviewFromStore(
           folderFingerprint(files, sigs),
           raw,
           warnings,
+          relevant.has(folder),
         );
       }
       for (const folder of toDelete) store.deleteFolder(folder);
@@ -1497,24 +1584,12 @@ function overviewFromStore(
             e.data.headingOnly,
           );
         } else if (e.row) {
-          const row = e.row;
-          const { lineCount, headingOnly } = store.headRows(row.id);
-          const candidates = (function* (): IterableIterator<KeywordCandidate> {
-            for (const r of store.streamCand(row.id)) {
-              yield {
-                term: r.term,
-                tf: r.tf,
-                df: Math.max(1, r.df - adj[r.id]),
-              };
-            }
-          })();
-          keywords = extractKeywordsTFIDF(
-            candidates,
+          keywords = keywordsFromStoredCandidates(
+            store,
+            e.row,
+            adj,
             totalFolders,
             maxKeywords,
-            e.path,
-            lineCount,
-            headingOnly,
           );
         }
       }
