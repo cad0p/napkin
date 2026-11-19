@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
 
 - *(links)* Keep malformed percent-encoded markdown targets instead of throwing (closes #82)
 - *(search)* Answer folder-scoped searches from the whole-vault index (closes #87)
+- *(search)* Persist the incremental diff, atomically and throttled (closes #84)
 
 ### 💼 Other
 
