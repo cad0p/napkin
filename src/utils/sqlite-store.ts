@@ -345,10 +345,18 @@ export class SqliteStore implements IncrementalIndexStore {
     }
     if (db === null) {
       // Corrupt, not-a-database, or wrong schema — park it and recreate.
-      try {
-        fs.renameSync(dbPath, `${dbPath}.corrupt-${Date.now()}`);
-      } catch {
-        // A missing file is fine; anything else still gets one more try.
+      // The -wal/-shm sidecars must move with it: an orphaned WAL replays
+      // into the fresh database and resurrects the very rows we parked.
+      const stamp = Date.now();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try {
+          fs.renameSync(
+            `${dbPath}${suffix}`,
+            `${dbPath}${suffix}.corrupt-${stamp}`,
+          );
+        } catch {
+          // A missing sidecar is fine; anything else still gets one more try.
+        }
       }
       for (const mode of ["WAL", "DELETE"] as const) {
         db = tryOpen(sqlite, dbPath, mode);
@@ -490,7 +498,10 @@ export class SqliteStore implements IncrementalIndexStore {
         });
         fileMtimes[row.path] = { mtime: row.mtime, size: row.size };
       }
+      // Every file gets an entry, even without links — the JSON snapshot
+      // carries explicit empty arrays and loadFromDiskCache merges the map.
       const outgoingLinks: IndexSnapshot["outgoingLinks"] = {};
+      for (const row of files) outgoingLinks[row.path] = [];
       for (const row of this.stmts.allLinks.all() as unknown as {
         path: string;
         target: string;
@@ -611,6 +622,19 @@ export class SqliteStore implements IncrementalIndexStore {
       // Already rolled back (or never began) — the failed transaction left
       // the previous committed state intact either way.
     }
+  }
+
+  /** Close the underlying database handle (tests; stores are cached). */
+  close(): void {
+    this.db.close();
+  }
+
+  /** Test-only: the persisted per-target link tallies. */
+  linkCountsForTests(): Record<string, number> {
+    const rows = this.db
+      .prepare("SELECT key, n FROM link_counts ORDER BY key")
+      .all() as unknown as { key: string; n: number }[];
+    return Object.fromEntries(rows.map((r) => [r.key, r.n]));
   }
 
   /** Test-only snapshot of the bookkeeping that drives `indexDelta`. */
