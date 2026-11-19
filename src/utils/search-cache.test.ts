@@ -1,12 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import {
-  computeFingerprint,
-  diffFileMtimes,
-  loadSearchCache,
-  saveSearchCache,
-} from "./search-cache.js";
+import { loadSearchCache, saveSearchCache } from "./json-store.js";
+import { computeFingerprint, diffFileMtimes } from "./search-cache.js";
 import { createTempVault } from "./test-helpers.js";
 
 let vault: { path: string; vaultPath: string; cleanup: () => void };

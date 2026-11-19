@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { loadSearchCache } from "../utils/search-cache.js";
+import { loadSearchCache } from "../utils/json-store.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import {
   getCachedDocForTests,
