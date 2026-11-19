@@ -6,16 +6,17 @@ import type { Ignorer } from "./ignore.js";
 
 const CACHE_FILE = "search-cache.json";
 
+/**
+ * Cached doc metadata. Never carries note text (#85): content is read from
+ * disk per query by the content scan and snippet extraction. Older caches
+ * that still embed a `content` field are accepted and the field is discarded
+ * on load, so a warm process never retains note text through this cache.
+ */
 export interface CachedDoc {
   file: string;
   basename: string;
   mtime: number;
   size: number;
-  /**
-   * Full file content, persisted so the warm path can run the content scan
-   * with correct recall (fixes #22).
-   */
-  content: string;
 }
 
 export interface SearchCacheData {
@@ -25,7 +26,7 @@ export interface SearchCacheData {
   fileMtimes: Record<string, FileStatSig>;
   /** JSON-serialized MiniSearch index. */
   index: string;
-  /** Doc metadata (with content — needed by the warm-path content scan). */
+  /** Doc metadata only — never note text (#85). */
   docs: CachedDoc[];
   /** file → inbound backlink count. */
   backlinkCounts: Record<string, number>;
@@ -173,13 +174,37 @@ export function loadSearchCache(configPath: string): SearchCacheData | null {
     ) {
       return null;
     }
-    // docs[].content must be present: v0.10.0 wrote content-less caches whose
-    // warm path ran contentScan over empty content and lost recall (#22). If
-    // any entry lacks content we reject here and cold-rebuild in the new format.
+    // Docs carry metadata only (#85). Rebuild the entries instead of
+    // returning them as parsed so a legacy cache that still embeds
+    // `docs[].content` is accepted (no rejection, correct recall) but the
+    // note text is dropped here — it never reaches the in-memory cache.
+    const docs: CachedDoc[] = [];
     for (const doc of data.docs) {
-      if (typeof doc.content !== "string") return null;
+      if (
+        !doc ||
+        typeof doc.file !== "string" ||
+        typeof doc.basename !== "string" ||
+        typeof doc.mtime !== "number" ||
+        typeof doc.size !== "number"
+      ) {
+        return null;
+      }
+      docs.push({
+        file: doc.file,
+        basename: doc.basename,
+        mtime: doc.mtime,
+        size: doc.size,
+      });
     }
-    return data as SearchCacheData;
+    return {
+      folder: data.folder as string | null,
+      fileMtimes: data.fileMtimes,
+      index: data.index,
+      docs,
+      backlinkCounts: data.backlinkCounts,
+      outgoingLinks: data.outgoingLinks,
+      ignoreFingerprint: data.ignoreFingerprint,
+    };
   } catch {
     return null;
   }
