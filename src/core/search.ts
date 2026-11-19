@@ -214,6 +214,35 @@ export function getCachedDocForTests(
 }
 
 /**
+ * Test-only hook: raw basename BM25 scores for a query, resolved exactly the
+ * way `searchVault` resolves the index (so an incremental diff is applied
+ * first). `searchVault` rounds the composite score to one decimal, which
+ * hides sub-0.05 drift between an incrementally updated index and a cold
+ * build; a test that pins that parity needs the unrounded BM25 scores (#100).
+ * Not exported by the SDK.
+ */
+export function getBasenameScoresForTests(
+  contentPath: string,
+  configPath: string,
+  query: string,
+): Map<string, number> {
+  const config = loadConfig(configPath);
+  const { ignorer, fingerprint } = loadIgnorer(contentPath, configPath);
+  const { basenameIndex } = resolveVaultIndex(
+    contentPath,
+    configPath,
+    ignorer,
+    fingerprint,
+    resolveFreshnessMs(config.search.freshnessMs, undefined),
+  );
+  const scores = new Map<string, number>();
+  for (const result of basenameIndex.search(query)) {
+    scores.set(result.id as string, result.score);
+  }
+  return scores;
+}
+
+/**
  * Test-only hook: a copy of the live backlink counts, so a test can compare
  * the incremental delta against a full recompute. Not exported by the SDK.
  */
@@ -323,8 +352,7 @@ function buildDocsAndBacklinks(
   const links = recomputeAllLinks(docsArr, basenameMap);
 
   // Build basename-only MiniSearch index (fast: ~84ms for 2700 files).
-  const basenameIndex = new MiniSearch({ ...BASENAME_INDEX_OPTIONS });
-  basenameIndex.addAll(docsArr);
+  const basenameIndex = rebuildBasenameIndex(docsArr);
 
   return {
     docs: new Map(docsArr.map((d) => [d.file, d])),
@@ -855,7 +883,7 @@ function isEnumeratedPath(file: string, ignore?: Ignorer): boolean {
 
 function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
   try {
-    const basenameIndex = MiniSearch.loadJSON(cache.index, {
+    const loaded = MiniSearch.loadJSON(cache.index, {
       fields: ["basename"],
       storeFields: ["file"],
       idField: "file",
@@ -877,6 +905,15 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
     }
     const fileMtimes = new Map(Object.entries(cache.fileMtimes));
     const basenameMap = buildBasenameMap(docs.values());
+    // A snapshot written by a version that discarded docs carries their stale
+    // posting entries ("dirt"), and those inflate the BM25 document frequency
+    // of the live docs they precede until a vacuum — the drift #100 fixes on
+    // the incremental path. Rebuilding the basename-only index from the docs
+    // just loaded is cheap (~0.4s per 28.7k notes) and only happens once: the
+    // next diff persists a clean snapshot. loadJSON cannot be repaired in
+    // place, since vacuum() is async and this path is synchronous.
+    const basenameIndex =
+      loaded.dirtCount === 0 ? loaded : rebuildBasenameIndex(docs.values());
     // Derive the per-target tallies from the cached doc metadata and resolve
     // the counts from them (#92). The tallies are memory-only, so the cache
     // format is unchanged; deriving (instead of trusting the persisted
@@ -1094,10 +1131,39 @@ function removeDocLinks(
   }
 }
 
+/** Build a basename-only index from doc metadata (cold build, dirt repair). */
+function rebuildBasenameIndex(docs: Iterable<DocRecord>): MiniSearch {
+  const index = new MiniSearch({ ...BASENAME_INDEX_OPTIONS });
+  index.addAll([...docs]);
+  return index;
+}
+
+/**
+ * Drop one doc from the basename index, using the fields it was indexed with.
+ *
+ * `discard(id)` is the cheaper call, but it only marks the doc's posting
+ * entries as obsolete: they stay in the inverted index until a vacuum, and
+ * `termResults` derives BM25 document frequency from the posting-list size,
+ * decrementing it for a stale entry only when it reaches that entry. Live docs
+ * visited before it therefore score against a document frequency that still
+ * counts documents the index no longer has (#100) — an incrementally updated
+ * index ranked differently from a cold build of the same vault. `remove`
+ * takes the stored fields (we keep file and basename) and deletes the postings
+ * immediately, leaving the statistics exactly those of the live documents.
+ */
+function removeFromBasenameIndex(
+  cache: CachedVaultIndex,
+  doc: DocRecord,
+): void {
+  if (!cache.basenameIndex.has(doc.file)) return;
+  cache.basenameIndex.remove({ file: doc.file, basename: doc.basename });
+}
+
 /** Remove deleted docs from the MiniSearch index, docs map and basename map. */
 function removeFromIndex(cache: CachedVaultIndex, files: string[]): void {
   for (const file of files) {
-    if (cache.basenameIndex.has(file)) cache.basenameIndex.discard(file);
+    const doc = cache.docs.get(file);
+    if (doc) removeFromBasenameIndex(cache, doc);
     cache.docs.delete(file);
     cache.fileMtimes.delete(file);
     const key = path.basename(file, ".md").toLowerCase();
@@ -1117,6 +1183,7 @@ function addToIndex(
 ): void {
   for (const entry of entries) {
     const doc = readDoc(vaultPath, entry.file);
+    const previous = cache.docs.get(doc.file);
     const key = doc.basename.toLowerCase();
     if (!cache.docs.has(doc.file)) {
       const paths = cache.basenameMap.get(key);
@@ -1129,9 +1196,9 @@ function addToIndex(
         cache.basenameMap.set(key, [doc.file]);
       }
     }
-    if (cache.basenameIndex.has(doc.file)) {
-      cache.basenameIndex.discard(doc.file);
-    }
+    // A modified doc keeps its id but may have a new basename, so the old
+    // version must be removed with the fields it was indexed with (#100).
+    if (previous) removeFromBasenameIndex(cache, previous);
     cache.basenameIndex.add(doc);
     cache.docs.set(doc.file, doc);
     cache.fileMtimes.set(doc.file, { mtime: doc.mtime, size: doc.size });
