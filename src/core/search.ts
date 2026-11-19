@@ -32,6 +32,17 @@ const BASENAME_BOOST = 2;
 const BACKLINK_WEIGHT = 0.5;
 const RECENCY_WEIGHT = 1.0;
 
+/**
+ * Minimum interval between two disk-cache writes for the same cache key.
+ *
+ * A long-lived process (the pi extension) re-searches while notes churn: an
+ * incremental diff on every query would rewrite a multi-MB cache far more
+ * often than needed. The first write after the window is immediate (leading
+ * edge — that is what makes a one-shot CLI search persist at all); anything
+ * inside the window coalesces into a single trailing write.
+ */
+const CACHE_WRITE_INTERVAL_MS = 30_000;
+
 export interface SearchResult {
   file: string;
   score: number;
@@ -101,11 +112,40 @@ function memoryCacheKey(contentPath: string, ignoreFp: string): string {
   return `${contentPath}\0${ignoreFp}`;
 }
 
+/** Per cache key: when this process last wrote the disk cache. */
+const lastCacheWriteAt = new Map<string, number>();
+
 /**
- * Test-only hook: clear the process-scope memory cache so a test can
- * simulate a fresh process (where only the disk cache survives).
+ * Per cache key: the pending trailing write scheduled by the throttle.
+ * At most one timer per key — a second dirty diff inside the window only
+ * refreshes the state the timer will serialize.
+ */
+interface PendingCacheWrite {
+  timer: NodeJS.Timeout;
+  configPath: string;
+  state: CachedVaultIndex;
+  ignoreFp: string;
+}
+const pendingCacheWrites = new Map<string, PendingCacheWrite>();
+
+/** Drop a scheduled trailing write, if any. */
+function cancelPendingWrite(cacheKey: string): void {
+  const pending = pendingCacheWrites.get(cacheKey);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingCacheWrites.delete(cacheKey);
+}
+
+/**
+ * Test-only hook: simulate a fresh process by dropping the in-memory cache
+ * AND the throttle bookkeeping (a stale write timestamp or pending trailing
+ * write would otherwise leak into the next test in the same file).
  */
 export function resetSearchIndexForTests(): void {
+  for (const cacheKey of [...pendingCacheWrites.keys()]) {
+    cancelPendingWrite(cacheKey);
+  }
+  lastCacheWriteAt.clear();
   memoryCache.clear();
 }
 
@@ -349,7 +389,9 @@ interface ResolvedIndex {
  *      add/replace changed).
  *   3. Otherwise (cold) build from scratch.
  *
- * In all cases the result is kept in the in-memory cache for reuse.
+ * In all cases the result is kept in the in-memory cache for reuse, and a
+ * non-empty incremental diff is persisted (throttled) so the next process
+ * does not have to re-read the changed notes.
  */
 function resolveVaultIndex(
   contentPath: string,
@@ -363,12 +405,13 @@ function resolveVaultIndex(
 
   const cached = memoryCache.get(memKey);
   if (cached) {
-    return (
-      applyIncrementalDiff(contentPath, cached, ignorer) ?? {
-        basenameIndex: cached.basenameIndex,
-        docs: cached.docs,
-        backlinkCounts: cached.backlinkCounts,
-      }
+    return applyIncrementalOrCached(
+      contentPath,
+      configPath,
+      memKey,
+      cached,
+      ignoreFp,
+      ignorer,
     );
   }
 
@@ -386,31 +429,62 @@ function resolveVaultIndex(
     const loaded = loadFromDiskCache(diskCache);
     if (loaded) {
       memoryCache.set(memKey, loaded);
-      return (
-        applyIncrementalDiff(contentPath, loaded, ignorer) ?? {
-          basenameIndex: loaded.basenameIndex,
-          docs: loaded.docs,
-          backlinkCounts: loaded.backlinkCounts,
-        }
+      return applyIncrementalOrCached(
+        contentPath,
+        configPath,
+        memKey,
+        loaded,
+        ignoreFp,
+        ignorer,
       );
     }
   }
 
   // Cold path — build the whole-vault index from scratch and persist.
   const built = buildDocsAndBacklinks(contentPath, ignorer);
-  persistCache(configPath, built, ignoreFp);
-  const cached2: CachedVaultIndex = {
+  const fresh: CachedVaultIndex = {
     basenameIndex: built.basenameIndex,
     docs: built.docs,
     backlinkCounts: built.backlinkCounts,
     fileMtimes: built.fileMtimes,
   };
-  memoryCache.set(memKey, cached2);
+  memoryCache.set(memKey, fresh);
+  // Goes through the throttle like the incremental path: it writes
+  // immediately (nothing was written for this key yet) and records the write
+  // time, so an immediate follow-up diff coalesces instead of rewriting.
+  persistCacheThrottled(configPath, memKey, fresh, ignoreFp);
   return {
-    basenameIndex: built.basenameIndex,
-    docs: built.docs,
-    backlinkCounts: built.backlinkCounts,
+    basenameIndex: fresh.basenameIndex,
+    docs: fresh.docs,
+    backlinkCounts: fresh.backlinkCounts,
   };
+}
+
+/**
+ * Apply the mtime+size diff to a cached index and persist the result when
+ * anything changed. Returns the cached view unchanged when the cache is
+ * already up-to-date (the stat walk is the only I/O in that case).
+ */
+function applyIncrementalOrCached(
+  contentPath: string,
+  configPath: string,
+  memKey: string,
+  cache: CachedVaultIndex,
+  ignoreFp: string,
+  ignorer: Ignorer,
+): ResolvedIndex {
+  const updated = applyIncrementalDiff(contentPath, cache, ignorer);
+  if (!updated) {
+    return {
+      basenameIndex: cache.basenameIndex,
+      docs: cache.docs,
+      backlinkCounts: cache.backlinkCounts,
+    };
+  }
+  // Without this the disk cache only ever holds the cold snapshot, so every
+  // new process re-reads everything added or edited since (#84).
+  persistCacheThrottled(configPath, memKey, cache, ignoreFp);
+  return updated;
 }
 
 function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
@@ -514,8 +588,8 @@ function applyIncrementalDiff(
 
   cache.backlinkCounts = recomputeBacklinks(cache.docs, basenameMap);
 
-  // NOTE: We intentionally do NOT persist the updated cache to disk here.
-  // The in-memory cache is authoritative for this process lifetime.
+  // Persistence is the caller's job (applyIncrementalOrCached) — it owns the
+  // config path, the ignore fingerprint, and the write throttle.
   return {
     basenameIndex: cache.basenameIndex,
     docs: cache.docs,
@@ -539,12 +613,22 @@ function recomputeBacklinks(
   return counts;
 }
 
+/**
+ * Serialize a cached index to `.napkin/search-cache.json`.
+ *
+ * Cold and incremental paths both call this with the same in-memory shape, so
+ * the on-disk format is a single full snapshot either way — a cache written
+ * incrementally loads exactly like one built cold. Keep the format unchanged
+ * (docs[].content included) so caches from older versions still load.
+ *
+ * Best-effort: search works without a cache, so failures are swallowed.
+ */
 function persistCache(
   configPath: string,
-  built: BuildResult,
+  state: CachedVaultIndex,
   ignoreFp: string,
 ): void {
-  const docsArr = [...built.docs.values()];
+  const docsArr = [...state.docs.values()];
   const outgoingLinks: Record<string, string[]> = {};
   for (const d of docsArr) outgoingLinks[d.file] = d.outgoingLinks;
   try {
@@ -554,8 +638,8 @@ function persistCache(
       // with a non-null folder is an old per-folder snapshot and is
       // treated as a miss.
       folder: null,
-      fileMtimes: Object.fromEntries(built.fileMtimes),
-      index: JSON.stringify(built.basenameIndex),
+      fileMtimes: Object.fromEntries(state.fileMtimes),
+      index: JSON.stringify(state.basenameIndex),
       docs: docsArr.map((d) => ({
         file: d.file,
         basename: d.basename,
@@ -563,13 +647,63 @@ function persistCache(
         mtime: d.mtime,
         size: d.size,
       })),
-      backlinkCounts: Object.fromEntries(built.backlinkCounts),
+      backlinkCounts: Object.fromEntries(state.backlinkCounts),
       outgoingLinks,
       ignoreFingerprint: ignoreFp,
     });
   } catch {
     // Best-effort persistence — search still works without it.
   }
+}
+
+/**
+ * Persist the cache for `cacheKey`, at most once per CACHE_WRITE_INTERVAL_MS.
+ *
+ * Leading edge: the first write after the window happens right away, which is
+ * what makes a one-shot CLI process persist at all. Writes inside the window
+ * are coalesced into a single trailing write of the latest state, on an
+ * `unref()`'d timer so a pending flush never keeps a CLI process alive (a
+ * long-lived extension process flushes normally).
+ */
+function persistCacheThrottled(
+  configPath: string,
+  cacheKey: string,
+  state: CachedVaultIndex,
+  ignoreFp: string,
+): void {
+  const now = Date.now();
+  const elapsed = now - (lastCacheWriteAt.get(cacheKey) ?? 0);
+
+  if (elapsed >= CACHE_WRITE_INTERVAL_MS) {
+    // A blocking call can push us past the deadline before the trailing timer
+    // ran; drop it rather than write the same snapshot twice.
+    cancelPendingWrite(cacheKey);
+    lastCacheWriteAt.set(cacheKey, now);
+    persistCache(configPath, state, ignoreFp);
+    return;
+  }
+
+  const pending = pendingCacheWrites.get(cacheKey);
+  if (pending) {
+    // Inside the window with a flush already scheduled: only refresh what the
+    // trailing write will serialize (the state object is mutated in place, so
+    // in practice this is the same reference).
+    pending.configPath = configPath;
+    pending.state = state;
+    pending.ignoreFp = ignoreFp;
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    const entry = pendingCacheWrites.get(cacheKey);
+    pendingCacheWrites.delete(cacheKey);
+    if (!entry) return;
+    lastCacheWriteAt.set(cacheKey, Date.now());
+    persistCache(entry.configPath, entry.state, entry.ignoreFp);
+  }, CACHE_WRITE_INTERVAL_MS - elapsed);
+  // Never keep the process alive just to flush a cache.
+  timer.unref();
+  pendingCacheWrites.set(cacheKey, { timer, configPath, state, ignoreFp });
 }
 
 // ── Folder scoping (query-time filter) ──────────────────────────

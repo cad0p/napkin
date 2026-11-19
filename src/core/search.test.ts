@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { loadSearchCache } from "../utils/search-cache.js";
 import { createTempVault } from "../utils/test-helpers.js";
 import { resetSearchIndexForTests, searchVault } from "./search.js";
@@ -211,5 +211,162 @@ describe("folder-scoped search over the whole-vault index", () => {
     expect(loadSearchCache(v.vaultPath)?.folder).toBeNull();
     expect(results.map((r) => r.file)).toContain("Resources/guide.md");
     expect(results.map((r) => r.file)).toContain("Projects/alpha.md");
+  });
+});
+
+// ── Incremental cache persistence (#84) ─────────────────────────
+// The disk cache used to be written only on the cold path, so a vault with
+// churn re-read every added/edited note in each new process.
+
+/** Cached mtime+size signature for one file, read back from disk. */
+function cachedSig(vaultPath: string, file: string) {
+  return loadSearchCache(vaultPath)?.fileMtimes[file];
+}
+
+describe("incremental cache persistence", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    resetSearchIndexForTests();
+  });
+
+  test("persists a diff: the on-disk cache carries the new mtime and doc", () => {
+    vi.useFakeTimers();
+    searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
+
+    const alphaPath = path.join(v.vaultPath, "Projects/alpha.md");
+    fs.writeFileSync(
+      alphaPath,
+      "# Alpha\nalpha-project-marker alpha-updated\n",
+    );
+    fs.writeFileSync(
+      path.join(v.vaultPath, "Projects/gamma.md"),
+      "# Gamma\ngamma-note-marker\n",
+    );
+
+    searchVault(v.vaultPath, v.vaultPath, "gamma-note-marker");
+    // The immediate write happened for the cold build, so this diff is inside
+    // the throttle window and flushes on the trailing timer.
+    vi.advanceTimersByTime(30_000);
+
+    const cache = loadSearchCache(v.vaultPath);
+    const stat = fs.statSync(alphaPath);
+    expect(cachedSig(v.vaultPath, "Projects/alpha.md")).toEqual({
+      mtime: stat.mtimeMs,
+      size: stat.size,
+    });
+    expect(cache?.docs.map((d) => d.file)).toContain("Projects/gamma.md");
+    expect(
+      cache?.docs.find((d) => d.file === "Projects/alpha.md")?.content,
+    ).toContain("alpha-updated");
+  });
+
+  test("a folder-scoped search persists a whole-vault snapshot", () => {
+    vi.useFakeTimers();
+    searchVault(v.vaultPath, v.vaultPath, "alpha", { path: "Projects" });
+
+    const alphaPath = path.join(v.vaultPath, "Projects/alpha.md");
+    fs.writeFileSync(
+      alphaPath,
+      "# Alpha\nalpha-project-marker folder-scope-edit\n",
+    );
+
+    // A scoped search shares the whole-vault index (#87), so its diff must
+    // persist a whole-vault snapshot — not a folder slice that a plain
+    // search would have to reject.
+    searchVault(v.vaultPath, v.vaultPath, "alpha", { path: "Projects" });
+    vi.advanceTimersByTime(30_000);
+
+    const cache = loadSearchCache(v.vaultPath);
+    expect(cache?.folder).toBeNull();
+    expect(cache?.docs.map((d) => d.file)).toContain("Resources/guide.md");
+    const stat = fs.statSync(alphaPath);
+    expect(cachedSig(v.vaultPath, "Projects/alpha.md")).toEqual({
+      mtime: stat.mtimeMs,
+      size: stat.size,
+    });
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "a fresh process serves unchanged notes from the persisted cache",
+    () => {
+      vi.useFakeTimers();
+      searchVault(v.vaultPath, v.vaultPath, "beta-project-marker");
+      fs.writeFileSync(
+        path.join(v.vaultPath, "Projects/delta.md"),
+        "# Delta\ndelta-note-marker\n",
+      );
+      searchVault(v.vaultPath, v.vaultPath, "delta-note-marker");
+      vi.advanceTimersByTime(30_000);
+
+      // Simulate a new process: the on-disk cache is all that survives.
+      resetSearchIndexForTests();
+
+      // A re-read of this unchanged note would throw EACCES; the cache hit
+      // serves its persisted content instead.
+      const betaPath = path.join(v.vaultPath, "Projects/beta.md");
+      fs.chmodSync(betaPath, 0o000);
+      try {
+        const beta = searchVault(
+          v.vaultPath,
+          v.vaultPath,
+          "beta-project-marker",
+        );
+        expect(beta.map((r) => r.file)).toContain("Projects/beta.md");
+        // The note added by the previous process is in the cache too.
+        const delta = searchVault(
+          v.vaultPath,
+          v.vaultPath,
+          "delta-note-marker",
+        );
+        expect(delta.map((r) => r.file)).toContain("Projects/delta.md");
+      } finally {
+        fs.chmodSync(betaPath, 0o600);
+      }
+    },
+  );
+
+  test("throttles: leading edge for the first diff, one trailing write after", () => {
+    vi.useFakeTimers();
+    const alphaPath = path.join(v.vaultPath, "Projects/alpha.md");
+
+    searchVault(v.vaultPath, v.vaultPath, "alpha-project-marker");
+    const coldSig = cachedSig(v.vaultPath, "Projects/alpha.md");
+    // Cold build writes immediately — nothing left pending.
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Past the window: the diff is written on the leading edge.
+    vi.advanceTimersByTime(31_000);
+    fs.writeFileSync(alphaPath, "# Alpha\nalpha-v2\n");
+    searchVault(v.vaultPath, v.vaultPath, "alpha-v2");
+    const v2Stat = fs.statSync(alphaPath);
+    const v2Sig = cachedSig(v.vaultPath, "Projects/alpha.md");
+    expect(v2Sig).toEqual({ mtime: v2Stat.mtimeMs, size: v2Stat.size });
+    expect(v2Sig).not.toEqual(coldSig);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Inside the window: nothing is written, one trailing timer is armed.
+    fs.writeFileSync(alphaPath, "# Alpha\nalpha-v3-longer\n");
+    searchVault(v.vaultPath, v.vaultPath, "alpha-v3-longer");
+    expect(cachedSig(v.vaultPath, "Projects/alpha.md")).toEqual(v2Sig);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // A third dirty diff coalesces into that same timer.
+    fs.writeFileSync(alphaPath, "# Alpha\nalpha-v4-longest-yet\n");
+    searchVault(v.vaultPath, v.vaultPath, "alpha-v4-longest-yet");
+    expect(vi.getTimerCount()).toBe(1);
+
+    // One trailing write, with the latest state.
+    vi.advanceTimersByTime(30_000);
+    expect(vi.getTimerCount()).toBe(0);
+    const v4Stat = fs.statSync(alphaPath);
+    expect(cachedSig(v.vaultPath, "Projects/alpha.md")).toEqual({
+      mtime: v4Stat.mtimeMs,
+      size: v4Stat.size,
+    });
+
+    // The trailing write restarts the window: an immediate diff defers again.
+    fs.writeFileSync(alphaPath, "# Alpha\nalpha-v5-even-longer\n");
+    searchVault(v.vaultPath, v.vaultPath, "alpha-v5-even-longer");
+    expect(vi.getTimerCount()).toBe(1);
   });
 });
