@@ -334,8 +334,8 @@ describe("search", () => {
   });
 
   test("creates cache file after first search", async () => {
-    // The default store is SQLite (#106): .napkin/cache/index-v1.db.
-    const dbPath = path.join(v.vaultPath, "cache", "index-v1.db");
+    // The default store is SQLite (#106): .napkin/cache/index-v2.db.
+    const dbPath = path.join(v.vaultPath, "cache", "index-v2.db");
     expect(fs.existsSync(dbPath)).toBe(false);
 
     await captureJson(() =>

@@ -2,23 +2,39 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import type {
-  IncrementalIndexStore,
   IndexDiff,
+  IndexDiffDoc,
   IndexedDoc,
   IndexSnapshot,
+  QueryableIndexStore,
 } from "./index-store.js";
 import { JsonStore } from "./json-store.js";
-import { linkCountKey, linkTarget } from "./search-cache.js";
+import {
+  analyzeName,
+  type NamePosting,
+  type NameSource,
+} from "./name-search.js";
+import {
+  type FileDiff,
+  type FileMtimeEntry,
+  linkCountKey,
+  linkTarget,
+} from "./search-cache.js";
 
 /**
  * The SQLite search-index store (#106, part of #94).
  *
- * `.napkin/cache/index-v1.db` — a versioned file name so napkin versions that
+ * `.napkin/cache/index-v2.db` — a versioned file name so napkin versions that
  * change the schema never fight over one database. WAL mode, per-file
- * upserts/deletes inside one transaction per diff, and the basename
- * MiniSearch index as a blob rewritten only when the basename set changes.
+ * upserts/deletes inside one transaction per diff.
  *
- * Schema (v1, `PRAGMA user_version = 1`):
+ * Since #109 the store is QUERIED, not loaded: `searchVault` reads what a
+ * query needs (candidate paths, mtimes, backlink tallies, basename postings)
+ * and keeps nothing resident. The basename MiniSearch blob of v1 is replaced
+ * by SQL postings (`name_terms`, `name_vocab`, `files.name_len`) that
+ * `name-search.ts` ranks with MiniSearch's exact BM25/prefix/fuzzy formulas.
+ *
+ * Schema (v2, `PRAGMA user_version = 2`):
  *
  *   meta(k, v)                       'gen', 'ignore_fp'; reserved: 'scan_lease',
  *                                    'last_scan_at', 'body_state' (later issues)
@@ -26,24 +42,24 @@ import { linkCountKey, linkTarget } from "./search-cache.js";
  *                                    direct file is added/changed/removed
  *                                    (reserved for the overview store, #94 s4)
  *   files(id, path, folder_id, basename, basename_lc, depth,
- *         mtime, size, ino, gen)     one row per note; gen = the generation the
- *                                    row was last written
+ *         mtime, size, ino, gen,
+ *         name_len)                  one row per note; gen = the generation the
+ *                                    row was last written; name_len = MiniSearch
+ *                                    field length of the basename
+ *   name_terms(term, file_id, tf)    basename postings; name_vocab(term) the
+ *                                    distinct terms (fuzzy expansion)
  *   links(src, target)               raw outgoing wikilink targets per file id
  *   link_counts(key, n)              classified target key → occurrences;
  *                                    key = lc basename (bare) or 'p:'+ref —
  *                                    the future cross-process delta feed
- *   tombstones(path, basename, gen)  deletions since the last blob write;
- *                                    a later issue prunes them by age
- *   blobs(k, gen, v)                 'minisearch-basename' → serialized index
+ *   tombstones(path, basename, gen)  deletions; a later issue prunes by age
  *
  * Generations (`meta.gen`) increase once per write transaction. A file's row
  * commits in the same transaction as everything derived from it, so a crash
  * can never leave a signature that claims data which is missing — the next
- * scan sees the old signature and redoes the work. The basename blob carries
- * the generation it was written at; `load()` reports the files/tombstones
- * newer than it as `IndexSnapshot.indexDelta`, so a loading process repairs
- * the stale blob in memory instead of paying an O(vault) blob rewrite on
- * every edit.
+ * scan sees the old signature and redoes the work. A file's basename postings
+ * commit in the same transaction as its row; edits never touch them (a
+ * basename cannot change without a new path).
  *
  * The DB is disposable: open failure, `SQLITE_NOTADB`/corruption, or a
  * schema-version mismatch renames the file aside and recreates it; a second
@@ -56,9 +72,14 @@ type DatabaseSync = import("node:sqlite").DatabaseSync;
 type StatementSync = import("node:sqlite").StatementSync;
 
 const CACHE_DIR = "cache";
-const DB_FILE = "index-v1.db";
-const SCHEMA_VERSION = 1;
-const BASENAME_BLOB_KEY = "minisearch-basename";
+const DB_FILE = "index-v2.db";
+const SCHEMA_VERSION = 2;
+
+/** Test seam: SQLite busy timeout in ms (default 5000). */
+let busyTimeoutMs = 5000;
+export function setBusyTimeoutForTests(ms: number): void {
+  busyTimeoutMs = ms;
+}
 
 let sqliteModule: SqliteModule | null | undefined;
 
@@ -129,7 +150,8 @@ CREATE TABLE IF NOT EXISTS files(
   mtime REAL NOT NULL,
   size INTEGER NOT NULL,
   ino INTEGER,
-  gen INTEGER NOT NULL
+  gen INTEGER NOT NULL,
+  name_len INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS files_folder ON files(folder_id);
 CREATE INDEX IF NOT EXISTS files_gen ON files(gen);
@@ -148,11 +170,15 @@ CREATE TABLE IF NOT EXISTS tombstones(
   basename TEXT NOT NULL,
   gen INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS blobs(
-  k TEXT PRIMARY KEY,
-  gen INTEGER NOT NULL,
-  v BLOB
-);
+CREATE TABLE IF NOT EXISTS name_terms(
+  term TEXT NOT NULL,
+  file_id INTEGER NOT NULL,
+  tf INTEGER NOT NULL,
+  PRIMARY KEY(term, file_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS name_vocab(
+  term TEXT PRIMARY KEY
+) WITHOUT ROWID;
 `;
 
 /** Statements shared by the write paths; prepared once per open store. */
@@ -170,11 +196,13 @@ interface Stmts {
   countPrune: StatementSync;
   tombUpsert: StatementSync;
   tombDelete: StatementSync;
-  blobUpsert: StatementSync;
-  blobGet: StatementSync;
+  nameInsert: StatementSync;
+  nameDelete: StatementSync;
+  vocabInsert: StatementSync;
+  vocabPrune: StatementSync;
+  fileRow: StatementSync;
   allFiles: StatementSync;
   allLinks: StatementSync;
-  tombsSince: StatementSync;
   fileCount: StatementSync;
 }
 
@@ -196,12 +224,13 @@ function prepareAll(db: DatabaseSync): Stmts {
     ),
     fileUpsert: db.prepare(
       "INSERT INTO files(" +
-        "path, folder_id, basename, basename_lc, depth, mtime, size, ino, gen" +
-        ") VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?) " +
+        "path, folder_id, basename, basename_lc, depth, mtime, size, ino, gen, name_len" +
+        ") VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) " +
         "ON CONFLICT(path) DO UPDATE SET " +
         "folder_id = excluded.folder_id, basename = excluded.basename, " +
         "basename_lc = excluded.basename_lc, depth = excluded.depth, " +
-        "mtime = excluded.mtime, size = excluded.size, gen = excluded.gen",
+        "mtime = excluded.mtime, size = excluded.size, gen = excluded.gen, " +
+        "name_len = excluded.name_len",
     ),
     fileIdByPath: db.prepare("SELECT id FROM files WHERE path = ?"),
     fileDelete: db.prepare("DELETE FROM files WHERE path = ?"),
@@ -221,11 +250,18 @@ function prepareAll(db: DatabaseSync): Stmts {
         "gen = excluded.gen",
     ),
     tombDelete: db.prepare("DELETE FROM tombstones WHERE path = ?"),
-    blobUpsert: db.prepare(
-      "INSERT INTO blobs(k, gen, v) VALUES(?, ?, ?) " +
-        "ON CONFLICT(k) DO UPDATE SET gen = excluded.gen, v = excluded.v",
+    nameInsert: db.prepare(
+      "INSERT OR REPLACE INTO name_terms(term, file_id, tf) VALUES(?, ?, ?)",
     ),
-    blobGet: db.prepare("SELECT gen, v FROM blobs WHERE k = ?"),
+    nameDelete: db.prepare(
+      "DELETE FROM name_terms WHERE term = ? AND file_id = ?",
+    ),
+    vocabInsert: db.prepare("INSERT OR IGNORE INTO name_vocab(term) VALUES(?)"),
+    vocabPrune: db.prepare(
+      "DELETE FROM name_vocab WHERE term = ? AND NOT EXISTS " +
+        "(SELECT 1 FROM name_terms WHERE term = ?)",
+    ),
+    fileRow: db.prepare("SELECT id, basename FROM files WHERE path = ?"),
     allFiles: db.prepare(
       "SELECT id, path, basename, mtime, size, gen FROM files",
     ),
@@ -236,9 +272,6 @@ function prepareAll(db: DatabaseSync): Stmts {
     // preserves the rowid order the per-row query produced.
     allLinks: db.prepare(
       "SELECT src, json_group_array(target) AS targets FROM links GROUP BY src",
-    ),
-    tombsSince: db.prepare(
-      "SELECT path, basename FROM tombstones WHERE gen > ? ORDER BY path",
     ),
     fileCount: db.prepare("SELECT COUNT(*) AS n FROM files"),
   };
@@ -276,15 +309,13 @@ function tryOpen(
 ): DatabaseSync | null {
   let db: DatabaseSync | undefined;
   try {
-    db = new sqlite.DatabaseSync(dbPath, { timeout: 5000 });
+    db = new sqlite.DatabaseSync(dbPath, { timeout: busyTimeoutMs });
     db.exec(`PRAGMA journal_mode = ${journalMode}`);
     db.exec("PRAGMA synchronous = NORMAL");
-    db.exec("PRAGMA busy_timeout = 5000");
-    // 2 MB page cache: enough for the per-file write path, and after a
-    // full-snapshot load the DB does no more reads — a bigger cache would
-    // retain tens of MB of vault pages as anonymous RSS per process (#106
-    // review). The cross-process read path can revisit this.
-    db.exec("PRAGMA cache_size = -512");
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+    // 2 MB page cache: the connection is closed after every search (#109),
+    // so nothing stays resident between queries.
+    db.exec("PRAGMA cache_size = -2048");
     db.exec("PRAGMA foreign_keys = OFF");
     const row = db.prepare("PRAGMA user_version").get() as
       | { user_version: number }
@@ -301,11 +332,14 @@ function tryOpen(
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     // Probe the tables a schema-skewed file might be missing columns on.
     db.prepare(
-      "SELECT id, path, folder_id, basename, basename_lc, depth, mtime, size, ino, gen FROM files LIMIT 0",
+      "SELECT id, path, folder_id, basename, basename_lc, depth, mtime, size, ino, gen, name_len FROM files LIMIT 0",
     ).get();
+    db.prepare("SELECT term, file_id, tf FROM name_terms LIMIT 0").get();
+    db.prepare("SELECT term FROM name_vocab LIMIT 0").get();
     db.prepare("SELECT src, target FROM links LIMIT 0").get();
     return db;
-  } catch {
+  } catch (error) {
+    lastOpenError = error instanceof Error ? error.message : String(error);
     try {
       db?.close();
     } catch {
@@ -315,7 +349,10 @@ function tryOpen(
   }
 }
 
-export class SqliteStore implements IncrementalIndexStore {
+/** Why the last `tryOpen` failed, so a reopen failure can say corrupt vs busy. */
+let lastOpenError = "";
+
+export class SqliteStore implements QueryableIndexStore, NameSource {
   /**
    * True while `db` is closed. The connection is closed at the end of
    * `load()` — the one bulk read — and lazily reopened by `ensureOpen()`
@@ -350,7 +387,7 @@ export class SqliteStore implements IncrementalIndexStore {
         return;
       }
     }
-    throw new Error(`cannot reopen index db ${this.dbPath}`);
+    throw new Error(`cannot reopen index db ${this.dbPath}: ${lastOpenError}`);
   }
 
   private closeDb(): void {
@@ -394,17 +431,7 @@ export class SqliteStore implements IncrementalIndexStore {
       // Corrupt, not-a-database, or wrong schema — park it and recreate.
       // The -wal/-shm sidecars must move with it: an orphaned WAL replays
       // into the fresh database and resurrects the very rows we parked.
-      const stamp = Date.now();
-      for (const suffix of ["", "-wal", "-shm"]) {
-        try {
-          fs.renameSync(
-            `${dbPath}${suffix}`,
-            `${dbPath}${suffix}.corrupt-${stamp}`,
-          );
-        } catch {
-          // A missing sidecar is fine; anything else still gets one more try.
-        }
-      }
+      parkAside(dbPath);
       for (const mode of ["WAL", "DELETE"] as const) {
         db = tryOpen(sqlite, dbPath, mode);
         if (db !== null) break;
@@ -418,6 +445,74 @@ export class SqliteStore implements IncrementalIndexStore {
   }
 
   /**
+   * Import file rows and links from a valid v1 database (#106 layout), so the
+   * move to v2 does not cost a cold build. The v1 file is only read and is
+   * left in place: older napkin processes keep writing it until they restart.
+   * Name postings are derived from the basenames by `replaceAll`.
+   */
+  private importV1(): boolean {
+    const v1Path = path.join(path.dirname(this.dbPath), "index-v1.db");
+    if (!fs.existsSync(v1Path)) return false;
+    const sqlite = loadSqlite();
+    if (sqlite === null) return false;
+    let v1: DatabaseSync | undefined;
+    try {
+      v1 = new sqlite.DatabaseSync(v1Path, { readOnly: true, timeout: 2000 });
+      const fp = v1.prepare("SELECT v FROM meta WHERE k = 'ignore_fp'").get() as
+        | { v: unknown }
+        | undefined;
+      if (typeof fp?.v !== "string") return false;
+      const links = new Map<number, string[]>();
+      // Each statement is used again after its loop (holdUntilHere): on
+      // Node 22.13 an iterator does not keep its statement alive, and GC can
+      // finalize it mid-loop ("statement has been finalized").
+      const linkStmt = v1.prepare(
+        "SELECT src, target FROM links ORDER BY rowid",
+      );
+      for (const row of linkStmt.iterate() as Iterable<{
+        src: number;
+        target: string;
+      }>) {
+        const list = links.get(row.src);
+        if (list) list.push(row.target);
+        else links.set(row.src, [row.target]);
+      }
+      holdUntilHere(linkStmt);
+      const docs: IndexDiffDoc[] = [];
+      const fileStmt = v1.prepare(
+        "SELECT id, path, basename, mtime, size FROM files ORDER BY path",
+      );
+      for (const row of fileStmt.iterate() as Iterable<{
+        id: number;
+        path: string;
+        basename: string;
+        mtime: number;
+        size: number;
+      }>) {
+        docs.push({
+          file: row.path,
+          basename: row.basename,
+          mtime: row.mtime,
+          size: row.size,
+          outgoingLinks: links.get(row.id) ?? [],
+        });
+      }
+      holdUntilHere(fileStmt);
+      if (docs.length === 0) return false;
+      this.replaceAll(docs, fp.v);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      try {
+        v1?.close();
+      } catch {
+        // Read-only handle; nothing to flush.
+      }
+    }
+  }
+
+  /**
    * One-shot migration: an empty database adopts a valid JSON snapshot
    * instead of forcing the first SqliteStore search into a cold build.
    * The JSON file is left in place — it is still the fallback store's cache,
@@ -428,7 +523,8 @@ export class SqliteStore implements IncrementalIndexStore {
       this.ensureOpen();
       const count = this.stmts.fileCount.get() as { n: number } | undefined;
       if ((count?.n ?? 0) > 0) return;
-      if (this.stmts.blobGet.get(BASENAME_BLOB_KEY) !== undefined) return;
+      if (this.readMeta().ignoreFp !== undefined) return;
+      if (this.importV1()) return;
       const snapshot = new JsonStore(this.configPath).load();
       if (snapshot !== null) this.save(snapshot);
     } catch {
@@ -442,6 +538,17 @@ export class SqliteStore implements IncrementalIndexStore {
    * the JSON store's replace-everything semantics.
    */
   save(snapshot: IndexSnapshot): void {
+    this.replaceAll(
+      snapshot.docs.map((doc) => ({
+        ...doc,
+        outgoingLinks: snapshot.outgoingLinks[doc.file] ?? [],
+      })),
+      snapshot.ignoreFingerprint,
+    );
+  }
+
+  /** Replace the whole index with `docs` in one transaction (cold build). */
+  replaceAll(docs: IndexDiffDoc[], ignoreFingerprint: string): void {
     this.ensureOpen();
     const db = this.db;
     db.exec("BEGIN IMMEDIATE");
@@ -452,19 +559,14 @@ export class SqliteStore implements IncrementalIndexStore {
       db.exec("DELETE FROM folders");
       db.exec("DELETE FROM link_counts");
       db.exec("DELETE FROM tombstones");
-      db.exec("DELETE FROM blobs");
+      db.exec("DELETE FROM name_terms");
+      db.exec("DELETE FROM name_vocab");
       const countDeltas = new Map<string, number>();
-      for (const doc of snapshot.docs) {
-        this.upsertDoc(
-          gen,
-          doc,
-          snapshot.outgoingLinks[doc.file] ?? [],
-          countDeltas,
-        );
+      for (const doc of docs) {
+        this.upsertDoc(gen, doc, doc.outgoingLinks, countDeltas);
       }
       this.applyCountDeltas(countDeltas);
-      this.putBlob(gen, snapshot.index);
-      this.stmts.setMeta.run("ignore_fp", snapshot.ignoreFingerprint);
+      this.stmts.setMeta.run("ignore_fp", ignoreFingerprint);
       db.exec("COMMIT");
     } catch (err) {
       this.rollback();
@@ -477,9 +579,8 @@ export class SqliteStore implements IncrementalIndexStore {
    *
    * Per file: replace the `files` row (id preserved via the UNIQUE path),
    * replace its `links` rows, and adjust `link_counts` by the difference
-   * between the old and new link sets. Deletes write a tombstone. The
-   * basename blob is rewritten only when `diff.indexBlob` is present — the
-   * caller sets it iff the basename set changed.
+   * between the old and new link sets. Deletes write a tombstone and drop
+   * the file's basename postings.
    */
   saveDiff(diff: IndexDiff): void {
     this.ensureOpen();
@@ -489,14 +590,15 @@ export class SqliteStore implements IncrementalIndexStore {
       const gen = this.bumpGen();
       const countDeltas = new Map<string, number>();
       for (const removed of diff.remove) {
-        const row = this.stmts.fileIdByPath.get(removed.file) as
-          | { id: number }
+        const row = this.stmts.fileRow.get(removed.file) as
+          | { id: number; basename: string }
           | undefined;
         if (row !== undefined) {
           for (const { target } of this.linksOf(row.id)) {
             bumpDelta(countDeltas, linkCountKey(linkTarget(target)), -1);
           }
           this.stmts.linksDelete.run(row.id);
+          this.dropNameTerms(row.id, row.basename);
           this.stmts.fileDelete.run(removed.file);
         }
         this.touchFolder(parentDir(removed.file), gen);
@@ -504,9 +606,6 @@ export class SqliteStore implements IncrementalIndexStore {
       }
       for (const doc of diff.upsert) {
         this.upsertDoc(gen, doc, doc.outgoingLinks, countDeltas);
-      }
-      if (diff.indexBlob !== undefined) {
-        this.putBlob(gen, diff.indexBlob);
       }
       this.stmts.setMeta.run("ignore_fp", diff.ignoreFingerprint);
       this.applyCountDeltas(countDeltas);
@@ -518,7 +617,11 @@ export class SqliteStore implements IncrementalIndexStore {
   }
 
   /**
-   * Load the stored snapshot, or null when there is none usable.
+   * Materialize the stored metadata as a snapshot, or null when there is
+   * none usable. Search does NOT use this since #109 (it queries the store
+   * per search); it remains for the JSON-compat contract, tests and
+   * diagnostics. `index` is empty: the basename index is never serialized,
+   * and a consumer that feeds it to MiniSearch.loadJSON simply cold-builds.
    *
    * Never throws: a database that fails mid-read is corrupt or unreadable,
    * which the caller treats exactly like a missing cache — a cold build.
@@ -530,12 +633,8 @@ export class SqliteStore implements IncrementalIndexStore {
     try {
       this.ensureOpen();
       const meta = this.readMeta();
-      const blob = this.stmts.blobGet.get(BASENAME_BLOB_KEY) as
-        | { gen: number; v: unknown }
-        | undefined;
-      // No blob means nothing was ever saved (or only a failed import).
-      if (blob === undefined || meta.ignoreFp === undefined) return null;
-      const index = typeof blob.v === "string" ? blob.v : String(blob.v);
+      // No fingerprint means nothing was ever saved (or a failed import).
+      if (meta.ignoreFp === undefined) return null;
 
       // Streamed, not .all(): materialising 200k row objects at once was
       // ~45 MB of transient heap that V8 then retains as arena. iterate()
@@ -544,7 +643,6 @@ export class SqliteStore implements IncrementalIndexStore {
       const fileMtimes: IndexSnapshot["fileMtimes"] = {};
       const outgoingLinks: IndexSnapshot["outgoingLinks"] = {};
       const idToPath = new Map<number, string>();
-      const add: string[] = [];
       for (const row of this.stmts.allFiles.iterate() as Iterable<FileRow>) {
         docs.push({
           file: row.path,
@@ -557,7 +655,6 @@ export class SqliteStore implements IncrementalIndexStore {
         // Every file gets an entry, even without links — the JSON snapshot
         // carries explicit empty arrays and loadFromDiskCache merges the map.
         outgoingLinks[row.path] = [];
-        if (row.gen > blob.gen) add.push(row.path);
       }
       // JS string sort (UTF-16 code units) — the same order listFiles'
       // results.sort() produces, so the doc order — and every tie-break that
@@ -581,23 +678,14 @@ export class SqliteStore implements IncrementalIndexStore {
         // Older SQLite builds may lack it; memory stays cached, still fine.
       }
 
-      const remove = (
-        this.stmts.tombsSince.all(blob.gen) as unknown as {
-          path: string;
-          basename: string;
-        }[]
-      ).map((t) => ({ file: t.path, basename: t.basename }));
-
       return {
         folder: null,
         fileMtimes,
-        index,
+        index: "",
         docs,
         backlinkCounts: {},
         outgoingLinks,
         ignoreFingerprint: meta.ignoreFp,
-        indexDelta:
-          add.length > 0 || remove.length > 0 ? { add, remove } : undefined,
       };
     } catch {
       return null;
@@ -605,6 +693,186 @@ export class SqliteStore implements IncrementalIndexStore {
       // See the closed flag docs: release the connection after the bulk read.
       this.closeDb();
     }
+  }
+
+  // ── Query path (#109) ───────────────────────────────────────────
+  //
+  // Everything below reads on demand and returns plain values; nothing is
+  // cached on the instance. `release()` closes the connection so a process
+  // between searches holds no SQLite memory either.
+
+  /** True when the store holds an index built under this ignore state. */
+  isReady(ignoreFingerprint: string): boolean {
+    this.ensureOpen();
+    return this.readMeta().ignoreFp === ignoreFingerprint;
+  }
+
+  hasFile(file: string): boolean {
+    this.ensureOpen();
+    return this.stmts.fileIdByPath.get(file) !== undefined;
+  }
+
+  /**
+   * Compare a fresh stat walk against the stored signatures. The stored rows
+   * are streamed one at a time; the only whole-vault structure is the walk
+   * result the caller already holds. A file is changed when mtime OR size
+   * differs, like `diffFileMtimes`.
+   */
+  diffAgainst(current: FileMtimeEntry[]): FileDiff {
+    this.ensureOpen();
+    const byFile = new Map<string, FileMtimeEntry>();
+    for (const entry of current) byFile.set(entry.file, entry);
+    const unchanged = new Set<string>();
+    const toRemove: string[] = [];
+    // Used again after the loop (Node 22.13's iterator does not keep its
+    // statement alive; see holdUntilHere).
+    const stmt = this.db.prepare("SELECT path, mtime, size FROM files");
+    const rows = stmt.iterate() as Iterable<{
+      path: string;
+      mtime: number;
+      size: number;
+    }>;
+    for (const row of rows) {
+      const entry = byFile.get(row.path);
+      if (entry === undefined) toRemove.push(row.path);
+      else if (entry.mtime === row.mtime && entry.size === row.size) {
+        unchanged.add(row.path);
+      }
+    }
+    holdUntilHere(stmt);
+    const toAdd = current.filter((entry) => !unchanged.has(entry.file));
+    return {
+      toAdd,
+      toRemove,
+      unchanged: toAdd.length === 0 && toRemove.length === 0,
+    };
+  }
+
+  /** Stream indexed paths in order, optionally within a folder scope. */
+  *scanPaths(folderScope: string | null): IterableIterator<string> {
+    this.ensureOpen();
+    const stmt =
+      folderScope === null
+        ? this.db.prepare("SELECT path FROM files ORDER BY path")
+        : this.db.prepare(
+            "SELECT path FROM files WHERE path >= ? AND path < ? ORDER BY path",
+          );
+    const rows = (
+      folderScope === null
+        ? stmt.iterate()
+        : stmt.iterate(`${folderScope}/`, `${folderScope}0`)
+    ) as Iterable<{ path: string }>;
+    for (const row of rows) yield row.path;
+    holdUntilHere(stmt);
+  }
+
+  /**
+   * Recency and resolved backlink count for each path, in one query.
+   * Resolution mirrors search.ts `resolveAllCounts`: a path-style link counts
+   * for the file spelled exactly like its ref; a bare link counts for the
+   * shallowest file of its basename (ties by path).
+   */
+  hitInfo(files: string[]): Map<string, { mtime: number; links: number }> {
+    this.ensureOpen();
+    const out = new Map<string, { mtime: number; links: number }>();
+    if (files.length === 0) return out;
+    const rows = this.db
+      .prepare(
+        "SELECT f.path AS path, f.mtime AS mtime, " +
+          "COALESCE((SELECT n FROM link_counts WHERE key = 'p:' || f.path), 0) AS pn, " +
+          "CASE WHEN f.path = (SELECT g.path FROM files g " +
+          "WHERE g.basename_lc = f.basename_lc ORDER BY g.depth, g.path LIMIT 1) " +
+          "THEN COALESCE((SELECT n FROM link_counts WHERE key = f.basename_lc), 0) " +
+          "ELSE 0 END AS bn " +
+          "FROM files f WHERE f.path IN (SELECT value FROM json_each(?))",
+      )
+      .all(JSON.stringify(files)) as unknown as {
+      path: string;
+      mtime: number;
+      pn: number;
+      bn: number;
+    }[];
+    for (const row of rows) {
+      out.set(row.path, { mtime: row.mtime, links: row.pn + row.bn });
+    }
+    return out;
+  }
+
+  nameStats(): { docs: number; lenSum: number } {
+    this.ensureOpen();
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS docs, COALESCE(SUM(name_len), 0) AS lenSum FROM files",
+      )
+      .get() as { docs: number; lenSum: number };
+    return { docs: row.docs, lenSum: row.lenSum };
+  }
+
+  postingsWithPrefix(prefix: string): NamePosting[] {
+    this.ensureOpen();
+    return this.db
+      .prepare(
+        "SELECT n.term AS term, n.file_id AS fileId, n.tf AS tf, " +
+          "f.name_len AS nameLen, f.path AS path " +
+          "FROM name_terms n JOIN files f ON f.id = n.file_id " +
+          "WHERE n.term >= ? AND n.term < ? ORDER BY n.term, n.file_id",
+      )
+      .all(prefix, prefixUpperBound(prefix)) as unknown as NamePosting[];
+  }
+
+  postingsForTerms(terms: string[]): NamePosting[] {
+    this.ensureOpen();
+    if (terms.length === 0) return [];
+    return this.db
+      .prepare(
+        "SELECT n.term AS term, n.file_id AS fileId, n.tf AS tf, " +
+          "f.name_len AS nameLen, f.path AS path " +
+          "FROM name_terms n JOIN files f ON f.id = n.file_id " +
+          "WHERE n.term IN (SELECT value FROM json_each(?)) " +
+          "ORDER BY n.term, n.file_id",
+      )
+      .all(JSON.stringify(terms)) as unknown as NamePosting[];
+  }
+
+  vocabBetween(min: number, max: number): string[] {
+    this.ensureOpen();
+    return (
+      this.db
+        .prepare(
+          "SELECT term FROM name_vocab WHERE length(term) BETWEEN ? AND ? ORDER BY term",
+        )
+        .all(min, max) as unknown as { term: string }[]
+    ).map((r) => r.term);
+  }
+
+  /**
+   * Run the read phase of one search inside a single read transaction, so
+   * statistics, postings, the path scan and hit info all come from the same
+   * committed state even when another process writes in between (WAL gives
+   * each statement the newest commit otherwise). The callback must finish
+   * every read it starts, including iterators, before it returns.
+   */
+  readSnapshot<T>(fn: () => T): T {
+    this.ensureOpen();
+    this.db.exec("BEGIN DEFERRED");
+    try {
+      return fn();
+    } finally {
+      // A read-only transaction: COMMIT and ROLLBACK are equivalent; the
+      // connection may already be gone if the callback closed it.
+      if (!this.closed && this.db.isTransaction) this.db.exec("COMMIT");
+    }
+  }
+
+  /** Close the connection; the next call reopens it lazily. */
+  release(): void {
+    if (!this.closed) this.closeDb();
+  }
+
+  /** Park a database a query found unusable aside, so the next open rebuilds. */
+  discard(): void {
+    this.closeDb();
+    parkAside(this.dbPath);
   }
 
   // ── Internals ───────────────────────────────────────────────────
@@ -635,6 +903,8 @@ export class SqliteStore implements IncrementalIndexStore {
   ): void {
     const dir = parentDir(doc.file);
     const folderId = this.touchFolder(dir, gen);
+    const existed = this.stmts.fileIdByPath.get(doc.file) !== undefined;
+    const analysis = analyzeName(doc.basename);
     this.stmts.fileUpsert.run(
       doc.file,
       folderId,
@@ -644,12 +914,21 @@ export class SqliteStore implements IncrementalIndexStore {
       doc.mtime,
       doc.size,
       gen,
+      analysis.length,
     );
     const row = this.stmts.fileIdByPath.get(doc.file) as
       | { id: number }
       | undefined;
     if (row === undefined) {
       throw new Error(`files row missing after upsert: ${doc.file}`);
+    }
+    // A path's basename never changes (a rename is remove + add), so only a
+    // new row needs postings; an edit leaves them alone.
+    if (!existed) {
+      for (const [term, tf] of analysis.terms) {
+        this.stmts.nameInsert.run(term, row.id, tf);
+        this.stmts.vocabInsert.run(term);
+      }
     }
     for (const { target } of this.linksOf(row.id)) {
       bumpDelta(countDeltas, linkCountKey(linkTarget(target)), -1);
@@ -674,8 +953,12 @@ export class SqliteStore implements IncrementalIndexStore {
     return row.id;
   }
 
-  private putBlob(gen: number, index: string): void {
-    this.stmts.blobUpsert.run(BASENAME_BLOB_KEY, gen, index);
+  /** Remove a file's basename postings and any vocabulary term they orphan. */
+  private dropNameTerms(fileId: number, basename: string): void {
+    for (const term of analyzeName(basename).terms.keys()) {
+      this.stmts.nameDelete.run(term, fileId);
+      this.stmts.vocabPrune.run(term, term);
+    }
   }
 
   private applyCountDeltas(deltas: Map<string, number>): void {
@@ -708,10 +991,45 @@ export class SqliteStore implements IncrementalIndexStore {
     return Object.fromEntries(rows.map((r) => [r.key, r.n]));
   }
 
-  /** Test-only snapshot of the bookkeeping that drives `indexDelta`. */
+  /**
+   * Test-only: path-style link refs that count although no file has that
+   * exact path (the in-memory index keeps them too; search never shows them).
+   */
+  phantomRefCountsForTests(): Map<string, number> {
+    this.ensureOpen();
+    const rows = this.db
+      .prepare(
+        "SELECT substr(key, 3) AS ref, n FROM link_counts " +
+          "WHERE key LIKE 'p:%' AND substr(key, 3) NOT IN (SELECT path FROM files)",
+      )
+      .all() as unknown as { ref: string; n: number }[];
+    const hasBase = this.db.prepare(
+      "SELECT 1 AS x FROM files WHERE basename_lc = ? LIMIT 1",
+    );
+    const out = new Map<string, number>();
+    for (const { ref, n } of rows) {
+      const key = path.basename(ref, ".md").toLowerCase();
+      if (hasBase.get(key) !== undefined) out.set(ref, n);
+    }
+    return out;
+  }
+
+  /** Test-only: the stored signature of one file. */
+  fileForTests(
+    file: string,
+  ): { file: string; mtime: number; size: number } | undefined {
+    this.ensureOpen();
+    const row = this.db
+      .prepare("SELECT mtime, size FROM files WHERE path = ?")
+      .get(file) as { mtime: number; size: number } | undefined;
+    return row === undefined ? undefined : { file, ...row };
+  }
+
+  /** Test-only snapshot of the store's bookkeeping. */
   inspectForTests(): {
     gen: number;
-    blobGen: number | null;
+    nameTerms: number;
+    nameVocab: number;
     fileCount: number;
     linkCount: number;
     tombstones: number;
@@ -724,16 +1042,29 @@ export class SqliteStore implements IncrementalIndexStore {
     const genRow = this.db
       .prepare("SELECT CAST(v AS INTEGER) AS gen FROM meta WHERE k = 'gen'")
       .get() as { gen: number } | undefined;
-    const blob = this.stmts.blobGet.get(BASENAME_BLOB_KEY) as
-      | { gen: number }
-      | undefined;
     return {
       gen: genRow?.gen ?? 0,
-      blobGen: blob?.gen ?? null,
+      nameTerms: scalar("SELECT COUNT(*) AS n FROM name_terms"),
+      nameVocab: scalar("SELECT COUNT(*) AS n FROM name_vocab"),
       fileCount: scalar("SELECT COUNT(*) AS n FROM files"),
       linkCount: scalar("SELECT COUNT(*) AS n FROM links"),
       tombstones: scalar("SELECT COUNT(*) AS n FROM tombstones"),
     };
+  }
+}
+
+/** Rename the DB and its WAL/SHM sidecars together (see `open`). */
+function parkAside(dbPath: string): void {
+  const stamp = Date.now();
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      fs.renameSync(
+        `${dbPath}${suffix}`,
+        `${dbPath}${suffix}.corrupt-${stamp}`,
+      );
+    } catch {
+      // A missing sidecar is fine.
+    }
   }
 }
 
@@ -750,4 +1081,34 @@ function bumpDelta(
 function parentDir(file: string): string {
   const idx = file.lastIndexOf("/");
   return idx === -1 ? "" : file.slice(0, idx);
+}
+
+/**
+ * Exclusive upper bound for "every string that starts with `prefix`" under
+ * SQLite's BINARY collation (UTF-8 bytes, i.e. code point order): the prefix
+ * with its last code point incremented, trailing U+10FFFF dropped first. A
+ * fixed `prefix + U+10FFFF` bound would miss terms whose next code point is
+ * U+10FFFF itself. With no successor (empty or all U+10FFFF) every string
+ * at or above the prefix qualifies, so the bound is past the largest one.
+ */
+export function prefixUpperBound(prefix: string): string {
+  const cps = [...prefix].map((c) => c.codePointAt(0) as number);
+  while (cps.length > 0 && cps[cps.length - 1] === 0x10ffff) cps.pop();
+  if (cps.length === 0) return "\u{10FFFF}".repeat(prefix.length + 64);
+  let next = (cps.pop() as number) + 1;
+  if (next >= 0xd800 && next <= 0xdfff) next = 0xe000;
+  return String.fromCodePoint(...cps, next);
+}
+
+let heldSql = "";
+/**
+ * A use of `stmt` after its iteration loop, so the statement stays reachable
+ * for the whole loop. Node 22.13's `StatementSync.iterate()` iterator does
+ * not reference its statement; a statement only reachable through the
+ * iterator can be garbage-collected and finalized mid-loop ("statement has
+ * been finalized", seen in the Node-floor CI job). Newer Node versions keep
+ * it alive; this is harmless there.
+ */
+function holdUntilHere(stmt: { sourceSQL: string }): void {
+  heldSql = stmt.sourceSQL;
 }
