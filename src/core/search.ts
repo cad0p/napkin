@@ -7,6 +7,8 @@ import { type Ignorer, loadIgnorer } from "../utils/ignore.js";
 import { extractLinks } from "../utils/markdown.js";
 import {
   diffFileMtimes,
+  type FileDiff,
+  type FileMtimeEntry,
   type FileStatSig,
   loadSearchCache,
   type SearchCacheData,
@@ -76,6 +78,26 @@ interface DocRecord {
   outgoingLinks: string[];
 }
 
+/**
+ * Link tallies that let the incremental diff update backlink counts by delta
+ * (#92) instead of re-resolving every link in the vault.
+ *
+ * `backlinkCounts` is the resolved per-file result; these two maps hold the
+ * same links grouped by target key instead of by resolution, so a change to
+ * one basename's path set can be re-resolved without walking every doc:
+ *  - bare-name link `[[note]]` → key "note"
+ *  - path link `[[folder/note]]` → key "note", ref "folder/note.md"
+ * Occurrences are counted (duplicates count twice, as before). Keys and refs
+ * come from the owned targets in DocRecord, so no note text is retained.
+ * Memory-only: derived from `docs` when a cache is loaded, never persisted.
+ */
+interface LinkCounterState {
+  /** bare-name target key → link occurrences across all docs. */
+  bareLinkCounts: Map<string, number>;
+  /** path target key → (ref as written → link occurrences). */
+  pathLinkCounts: Map<string, Map<string, number>>;
+}
+
 const BASENAME_INDEX_OPTIONS = {
   fields: ["basename"],
   storeFields: ["file"],
@@ -99,11 +121,17 @@ const BASENAME_INDEX_OPTIONS = {
 // indexing full content into MiniSearch's inverted index and — since #85 —
 // keeps note text out of this cache entirely: one process on a large vault
 // would otherwise retain hundreds of MB of UTF-16 note text for its life.
-interface CachedVaultIndex {
+interface CachedVaultIndex extends LinkCounterState {
   basenameIndex: MiniSearch;
   docs: Map<string, DocRecord>;
   backlinkCounts: Map<string, number>;
   fileMtimes: Map<string, FileStatSig>;
+  /**
+   * basename (lowercase) → vault-relative paths, shallowest first. Kept in
+   * memory so a diff only touches the groups it changed (#92); derived from
+   * `docs` on load, never persisted.
+   */
+  basenameMap: Map<string, string[]>;
 }
 
 const memoryCache = new Map<string, CachedVaultIndex>();
@@ -165,12 +193,28 @@ export function getCachedDocForTests(
   return undefined;
 }
 
+/**
+ * Test-only hook: a copy of the live backlink counts, so a test can compare
+ * the incremental delta against a full recompute. Not exported by the SDK.
+ */
+export function getCachedBacklinkCountsForTests(
+  contentPath: string,
+): Map<string, number> | undefined {
+  for (const [cacheKey, cache] of memoryCache) {
+    if (cacheKey.startsWith(`${contentPath}\0`)) {
+      return new Map(cache.backlinkCounts);
+    }
+  }
+  return undefined;
+}
+
 // ── Index building (cold path) ────────────────────────────────────
 
-interface BuildResult {
+interface BuildResult extends LinkCounterState {
   docs: Map<string, DocRecord>;
   backlinkCounts: Map<string, number>;
   fileMtimes: Map<string, FileStatSig>;
+  basenameMap: Map<string, string[]>;
   basenameIndex: MiniSearch;
 }
 
@@ -246,7 +290,6 @@ function buildDocsAndBacklinks(
 ): BuildResult {
   const files = listFiles(vaultPath, { ext: "md", ignore });
 
-  const basenameMap = new Map<string, string[]>();
   const docsArr: DocRecord[] = [];
   const fileMtimes = new Map<string, FileStatSig>();
 
@@ -254,28 +297,10 @@ function buildDocsAndBacklinks(
     const doc = readDoc(vaultPath, file);
     docsArr.push(doc);
     fileMtimes.set(doc.file, { mtime: doc.mtime, size: doc.size });
-    const key = doc.basename.toLowerCase();
-    const existing = basenameMap.get(key);
-    if (existing) existing.push(doc.file);
-    else basenameMap.set(key, [doc.file]);
-  }
-  // Sort each basename's paths by depth (shallowest first) for resolve tie-break.
-  for (const paths of basenameMap.values()) {
-    if (paths.length > 1) {
-      paths.sort((a, b) => a.split("/").length - b.split("/").length);
-    }
   }
 
-  // Compute backlinks in-memory from outgoing links — no second disk pass.
-  const backlinkCounts = new Map<string, number>();
-  for (const doc of docsArr) {
-    for (const target of doc.outgoingLinks) {
-      const resolved = resolveBasename(basenameMap, target);
-      if (resolved) {
-        backlinkCounts.set(resolved, (backlinkCounts.get(resolved) || 0) + 1);
-      }
-    }
-  }
+  const basenameMap = buildBasenameMap(docsArr);
+  const links = recomputeAllLinks(docsArr, basenameMap);
 
   // Build basename-only MiniSearch index (fast: ~84ms for 2700 files).
   const basenameIndex = new MiniSearch({ ...BASENAME_INDEX_OPTIONS });
@@ -283,29 +308,177 @@ function buildDocsAndBacklinks(
 
   return {
     docs: new Map(docsArr.map((d) => [d.file, d])),
-    backlinkCounts,
+    ...links,
     fileMtimes,
+    basenameMap,
     basenameIndex,
   };
 }
 
 /**
- * Resolve a wikilink target against the basename map.
- * Mirrors `findMatches` + `resolveFileLoose` semantics:
- *  - "path/with/slash" or "*.md" → exact path match
- *  - bare name → basename match, shallowest path wins on ambiguity
+ * Order basename paths shallowest-first for the wikilink resolve tie-break.
+ * Depth is the documented rule; equal depths fall back to lexical order —
+ * the order `listFiles` produces — so an incrementally maintained map stays
+ * identical to a cold build (a stable sort on insertion order would drift
+ * after deletes and re-adds).
  */
-function resolveBasename(
-  basenameMap: Map<string, string[]>,
-  target: string,
-): string | null {
+function sortByDepth(paths: string[]): void {
+  paths.sort((a, b) => {
+    const depth = a.split("/").length - b.split("/").length;
+    if (depth !== 0) return depth;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+/** basename (lowercase) → vault-relative paths, shallowest first. */
+function buildBasenameMap(docs: Iterable<DocRecord>): Map<string, string[]> {
+  const basenameMap = new Map<string, string[]>();
+  for (const doc of docs) {
+    const key = doc.basename.toLowerCase();
+    const existing = basenameMap.get(key);
+    if (existing) existing.push(doc.file);
+    else basenameMap.set(key, [doc.file]);
+  }
+  for (const paths of basenameMap.values()) {
+    if (paths.length > 1) sortByDepth(paths);
+  }
+  return basenameMap;
+}
+
+/**
+ * A wikilink target classified the way resolution narrows it: a target with
+ * a slash or a `.md` suffix resolves as a path (keeping its own spelling);
+ * anything else is a bare basename lookup.
+ */
+interface LinkTarget {
+  key: string;
+  /** Path-style ref, or null for a bare-name link. */
+  ref: string | null;
+}
+
+function linkTarget(target: string): LinkTarget {
   if (target.includes("/") || target.endsWith(".md")) {
     const ref = target.endsWith(".md") ? target : `${target}.md`;
-    const key = path.basename(ref, ".md").toLowerCase();
-    return basenameMap.has(key) ? ref : null;
+    return { key: path.basename(ref, ".md").toLowerCase(), ref };
   }
-  const matches = basenameMap.get(target.toLowerCase());
-  return matches && matches.length > 0 ? matches[0] : null;
+  return { key: target.toLowerCase(), ref: null };
+}
+
+/**
+ * Resolve a classified target against the basename map.
+ * Mirrors `findMatches` + `resolveFileLoose` semantics:
+ *  - "path/with/slash" or "*.md" → the ref itself, when any file with that
+ *    basename exists
+ *  - bare name → basename match, shallowest path wins on ambiguity
+ */
+function resolveLink(
+  basenameMap: Map<string, string[]>,
+  link: LinkTarget,
+): string | null {
+  if (link.ref !== null) return basenameMap.has(link.key) ? link.ref : null;
+  return basenameMap.get(link.key)?.[0] ?? null;
+}
+
+/** Add one link occurrence to the per-target-key tallies. */
+function addLinkCounter(
+  bareLinkCounts: Map<string, number>,
+  pathLinkCounts: Map<string, Map<string, number>>,
+  link: LinkTarget,
+): void {
+  if (link.ref === null) {
+    bareLinkCounts.set(link.key, (bareLinkCounts.get(link.key) ?? 0) + 1);
+    return;
+  }
+  let refs = pathLinkCounts.get(link.key);
+  if (!refs) {
+    refs = new Map();
+    pathLinkCounts.set(link.key, refs);
+  }
+  refs.set(link.ref, (refs.get(link.ref) ?? 0) + 1);
+}
+
+/** Remove one link occurrence, dropping empty counters. */
+function removeLinkCounter(
+  bareLinkCounts: Map<string, number>,
+  pathLinkCounts: Map<string, Map<string, number>>,
+  link: LinkTarget,
+): void {
+  if (link.ref === null) {
+    const next = (bareLinkCounts.get(link.key) ?? 0) - 1;
+    if (next > 0) bareLinkCounts.set(link.key, next);
+    else bareLinkCounts.delete(link.key);
+    return;
+  }
+  const refs = pathLinkCounts.get(link.key);
+  if (!refs) return;
+  const next = (refs.get(link.ref) ?? 0) - 1;
+  if (next > 0) {
+    refs.set(link.ref, next);
+    return;
+  }
+  refs.delete(link.ref);
+  if (refs.size === 0) pathLinkCounts.delete(link.key);
+}
+
+/** Apply a signed change to a resolved per-file count, keeping no zeros. */
+function bumpCount(
+  counts: Map<string, number>,
+  file: string,
+  delta: number,
+): void {
+  const next = (counts.get(file) ?? 0) + delta;
+  if (next === 0) counts.delete(file);
+  else counts.set(file, next);
+}
+
+/** Resolved backlink counts plus the tallies that produced them. */
+interface LinkCounts extends LinkCounterState {
+  backlinkCounts: Map<string, number>;
+}
+
+/**
+ * Resolve the per-target-key tallies into per-file counts. O(distinct target
+ * keys + path refs) instead of O(link occurrences), and the same answer:
+ * every bare link to a key lands on its shallowest path, and every path ref
+ * lands on its own spelling while its basename exists.
+ */
+function resolveAllCounts(
+  basenameMap: Map<string, string[]>,
+  tallies: LinkCounterState,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const [key, occurrences] of tallies.bareLinkCounts) {
+    const first = basenameMap.get(key)?.[0];
+    if (first !== undefined) {
+      counts.set(first, (counts.get(first) ?? 0) + occurrences);
+    }
+  }
+  for (const [key, refs] of tallies.pathLinkCounts) {
+    if (!basenameMap.has(key)) continue;
+    for (const [ref, occurrences] of refs) {
+      counts.set(ref, (counts.get(ref) ?? 0) + occurrences);
+    }
+  }
+  return counts;
+}
+
+/** Full pass over every doc's links — the cold path and the delta fallback. */
+function recomputeAllLinks(
+  docs: Iterable<DocRecord>,
+  basenameMap: Map<string, string[]>,
+): LinkCounts {
+  const bareLinkCounts = new Map<string, number>();
+  const pathLinkCounts = new Map<string, Map<string, number>>();
+  for (const doc of docs) {
+    for (const target of doc.outgoingLinks) {
+      addLinkCounter(bareLinkCounts, pathLinkCounts, linkTarget(target));
+    }
+  }
+  const tallies = { bareLinkCounts, pathLinkCounts };
+  return {
+    ...tallies,
+    backlinkCounts: resolveAllCounts(basenameMap, tallies),
+  };
 }
 
 // ── Snippet extraction ───────────────────────────────────────────
@@ -509,6 +682,9 @@ function resolveVaultIndex(
     docs: built.docs,
     backlinkCounts: built.backlinkCounts,
     fileMtimes: built.fileMtimes,
+    basenameMap: built.basenameMap,
+    bareLinkCounts: built.bareLinkCounts,
+    pathLinkCounts: built.pathLinkCounts,
   };
   memoryCache.set(memKey, fresh);
   // Goes through the throttle like the incremental path: it writes
@@ -571,13 +747,23 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
         outgoingLinks: cache.outgoingLinks[d.file] ?? [],
       });
     }
-    const backlinkCounts = new Map(Object.entries(cache.backlinkCounts));
     const fileMtimes = new Map(Object.entries(cache.fileMtimes));
+    const basenameMap = buildBasenameMap(docs.values());
+    // Derive the per-target tallies from the cached doc metadata and resolve
+    // the counts from them (#92). The tallies are memory-only, so the cache
+    // format is unchanged; deriving (instead of trusting the persisted
+    // counts) also means a snapshot written before this change — with a
+    // different ambiguity tie-break after churn — cannot seed a delta with
+    // counts that disagree with the docs.
+    const resolved = recomputeAllLinks(docs.values(), basenameMap);
     return {
       basenameIndex,
       docs,
-      backlinkCounts,
+      backlinkCounts: resolved.backlinkCounts,
       fileMtimes,
+      basenameMap,
+      bareLinkCounts: resolved.bareLinkCounts,
+      pathLinkCounts: resolved.pathLinkCounts,
     };
   } catch {
     return null;
@@ -590,8 +776,11 @@ function loadFromDiskCache(cache: SearchCacheData): CachedVaultIndex | null {
  * (no I/O beyond the stat walk).
  *
  * Changed docs are re-read from disk (for their outgoing links and stat
- * signature), added/removed from the basename MiniSearch index, and
- * backlinks are recomputed in-memory.
+ * signature) and added/replaced in the basename MiniSearch index. Backlink
+ * counts are updated by delta (#92): a changed doc's old link contributions
+ * are subtracted and its new ones added, and only the basename keys whose
+ * path set changed are re-resolved — for the docs that did not change.
+ * Bulk churn falls back to a single full pass.
  */
 function applyIncrementalDiff(
   vaultPath: string,
@@ -604,47 +793,79 @@ function applyIncrementalDiff(
     return null;
   }
 
-  // Remove deleted/modified files from the index and docs map.
-  for (const file of diff.toRemove) {
-    if (cache.basenameIndex.has(file)) cache.basenameIndex.discard(file);
-    cache.docs.delete(file);
-    cache.fileMtimes.delete(file);
-  }
+  const changed = diff.toAdd.length + diff.toRemove.length;
+  // A bulk diff (checkout, import, folder rename) is cheaper to recompute in
+  // one pass than to maintain link by link. The delta costs O(links in the
+  // changed docs + links to the affected basenames); a full pass is O(all
+  // links) once, so an eighth of the vault is comfortably past the crossover.
+  const fullRebuild = changed > cache.docs.size / 8;
+  const affected = fullRebuild ? null : snapshotAffectedKeys(cache, diff);
 
-  // Build basename map for the remaining docs (for backlink recompute).
-  const basenameMap = new Map<string, string[]>();
-  for (const doc of cache.docs.values()) {
-    const key = doc.basename.toLowerCase();
-    const existing = basenameMap.get(key);
-    if (existing) existing.push(doc.file);
-    else basenameMap.set(key, [doc.file]);
-  }
-
-  // Read + index added/modified docs.
-  for (const entry of diff.toAdd) {
-    const doc = readDoc(vaultPath, entry.file);
-    const key = doc.basename.toLowerCase();
-    const existing = basenameMap.get(key);
-    if (existing) {
-      if (!existing.includes(doc.file)) existing.push(doc.file);
-    } else {
-      basenameMap.set(key, [doc.file]);
+  if (!fullRebuild) {
+    // Undo the changed docs' old contributions against the OLD basename map.
+    // Subtracting with the new map would decrement the wrong file when an
+    // add/remove re-pointed a target.
+    for (const file of diff.toRemove) {
+      const doc = cache.docs.get(file);
+      if (doc) removeDocLinks(cache, doc, affected);
     }
-    if (cache.basenameIndex.has(doc.file))
-      cache.basenameIndex.discard(doc.file);
-    cache.basenameIndex.add(doc);
-    cache.docs.set(doc.file, doc);
-    cache.fileMtimes.set(doc.file, { mtime: doc.mtime, size: doc.size });
-  }
-
-  // Re-sort basename paths (shallowest first) after all mutations.
-  for (const paths of basenameMap.values()) {
-    if (paths.length > 1) {
-      paths.sort((a, b) => a.split("/").length - b.split("/").length);
+    for (const entry of diff.toAdd) {
+      const doc = cache.docs.get(entry.file);
+      if (doc) removeDocLinks(cache, doc, affected);
     }
   }
 
-  cache.backlinkCounts = recomputeBacklinks(cache.docs, basenameMap);
+  removeFromIndex(cache, diff.toRemove);
+  addToIndex(vaultPath, cache, diff.toAdd);
+
+  if (fullRebuild) {
+    const counted = recomputeAllLinks(cache.docs.values(), cache.basenameMap);
+    cache.backlinkCounts = counted.backlinkCounts;
+    cache.bareLinkCounts = counted.bareLinkCounts;
+    cache.pathLinkCounts = counted.pathLinkCounts;
+  } else {
+    // Add the changed docs' new contributions against the NEW map.
+    for (const entry of diff.toAdd) {
+      const doc = cache.docs.get(entry.file);
+      if (!doc) continue;
+      for (const target of doc.outgoingLinks) {
+        const link = linkTarget(target);
+        addLinkCounter(cache.bareLinkCounts, cache.pathLinkCounts, link);
+        const resolved = resolveLink(cache.basenameMap, link);
+        if (resolved !== null) bumpCount(cache.backlinkCounts, resolved, 1);
+      }
+    }
+
+    // Move the unchanged docs' contributions for keys whose path set changed.
+    // The changed docs' own links were moved above, so their old occurrences
+    // are excluded from the snapshot tallies.
+    if (affected) {
+      for (const key of affected.values()) {
+        const paths = cache.basenameMap.get(key.key);
+        const newFirst = paths?.[0] ?? null;
+        const present = paths !== undefined;
+        const bare = key.bare - key.changedBare;
+        if (bare !== 0 && key.oldFirst !== newFirst) {
+          if (key.oldFirst !== null) {
+            bumpCount(cache.backlinkCounts, key.oldFirst, -bare);
+          }
+          if (newFirst !== null) {
+            bumpCount(cache.backlinkCounts, newFirst, bare);
+          }
+        }
+        if (key.wasPresent !== present) {
+          // Path refs resolve to their own spelling whenever the basename
+          // exists, so only an existence flip moves them.
+          for (const [ref, count] of key.refs) {
+            const moved = count - (key.changedRefs.get(ref) ?? 0);
+            if (moved === 0) continue;
+            if (key.wasPresent) bumpCount(cache.backlinkCounts, ref, -moved);
+            if (present) bumpCount(cache.backlinkCounts, ref, moved);
+          }
+        }
+      }
+    }
+  }
 
   // Persistence is the caller's job (applyIncrementalOrCached) — it owns the
   // config path, the ignore fingerprint, and the write throttle.
@@ -655,20 +876,126 @@ function applyIncrementalDiff(
   };
 }
 
-function recomputeBacklinks(
-  docs: Map<string, DocRecord>,
-  basenameMap: Map<string, string[]>,
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const doc of docs.values()) {
-    for (const target of doc.outgoingLinks) {
-      const resolved = resolveBasename(basenameMap, target);
-      if (resolved) {
-        counts.set(resolved, (counts.get(resolved) || 0) + 1);
-      }
+/** A basename group whose path set changes in this diff (#92). */
+interface AffectedKey {
+  key: string;
+  /** Shallowest path before the diff; null when the key was absent. */
+  oldFirst: string | null;
+  wasPresent: boolean;
+  /** Link tallies before the diff. */
+  bare: number;
+  refs: Map<string, number>;
+  /** Occurrences among the changed docs' OLD links, excluded when moving. */
+  changedBare: number;
+  changedRefs: Map<string, number>;
+}
+
+/**
+ * Snapshot the basename groups an add/remove/rename can redirect: their old
+ * shallowest path and their link tallies. Pure edits change no path set, so
+ * they need no snapshot at all.
+ */
+function snapshotAffectedKeys(
+  cache: CachedVaultIndex,
+  diff: FileDiff,
+): Map<string, AffectedKey> | null {
+  const keys = new Set<string>();
+  for (const file of diff.toRemove) {
+    keys.add(path.basename(file, ".md").toLowerCase());
+  }
+  for (const entry of diff.toAdd) {
+    // A modified doc keeps its path, so only genuinely new paths change a
+    // basename's path set (a rename arrives as a remove plus an add).
+    if (!cache.docs.has(entry.file)) {
+      keys.add(path.basename(entry.file, ".md").toLowerCase());
     }
   }
-  return counts;
+  if (keys.size === 0) return null;
+
+  const affected = new Map<string, AffectedKey>();
+  for (const key of keys) {
+    const paths = cache.basenameMap.get(key);
+    const refs = cache.pathLinkCounts.get(key);
+    affected.set(key, {
+      key,
+      oldFirst: paths?.[0] ?? null,
+      wasPresent: paths !== undefined,
+      bare: cache.bareLinkCounts.get(key) ?? 0,
+      refs: refs ? new Map(refs) : new Map(),
+      changedBare: 0,
+      changedRefs: new Map(),
+    });
+  }
+  return affected;
+}
+
+/** Subtract one doc's old link contributions (against the current map). */
+function removeDocLinks(
+  cache: CachedVaultIndex,
+  doc: DocRecord,
+  affected: Map<string, AffectedKey> | null,
+): void {
+  for (const target of doc.outgoingLinks) {
+    const link = linkTarget(target);
+    removeLinkCounter(cache.bareLinkCounts, cache.pathLinkCounts, link);
+    const resolved = resolveLink(cache.basenameMap, link);
+    if (resolved !== null) bumpCount(cache.backlinkCounts, resolved, -1);
+    if (!affected) continue;
+    const entry = affected.get(link.key);
+    if (!entry) continue;
+    if (link.ref === null) {
+      entry.changedBare++;
+    } else {
+      entry.changedRefs.set(
+        link.ref,
+        (entry.changedRefs.get(link.ref) ?? 0) + 1,
+      );
+    }
+  }
+}
+
+/** Remove deleted docs from the MiniSearch index, docs map and basename map. */
+function removeFromIndex(cache: CachedVaultIndex, files: string[]): void {
+  for (const file of files) {
+    if (cache.basenameIndex.has(file)) cache.basenameIndex.discard(file);
+    cache.docs.delete(file);
+    cache.fileMtimes.delete(file);
+    const key = path.basename(file, ".md").toLowerCase();
+    const paths = cache.basenameMap.get(key);
+    if (!paths) continue;
+    const idx = paths.indexOf(file);
+    if (idx !== -1) paths.splice(idx, 1);
+    if (paths.length === 0) cache.basenameMap.delete(key);
+  }
+}
+
+/** Read and index added/modified docs, appending new paths to their group. */
+function addToIndex(
+  vaultPath: string,
+  cache: CachedVaultIndex,
+  entries: FileMtimeEntry[],
+): void {
+  for (const entry of entries) {
+    const doc = readDoc(vaultPath, entry.file);
+    const key = doc.basename.toLowerCase();
+    if (!cache.docs.has(doc.file)) {
+      const paths = cache.basenameMap.get(key);
+      if (paths) {
+        paths.push(doc.file);
+        // Keep the group ordered for the resolve tie-break. Sorting here
+        // covers both the delta and the full-rebuild branch.
+        sortByDepth(paths);
+      } else {
+        cache.basenameMap.set(key, [doc.file]);
+      }
+    }
+    if (cache.basenameIndex.has(doc.file)) {
+      cache.basenameIndex.discard(doc.file);
+    }
+    cache.basenameIndex.add(doc);
+    cache.docs.set(doc.file, doc);
+    cache.fileMtimes.set(doc.file, { mtime: doc.mtime, size: doc.size });
+  }
 }
 
 /**
