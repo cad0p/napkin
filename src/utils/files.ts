@@ -293,8 +293,7 @@ export function listFiles(
       maxDepth === undefined
         ? undefined
         : (fullPath) =>
-            path.relative(baseDir, fullPath).split(path.sep).length <=
-            maxDepth,
+            path.relative(baseDir, fullPath).split(path.sep).length <= maxDepth,
     // When an ignorer is supplied, prune ignored dirs at descent and drop
     // ignored files before onEntry. relToRoot is relative to the walk root
     // (baseDir), which may be vaultPath/folder for folder-scoped calls —

@@ -546,9 +546,7 @@ describe("bounded vault walk", () => {
         depth: 2,
       });
       // "deep/one/two" is folder depth 3 — outside the bound.
-      expect(first.overview.some((f) => f.path === "deep/one/two")).toBe(
-        false,
-      );
+      expect(first.overview.some((f) => f.path === "deep/one/two")).toBe(false);
       fs.utimesSync(files.result, fixed, fixed);
       fs.utimesSync(files.folders, fixed, fixed);
 
