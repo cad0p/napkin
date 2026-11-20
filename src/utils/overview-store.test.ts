@@ -225,7 +225,7 @@ describe("SqliteOverviewStore", () => {
   test("a garbage database file is parked aside and rebuilt", () => {
     const v = vault(FIXTURE);
     const first = getOverview(v.vaultPath, v.vaultPath);
-    const dbPath = path.join(v.vaultPath, "cache", "overview-v2.db");
+    const dbPath = path.join(v.vaultPath, "cache", "overview-v3.db");
     expect(fs.existsSync(dbPath)).toBe(true);
     resetOverviewStoresForTests();
     fs.writeFileSync(dbPath, "this is not a sqlite database at all");
@@ -237,7 +237,7 @@ describe("SqliteOverviewStore", () => {
     expect(
       fs
         .readdirSync(path.dirname(dbPath))
-        .some((f) => f.startsWith("overview-v2.db.corrupt-")),
+        .some((f) => f.startsWith("overview-v3.db.corrupt-")),
     ).toBe(true);
     expect(store(v).folderForTests("alpha")).toBeDefined();
   });
@@ -245,7 +245,7 @@ describe("SqliteOverviewStore", () => {
   test("an older user_version is parked and recreated", () => {
     const v = vault(FIXTURE);
     const first = getOverview(v.vaultPath, v.vaultPath);
-    const dbPath = path.join(v.vaultPath, "cache", "overview-v2.db");
+    const dbPath = path.join(v.vaultPath, "cache", "overview-v3.db");
     resetOverviewStoresForTests();
     // Hand-build an "older" database: real SQLite file, wrong user_version,
     // no overview tables.

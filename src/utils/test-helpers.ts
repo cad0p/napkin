@@ -86,7 +86,7 @@ export function dropSearchStoreFiles(vaultPath: string): void {
  * Pin the vault's overview folder-data store to the JSON cache (#118): for
  * tests that assert on overview-folders-cache.json itself — its bytes, its
  * mtime, its compaction — now that the store is SQLite
- * (.napkin/cache/overview-v2.db). Test-only seam: there is no user-facing
+ * (.napkin/cache/overview-v3.db). Test-only seam: there is no user-facing
  * store selection, the pin lives in overview-store module state keyed by
  * this vault's config dir.
  */
@@ -96,7 +96,7 @@ export function useJsonOverviewStore(vaultPath: string): void {
 
 /**
  * Drop every on-disk overview store — overview-folders-cache.json AND the
- * SQLite store's cache/overview-v2.db (+ WAL/SHM sidecars) — so the next
+ * SQLite store's cache/overview-v3.db and the v1 overview-v2.db it migrates from (+ WAL/SHM sidecars) — so the next
  * overview rebuilds every folder regardless of the configured store (#118).
  * The whole-result overview-cache.json is removed too: a "cold" run means
  * computing, not answering from the result cache.
@@ -106,9 +106,11 @@ export function dropOverviewStoreFiles(vaultPath: string): void {
   fs.rmSync(path.join(vaultPath, "overview-folders-cache.json"), {
     force: true,
   });
-  const db = path.join(vaultPath, "cache", overviewStoreDbFileForTests());
-  for (const suffix of ["", "-wal", "-shm"]) {
-    fs.rmSync(`${db}${suffix}`, { force: true });
+  for (const file of [overviewStoreDbFileForTests(), "overview-v2.db"]) {
+    const db = path.join(vaultPath, "cache", file);
+    for (const suffix of ["", "-wal", "-shm"]) {
+      fs.rmSync(`${db}${suffix}`, { force: true });
+    }
   }
 }
 
