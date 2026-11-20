@@ -496,7 +496,7 @@ function buildFolderData(
     let properties: Record<string, unknown> = {};
 
     try {
-      ({ properties } = parseFrontmatter(content, { cache: false }));
+      ({ properties } = parseFrontmatter(content));
     } catch {
       warnings.push(`Skipping ${file} (malformed YAML frontmatter)`);
       continue;
@@ -1001,7 +1001,7 @@ function tokenizeNote(vaultPath: string, file: string): NoteTokens {
   const content = fs.readFileSync(path.join(vaultPath, file), "utf-8");
   let properties: Record<string, unknown> = {};
   try {
-    ({ properties } = parseFrontmatter(content, { cache: false }));
+    ({ properties } = parseFrontmatter(content));
   } catch {
     return SKIPPED_TOKENS;
   }

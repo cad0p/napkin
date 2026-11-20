@@ -22,18 +22,23 @@ function loadMatter(): Matter {
 }
 
 /**
- * gray-matter caches the file object keyed by content BEFORE parsing it, so
- * a failed parse leaves a poisoned entry: the next parse of a byte-identical
- * string silently returns the cached, unparsed object (empty data, no error).
- * Evict the cache when parsing throws so every parse of malformed content
- * fails deterministically.
+ * Any options object (even an empty one, which resolves to the same
+ * defaults) makes gray-matter skip its process-lifetime cache — in
+ * `matter()` and in `matter.stringify()`, which re-parses the body string.
  */
-function safeMatter(content: string, cache = true): GrayMatterFile {
+const NO_CACHE = {};
+
+/**
+ * gray-matter caches the file object keyed by content BEFORE parsing it, so
+ * a failed cached parse leaves a poisoned entry: the next parse of a
+ * byte-identical string silently returns the cached, unparsed object (empty
+ * data, no error). Evict the cache when parsing throws so every parse of
+ * malformed content fails deterministically.
+ */
+function safeMatter(content: string, cache = false): GrayMatterFile {
   const matter = loadMatter();
   try {
-    // Any options object (even {}, which resolves to the same defaults)
-    // bypasses gray-matter's process-lifetime cache.
-    return cache ? matter(content) : matter(content, {});
+    return cache ? matter(content) : matter(content, NO_CACHE);
   } catch (err) {
     // Runtime-only API not present in gray-matter's type declarations.
     (matter as unknown as { clearCache: () => void }).clearCache();
@@ -51,17 +56,19 @@ export interface ParsedFrontmatter {
  * Parse YAML frontmatter from markdown content.
  *
  * gray-matter memoizes every parse it is given without options in a
- * module-level object keyed by the content string — the content, its Buffer
- * copy and the parse result stay reachable for the life of the process.
- * One-pass scans over a whole vault (the overview's note tokenizing, #131)
- * pass `{ cache: false }` so each note is garbage once it is tokenized; the
- * parse result is the same either way.
+ * module-level object keyed by the content string, with no bound — the
+ * content, its Buffer copy and the parse result stay reachable for the life
+ * of the process. Every whole-vault scan (tags, properties, aliases, bases,
+ * the overview) would leave every note resident, so by default this parses
+ * without that cache (#132); the parse result is the same either way.
+ * `{ cache: true }` opts back in, for a caller that knowingly re-parses the
+ * same strings.
  */
 export function parseFrontmatter(
   content: string,
   opts?: { cache?: boolean },
 ): ParsedFrontmatter {
-  const result = safeMatter(content, opts?.cache ?? true);
+  const result = safeMatter(content, opts?.cache ?? false);
   return {
     properties: result.data,
     body: result.content,
@@ -80,7 +87,7 @@ export function setProperty(
   const matter = loadMatter();
   const result = safeMatter(content);
   const data = { ...result.data, [name]: value };
-  return matter.stringify(result.content, data);
+  return matter.stringify(result.content, data, NO_CACHE);
 }
 
 /**
@@ -96,5 +103,5 @@ export function removeProperty(content: string, name: string): string {
     const body = result.content;
     return body.startsWith("\n") ? body.slice(1) : body;
   }
-  return matter.stringify(result.content, data);
+  return matter.stringify(result.content, data, NO_CACHE);
 }
