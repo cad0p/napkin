@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(vault)* Export findAncestorConfigDir alongside findAncestorVault (closes #74)
+- *(vault)* Export NAPKIN_MARKER, single-source the marker name (closes #76)
+- *(vault)* Prohibit $HOME/.napkin as a vault root (closes #78)
+- *(scripts)* Search eval harness for accuracy and ranking (closes #90) ([#98](https://github.com/cad0p/napkin/pull/98))
+- *(scripts)* LLM-judge mode for the search eval harness (closes #108) ([#110](https://github.com/cad0p/napkin/pull/110))
+- *(search)* SQLite index store with per-file writes (closes #106) ([#111](https://github.com/cad0p/napkin/pull/111))
+- *(exports)* @cad0p/napkin/vault subpath and a default condition for require(esm) (closes #121) ([#122](https://github.com/cad0p/napkin/pull/122))
+
+### 🐛 Bug Fixes
+
+- *(links)* Keep malformed percent-encoded markdown targets instead of throwing (closes #82)
+- *(search)* Answer folder-scoped searches from the whole-vault index (closes #87)
+- *(search)* Persist the incremental diff, atomically and throttled (closes #84)
+- *(search)* Read note text from disk instead of caching it (closes #85) ([#95](https://github.com/cad0p/napkin/pull/95))
+- *(search)* Keep basename BM25 stats exact across incremental updates (closes #100) ([#103](https://github.com/cad0p/napkin/pull/103))
+- *(ignore)* Key the cache fingerprint on ignore-file content, not absolute path and mtime (closes #128) ([#129](https://github.com/cad0p/napkin/pull/129))
+- *(frontmatter)* Parse without gray-matter's unbounded cache by default (closes #132) ([#134](https://github.com/cad0p/napkin/pull/134))
+
+### 💼 Other
+
+- Compile to dist + exports map, drop jiti runtime wrapper (fixes #71) ([#72](https://github.com/cad0p/napkin/pull/72))
+
+### 🚜 Refactor
+
+- *(search)* Put search-cache persistence behind an IndexStore seam (closes #104) ([#105](https://github.com/cad0p/napkin/pull/105))
+
+### ⚡ Performance
+
+- *(search)* Update backlink counts by delta in the incremental diff (closes #92) ([#99](https://github.com/cad0p/napkin/pull/99))
+- *(search)* Skip the stat walk inside a freshness window, see own writes (closes #93) ([#101](https://github.com/cad0p/napkin/pull/101))
+- *(overview)* Cache FolderData per folder, rebuild only changed folders (closes #86) ([#107](https://github.com/cad0p/napkin/pull/107))
+- *(search)* Query the SQLite store per search instead of loading the index (closes #109) ([#113](https://github.com/cad0p/napkin/pull/113))
+- *(overview)* Walk the vault only to the configured depth (closes #117) ([#119](https://github.com/cad0p/napkin/pull/119))
+- *(overview)* Per-note term blobs so a miss re-reads only the changed notes (closes #118) ([#120](https://github.com/cad0p/napkin/pull/120))
+- *(overview)* Slim @cad0p/napkin/overview entry (closes #123) ([#124](https://github.com/cad0p/napkin/pull/124))
+- *(overview)* Folder-term rows in SQLite, per-note deltas and SQL top-k scoring (closes #125, closes #126, closes #127) ([#130](https://github.com/cad0p/napkin/pull/130))
+- *(overview)* Cold build in batches without an in-memory term dictionary (closes #131) ([#133](https://github.com/cad0p/napkin/pull/133))
+
+### ⚙️ Miscellaneous Tasks
+
+- Drop pkg.pr.new preview publishing (closes #78) ([#80](https://github.com/cad0p/napkin/pull/80))
+- *(package)* Declare engines node >=22.13 and test the floor in CI (closes #91) ([#97](https://github.com/cad0p/napkin/pull/97))
+
+
 ## [0.14.0] - 2026-08-12
 
 <!-- USER-EDITABLE SECTION START -->
