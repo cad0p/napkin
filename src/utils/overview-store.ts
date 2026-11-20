@@ -246,7 +246,9 @@ interface Stmts {
   ftFolderHeadOnly: StatementSync;
   termIdsBatch: StatementSync;
   termTextsBatch: StatementSync;
-  termInsert: StatementSync;
+  termInsertBulk: StatementSync;
+  termIdsAt: StatementSync;
+  headrcBulk: StatementSync;
 }
 
 function prepareAll(db: DatabaseSync): Stmts {
@@ -351,7 +353,18 @@ function prepareAll(db: DatabaseSync): Stmts {
       "SELECT id, term FROM terms " +
         "WHERE id IN (SELECT value FROM json_each(?))",
     ),
-    termInsert: db.prepare("INSERT INTO terms(id, term) VALUES(?, ?)"),
+    termIdsAt: db.prepare(
+      "SELECT e.key AS k, t.id FROM json_each(?) e " +
+        "JOIN terms t ON t.term = e.value",
+    ),
+    headrcBulk: db.prepare(
+      "INSERT INTO headrc(fid, text, n) " +
+        "SELECT ?, e.value ->> 0, e.value ->> 1 FROM json_each(?) e",
+    ),
+    // Consecutive ids from the bound start, in the JSON array's order.
+    termInsertBulk: db.prepare(
+      "INSERT INTO terms(id, term) SELECT ? + e.key, e.value FROM json_each(?) e",
+    ),
   };
 }
 
@@ -456,6 +469,218 @@ function streamNoteIntoFt(
     // First occurrence of this heading text in the folder: its terms gain
     // one distinct-heading-text count.
     if (row.n === 1) stmts.lcBump.run(fid, JSON.stringify(ids));
+  }
+}
+
+/** Cold-build Bloom filter size: 2^24 bits (2 MB); with 4 probes about
+ *  0.7% false positives at 1.45M terms, degrading gracefully beyond. */
+const COLD_FILTER_BITS = 1 << 24;
+let coldFilterBits = COLD_FILTER_BITS;
+
+/** Test seam: the cold Bloom filter's size in bits (a power of two ≥ 32);
+ *  no argument restores the default. */
+export function setOverviewColdFilterBitsForTests(
+  bits = COLD_FILTER_BITS,
+): void {
+  coldFilterBits = bits;
+}
+
+/** Test seam: the cold Bloom filter's primitives. */
+export const coldFilterForTests = {
+  create: (bits: number): Uint32Array => new Uint32Array(bits >>> 5),
+  add: (f: Uint32Array, term: string): void => filterAdd(f, term),
+  has: (f: Uint32Array, term: string): boolean => filterHas(f, term),
+};
+
+/** termHash's second hash (an out-parameter, so hashing allocates nothing). */
+let termHash2 = 0;
+
+/** Two 32-bit string hashes — FNV-1a (returned) and a multiplicative
+ *  variant (termHash2, odd) — for double hashing. */
+function termHash(term: string): number {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9747b28c;
+  for (let i = 0; i < term.length; i++) {
+    const c = term.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ c, 0x5bd1e995);
+    h2 ^= h2 >>> 15;
+  }
+  termHash2 = h2 | 1;
+  return h1;
+}
+
+function filterHas(bits: Uint32Array, term: string): boolean {
+  const h1 = termHash(term);
+  const mask = bits.length * 32 - 1;
+  for (let i = 0; i < 4; i++) {
+    const b = (h1 + Math.imul(i, termHash2)) & mask;
+    if ((bits[b >>> 5] & (1 << (b & 31))) === 0) return false;
+  }
+  return true;
+}
+
+function filterAdd(bits: Uint32Array, term: string): void {
+  const h1 = termHash(term);
+  const mask = bits.length * 32 - 1;
+  for (let i = 0; i < 4; i++) {
+    const b = (h1 + Math.imul(i, termHash2)) & mask;
+    bits[b >>> 5] |= 1 << (b & 31);
+  }
+}
+
+/** ft rows per multi-row INSERT of a whole-folder write (8 params each). */
+const FT_BULK_ROWS = 256;
+
+/**
+ * One whole folder's ft/headrc rows aggregated in JS (#131) — the same rows
+ * streamNoteIntoFt's per-note upserts produce, without a SQL round trip per
+ * note. Notes are added in folder path order (note index i ↔ ord
+ * (i + 1)·ORD_GAP), so "first seen" is simply the first add:
+ *
+ *   w          sum of the non-heading weighted counts
+ *   nord/npos  first note and position (index in its non-heading list)
+ *   hord/hpos  first note and position (index in its distinct heading ids)
+ *   lc         distinct heading texts containing the term (a text counts
+ *              for its ids on its first occurrence in the folder)
+ *   headrc     heading text → number of notes carrying it
+ *
+ * Memory is per folder: parallel typed columns sized by the folder's
+ * distinct terms (grown by doubling), plus one tid → slot index sized by
+ * the dictionary's max id. The index is shared across folders and cleared
+ * entry by entry on drain, so a cold build never holds more than one
+ * folder's rows in JS.
+ */
+export class FolderRowsBuilder {
+  private slot = new Int32Array(0);
+  private n = 0;
+  private tid = new Int32Array(1024);
+  private w = new Int32Array(1024);
+  private lc = new Int32Array(1024);
+  private nNote = new Int32Array(1024);
+  private nPos = new Int32Array(1024);
+  private hNote = new Int32Array(1024);
+  private hPos = new Int32Array(1024);
+  private heads = new Map<string, number>();
+
+  /** Slot of a term id in the folder's columns, created on first sight. */
+  private at(id: number): number {
+    if (id >= this.slot.length) {
+      const grown = new Int32Array(
+        Math.max(id + 1, Math.ceil(this.slot.length * 1.5)),
+      );
+      grown.set(this.slot);
+      this.slot = grown;
+    }
+    const s = this.slot[id];
+    if (s !== 0) return s - 1;
+    if (this.n === this.tid.length) this.grow();
+    const i = this.n++;
+    this.slot[id] = i + 1;
+    this.tid[i] = id;
+    this.w[i] = 0;
+    this.lc[i] = 0;
+    this.nNote[i] = -1;
+    this.nPos[i] = 0;
+    this.hNote[i] = -1;
+    this.hPos[i] = 0;
+    return i;
+  }
+
+  private grow(): void {
+    const cap = this.tid.length * 2;
+    const more = (a: Int32Array): Int32Array<ArrayBuffer> => {
+      const b = new Int32Array(cap);
+      b.set(a);
+      return b;
+    };
+    this.tid = more(this.tid);
+    this.w = more(this.w);
+    this.lc = more(this.lc);
+    this.nNote = more(this.nNote);
+    this.nPos = more(this.nPos);
+    this.hNote = more(this.hNote);
+    this.hPos = more(this.hPos);
+  }
+
+  /** Add the folder's note at index noteIndex (path order). */
+  add(noteIndex: number, rec: StreamedNote): void {
+    if (rec.skip || rec.data === null) return;
+    const a = rec.data;
+    const nn = a[0];
+    for (let k = 0, p = 1; k < nn; k++, p += 2) {
+      const i = this.at(a[p]);
+      this.w[i] += a[p + 1];
+      if (this.nNote[i] < 0) {
+        this.nNote[i] = noteIndex;
+        this.nPos[i] = k;
+      }
+    }
+    // Distinct heading-seen ids in first-seen order: position = rank among
+    // them (streamNoteIntoFt's hIds index).
+    let pos = 0;
+    const seen = new Set<number>();
+    for (const [, ids] of rec.heads) {
+      for (const id of ids) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const i = this.at(id);
+        if (this.hNote[i] < 0) {
+          this.hNote[i] = noteIndex;
+          this.hPos[i] = pos;
+        }
+        pos++;
+      }
+    }
+    for (const [text, ids] of rec.heads) {
+      const n = (this.heads.get(text) ?? 0) + 1;
+      this.heads.set(text, n);
+      if (n === 1) {
+        for (const id of ids) this.lc[this.at(id)]++;
+      }
+    }
+  }
+
+  /**
+   * Emit every row as [fid, tid, w, lc, nord, npos, hord, hpos] in tid
+   * order, then reset the folder state (the slot index is cleared entry by
+   * entry; the columns drop back to their initial size).
+   */
+  drain(fid: number, emit: (row: (number | null)[]) => void): void {
+    const order = this.tid.slice(0, this.n).sort();
+    const row: (number | null)[] = [fid, 0, 0, 0, null, null, null, null];
+    for (let k = 0; k < order.length; k++) {
+      const id = order[k];
+      const i = this.slot[id] - 1;
+      this.slot[id] = 0;
+      row[1] = id;
+      row[2] = this.w[i];
+      row[3] = this.lc[i];
+      const nn = this.nNote[i];
+      row[4] = nn < 0 ? null : (nn + 1) * ORD_GAP;
+      row[5] = nn < 0 ? null : this.nPos[i];
+      const hn = this.hNote[i];
+      row[6] = hn < 0 ? null : (hn + 1) * ORD_GAP;
+      row[7] = hn < 0 ? null : this.hPos[i];
+      emit(row);
+    }
+    this.n = 0;
+    if (this.tid.length > 1024) {
+      this.tid = new Int32Array(1024);
+      this.w = new Int32Array(1024);
+      this.lc = new Int32Array(1024);
+      this.nNote = new Int32Array(1024);
+      this.nPos = new Int32Array(1024);
+      this.hNote = new Int32Array(1024);
+      this.hPos = new Int32Array(1024);
+    }
+  }
+
+  /** The folder's [heading text, note count] pairs; clears them. */
+  takeHeadings(): [string, number][] {
+    const out = [...this.heads];
+    this.heads = new Map();
+    return out;
   }
 }
 
@@ -913,12 +1138,19 @@ export class SqliteOverviewStore {
    */
   private txOpen = false;
   private maxId = -1;
-  /** Cold-build interning: an in-memory dict while the whole vault is
-   *  rewritten, so 1.4M first-seen terms skip per-term SQL probes. */
-  private coldDict: Map<string, number> | null = null;
-  private coldIds: Map<number, string> | null = null;
-  private coldTerms: string[] = [];
-  private coldFlushed = 0;
+  /** Whether the cold-build pragmas are in force (see beginColdBuild). */
+  private cold = false;
+  /**
+   * Cold build only: a Bloom filter (2 MB, no strings) over every term this
+   * build interned. The dictionary started empty, so a term the filter has
+   * never seen is certainly new and skips its SQL lookup — about half of a
+   * cold build's lookups. A false positive only costs a lookup that misses.
+   */
+  private coldSeen: Uint32Array | null = null;
+  /** terms(term) index known to exist on this connection (#131). */
+  private termIndexReady = false;
+  /** Bulk ft insert statements, prepared on first whole-folder write. */
+  private ftBulk: { many: StatementSync; one: StatementSync } | null = null;
   /** Per-note delta statements, prepared on first use (see prepareDelta). */
   private deltaStmts: DeltaStmts | null = null;
   /** The SQL top-k statement over this connection's temp scoring tables. */
@@ -944,6 +1176,7 @@ export class SqliteOverviewStore {
       this.stmts = prepareAll(db);
       this.deltaStmts = null;
       this.topStmt = null;
+      this.ftBulk = null;
       this.closed = false;
       return;
     }
@@ -956,6 +1189,9 @@ export class SqliteOverviewStore {
     this.maxId = -1;
     this.deltaStmts = null;
     this.topStmt = null;
+    this.ftBulk = null;
+    this.cold = false;
+    this.coldSeen = null;
     try {
       this.db.close();
     } catch {
@@ -1049,94 +1285,119 @@ export class SqliteOverviewStore {
   }
 
   /**
-   * Cold-build interning mode: the caller enables it when the whole store is
-   * being rewritten, so interning uses an in-memory dict and terms are
-   * flushed in one sorted batch (sorted inserts keep the UNIQUE index
-   * append-only — ~4× faster than first-seen-order inserts).
+   * Cold-build mode (#131), inside the write transaction right after
+   * resetData: the whole store is rebuilt folder by folder in batches, and
+   * every batch interns through SQL — there is no in-memory dictionary, so
+   * the UNIQUE term index must exist while the terms load (the table is
+   * empty here, so creating it is free). The page cache is raised to 16 MB
+   * for this transaction only: the measured optimum for bulk row loads
+   * (r3 migrate2: 11 s at 16 MB vs 15 s at 2 MB, and a larger cache only
+   * adds RSS). endColdBuild restores the 2 MB default.
    */
-  setColdInterning(on: boolean): void {
-    this.coldDict = on ? new Map() : null;
-    this.coldIds = on ? new Map() : null;
-    this.coldTerms = [];
-    this.coldFlushed = 0;
+  beginColdBuild(): void {
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)");
+    this.db.exec("PRAGMA cache_size = -16384");
+    this.cold = true;
+    this.coldSeen = new Uint32Array(coldFilterBits >>> 5);
+  }
+
+  /** Leave cold-build mode (after commit or rollback). */
+  endColdBuild(): void {
+    this.coldSeen = null;
+    if (!this.cold || this.closed) return;
+    this.cold = false;
+    this.db.exec("PRAGMA cache_size = -2048");
   }
 
   /**
-   * Intern every term in the iterable, returning term → id. New terms are
-   * sorted before inserting (the UNIQUE index is append-friendly that way);
-   * in cold mode they only collect in memory until the next flush.
+   * Intern every term in the iterable, returning term → id. One json_each
+   * lookup per CHUNK terms; the missing terms are inserted sorted (the
+   * UNIQUE index is append-friendlier that way) with json_each bulk
+   * inserts, taking consecutive ids after the high-water mark.
    */
   intern(terms: Iterable<string>): Map<string, number> {
-    this.ensureOpen();
+    const list = [...new Set(terms)];
+    const g = this.internList(list);
     const ids = new Map<string, number>();
-    if (this.coldDict !== null) {
-      for (const term of terms) {
-        let id = this.coldDict.get(term);
-        if (id === undefined) {
-          id = ++this.maxId;
-          this.coldDict.set(term, id);
-          this.coldIds?.set(id, term);
-          this.coldTerms.push(term);
-        }
-        ids.set(term, id);
-      }
-      return ids;
+    for (let k = 0; k < list.length; k++) ids.set(list[k], g[k]);
+    return ids;
+  }
+
+  /**
+   * Intern a list of distinct terms, returning their ids aligned with the
+   * list (the batch interning of a whole-folder build, #131). Lookups
+   * return (array index, id) pairs — the term text never crosses back, so
+   * they allocate no strings.
+   */
+  internList(list: string[]): Int32Array {
+    this.ensureOpen();
+    // The json_each lookup joins on terms(term): without the index it is a
+    // full dictionary scan per looked-up term (minutes on a 1.45M-term
+    // dictionary). Every store written since #120 has it, but a file from
+    // anywhere else must not silently turn each miss into that scan.
+    if (!this.termIndexReady) {
+      this.db.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)",
+      );
+      this.termIndexReady = true;
     }
     // A store opened in this process may never have read the dictionary's
     // high-water mark (only a wipe or maxTermId() sets it): new ids must
     // continue after MAX(id), never restart at 0.
     this.maxTermId();
-    const list = [...terms];
-    for (let i = 0; i < list.length; i += CHUNK) {
-      const rows = this.stmts.termIdsBatch.all(
-        JSON.stringify(list.slice(i, i + CHUNK)),
-      ) as unknown as { id: number; term: string }[];
-      for (const row of rows) ids.set(row.term, row.id);
-    }
-    const missing = list.filter((t) => !ids.has(t)).sort();
-    for (const term of missing) {
-      const id = ++this.maxId;
-      this.stmts.termInsert.run(id, term);
-      ids.set(term, id);
-    }
-    return ids;
-  }
-
-  /**
-   * Insert the cold-mode terms not yet flushed — in id order, which is
-   * append-only on the rowid b-tree. Called per folder before its cand
-   * INSERT so the SQL candidate filter's terms JOIN sees the folder's
-   * terms; the UNIQUE term index is only built by the final flush.
-   */
-  private flushColdDelta(): void {
-    if (this.coldDict === null) return;
-    const coldDict = this.coldDict;
-    const ins = this.db.prepare(
-      "INSERT INTO terms(id, term) " +
-        "SELECT e.value ->> 0, e.value ->> 1 FROM json_each(?) e",
-    );
-    const rows: (number | string)[][] = [];
-    for (let i = this.coldFlushed; i < this.coldTerms.length; i++) {
-      const term = this.coldTerms[i];
-      rows.push([coldDict.get(term) as number, term]);
-      if (rows.length >= CHUNK) {
-        ins.run(JSON.stringify(rows));
-        rows.length = 0;
+    const g = new Int32Array(list.length).fill(-1);
+    const seen = this.coldSeen;
+    // Indices of the terms that may already be interned: all of them,
+    // unless the cold filter rules some out.
+    let probe: number[] | null = null;
+    if (seen !== null) {
+      probe = [];
+      for (let k = 0; k < list.length; k++) {
+        if (filterHas(seen, list[k])) probe.push(k);
       }
     }
-    if (rows.length > 0) ins.run(JSON.stringify(rows));
-    this.coldFlushed = this.coldTerms.length;
-  }
-
-  /**
-   * Persist the cold-mode dictionary (call inside the write transaction):
-   * flushes the pending terms, then builds the UNIQUE term index once — a
-   * live index during the bulk load would take 1.4M random-order inserts.
-   */
-  flushColdTerms(): void {
-    if (this.coldDict === null) return;
-    this.flushColdDelta();
-    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)");
+    const nProbe = probe === null ? list.length : probe.length;
+    for (let i = 0; i < nProbe; i += CHUNK) {
+      const end = Math.min(i + CHUNK, nProbe);
+      const part: string[] = [];
+      for (let j = i; j < end; j++) {
+        part.push(list[probe === null ? j : probe[j]]);
+      }
+      const rows = this.stmts.termIdsAt.all(
+        JSON.stringify(part),
+      ) as unknown as { k: number; id: number }[];
+      for (const row of rows) {
+        const j = i + row.k;
+        g[probe === null ? j : probe[j]] = row.id;
+      }
+    }
+    const missing: number[] = [];
+    for (let k = 0; k < list.length; k++) if (g[k] < 0) missing.push(k);
+    if (missing.length === 0) return g;
+    if (seen !== null) for (const k of missing) filterAdd(seen, list[k]);
+    missing.sort((a, b) =>
+      list[a] < list[b] ? -1 : list[a] > list[b] ? 1 : 0,
+    );
+    // The list is meant to be distinct; a repeated term must still get one
+    // id, not a second insert that fails the UNIQUE index and rolls the run
+    // back into the JSON fallback.
+    const unique: string[] = [];
+    const first = this.maxId + 1;
+    for (let j = 0; j < missing.length; j++) {
+      const term = list[missing[j]];
+      if (unique.length === 0 || unique[unique.length - 1] !== term) {
+        unique.push(term);
+      }
+      g[missing[j]] = first + unique.length - 1;
+    }
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      this.stmts.termInsertBulk.run(
+        first + i,
+        JSON.stringify(unique.slice(i, i + CHUNK)),
+      );
+    }
+    this.maxId += unique.length;
+    return g;
   }
 
   /**
@@ -1157,13 +1418,6 @@ export class SqliteOverviewStore {
       ) as unknown as { id: number; term: string }[];
       for (const row of rows) out.set(row.id, row.term);
     }
-    // Cold mode keeps unflushed terms in memory only.
-    if (this.coldIds !== null) {
-      for (const want of missing) {
-        const term = this.coldIds.get(want);
-        if (term !== undefined) out.set(want, term);
-      }
-    }
     return out;
   }
 
@@ -1175,13 +1429,6 @@ export class SqliteOverviewStore {
     const out = new Map<string, number>();
     if (terms.length === 0) return out;
     this.ensureOpen();
-    if (this.coldDict !== null) {
-      for (const term of terms) {
-        const id = this.coldDict.get(term);
-        if (id !== undefined) out.set(term, id);
-      }
-      return out;
-    }
     for (let i = 0; i < terms.length; i += CHUNK) {
       const rows = this.stmts.termIdsBatch.all(
         JSON.stringify(terms.slice(i, i + CHUNK)),
@@ -1321,9 +1568,47 @@ export class SqliteOverviewStore {
     this.stmts.headrcDeleteFolder.run(fid);
   }
 
-  /** Stream one note's record into the folder's ft/headrc rows. */
-  streamFolderNote(fid: number, ord: number, rec: StreamedNote): void {
-    streamNoteIntoFt(this.stmts, fid, ord, rec);
+  /**
+   * Write one whole folder's aggregated rows (#131, write txn open, the
+   * folder's previous rows cleared): ft in (fid, tid) order with multi-row
+   * VALUES — appends on the WITHOUT ROWID primary key — then headrc, then
+   * cand with the SQL filter. dft is the caller's: bumpFolderDft on a miss,
+   * one rebuildDft at the end of a cold build. Resets the builder.
+   */
+  writeFolderRows(
+    fid: number,
+    rows: FolderRowsBuilder,
+    tokens: string[],
+  ): void {
+    if (this.ftBulk === null) {
+      const values = Array(FT_BULK_ROWS).fill("(?,?,?,?,?,?,?,?)").join(",");
+      this.ftBulk = {
+        many: this.db.prepare(
+          `INSERT INTO ft(fid, tid, w, lc, nord, npos, hord, hpos) VALUES ${values}`,
+        ),
+        one: this.db.prepare(
+          "INSERT INTO ft(fid, tid, w, lc, nord, npos, hord, hpos) " +
+            "VALUES (?,?,?,?,?,?,?,?)",
+        ),
+      };
+    }
+    const bulk = this.ftBulk;
+    const params: (number | null)[] = [];
+    rows.drain(fid, (row) => {
+      for (const v of row) params.push(v);
+      if (params.length === FT_BULK_ROWS * 8) {
+        bulk.many.run(...params);
+        params.length = 0;
+      }
+    });
+    for (let i = 0; i < params.length; i += 8) {
+      bulk.one.run(...params.slice(i, i + 8));
+    }
+    const heads = rows.takeHeadings();
+    for (let i = 0; i < heads.length; i += CHUNK) {
+      this.stmts.headrcBulk.run(fid, JSON.stringify(heads.slice(i, i + CHUNK)));
+    }
+    this.fillFolderCand(fid, tokens);
   }
 
   private delta(): DeltaStmts {
@@ -1594,11 +1879,9 @@ export class SqliteOverviewStore {
 
   /**
    * Fill the folder's cand rows with the SQL candidate filter (write txn
-   * open, after every note streamed). Flushes pending cold-interned terms
-   * first so the filter's terms JOIN sees them.
+   * open, after the folder's ft rows are written).
    */
   fillFolderCand(fid: number, tokens: Iterable<string>): void {
-    this.flushColdDelta();
     const ids = [...this.idsForTerms([...tokens]).values()];
     this.stmts.candFill.run(fid, JSON.stringify(ids));
   }

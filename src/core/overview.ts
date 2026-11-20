@@ -19,6 +19,7 @@ import {
 } from "../utils/overview-cache.js";
 import {
   createOverviewStore,
+  FolderRowsBuilder,
   ORD_GAP,
   reportOverviewStoreFailure,
   type SqliteOverviewStore,
@@ -60,6 +61,23 @@ const COLLAPSE_MIN_CHILDREN = 5;
 const COLLAPSE_SIMILARITY = 0.15;
 const COLLAPSE_COSINE_TOP_TERMS = 60;
 const COLLAPSE_PAIRWISE_CAP = 20;
+/** Notes tokenized per SQL interning round of a whole-folder build (#131). */
+let COLD_BATCH = 256;
+/** A batch closes early once it holds this many distinct terms: the batch
+ *  map is the cold build's largest live structure, and V8 sizes the next
+ *  heap limit as a multiple of the live set. */
+let COLD_BATCH_TERMS = 1 << 16;
+
+/** Test seam: whole-folder batch bounds (notes, distinct terms); no
+ *  arguments restores the defaults. */
+export function setOverviewColdBatchForTests(
+  notes = 256,
+  terms = 1 << 16,
+): void {
+  // A bound of 0 would never close a batch with anything in it.
+  COLD_BATCH = Math.max(1, notes);
+  COLD_BATCH_TERMS = Math.max(1, terms);
+}
 const FRONTMATTER_RE = /^---[\s\S]*?---\n?/;
 const ATX_HEADING_LINE_RE = /^#{1,6}\s+.+$/gm;
 const WIKILINK_ONLY_RE = /^\[\[[^\]]+(?:\|[^\]]+)?\]\]$/;
@@ -478,7 +496,7 @@ function buildFolderData(
     let properties: Record<string, unknown> = {};
 
     try {
-      ({ properties } = parseFrontmatter(content));
+      ({ properties } = parseFrontmatter(content, { cache: false }));
     } catch {
       warnings.push(`Skipping ${file} (malformed YAML frontmatter)`);
       continue;
@@ -953,24 +971,39 @@ interface NoteRecord {
   data: Int32Array | null;
 }
 
+/** One note tokenized but not yet interned (the batch interning input). */
+interface NoteTokens {
+  skip: boolean;
+  tags: string[];
+  nh: Map<string, number>;
+  body: Map<string, number>;
+  headingCache: Map<string, Map<string, number>>;
+  headingOrder: string[];
+}
+
+const SKIPPED_TOKENS: NoteTokens = {
+  skip: true,
+  tags: [],
+  nh: new Map(),
+  body: new Map(),
+  headingCache: new Map(),
+  headingOrder: [],
+};
+
 /**
  * One note's term data — exactly the slices buildFolderData computes for a
  * file: non-heading weighted counts (filename ×2, title ×2, frontmatter ×2,
  * body ×1) in first-seen order, body counts (heading lines then body text)
  * in first-seen order, the note's tags, and per-unique-heading-text term
- * lists in first-seen order.
+ * lists in first-seen order. Term text only: encodeNote maps it to ids.
  */
-function extractNoteRecord(
-  vaultPath: string,
-  file: string,
-  store: SqliteOverviewStore,
-): NoteRecord {
+function tokenizeNote(vaultPath: string, file: string): NoteTokens {
   const content = fs.readFileSync(path.join(vaultPath, file), "utf-8");
   let properties: Record<string, unknown> = {};
   try {
-    ({ properties } = parseFrontmatter(content));
+    ({ properties } = parseFrontmatter(content, { cache: false }));
   } catch {
-    return { skip: true, tags: [], heads: [], data: null };
+    return SKIPPED_TOKENS;
   }
 
   const tags = new Set<string>();
@@ -1006,34 +1039,143 @@ function extractNoteRecord(
   const bodyCounts = termCounts(markdownBodyText(content));
   mergeCounts(nh, bodyCounts, 1);
   mergeCounts(body, bodyCounts, 1);
+  return { skip: false, tags: [...tags], nh, body, headingCache, headingOrder };
+}
 
-  const vocab = new Set<string>([...nh.keys(), ...body.keys()]);
-  for (const counts of headingCache.values()) {
+/** Add a tokenized note's distinct terms to a vocabulary set. */
+function addVocab(tok: NoteTokens, vocab: Set<string>): void {
+  for (const term of tok.nh.keys()) vocab.add(term);
+  for (const term of tok.body.keys()) vocab.add(term);
+  for (const counts of tok.headingCache.values()) {
     for (const term of counts.keys()) vocab.add(term);
   }
-  const ids = store.intern(vocab);
+}
 
-  const data = new Int32Array(2 + nh.size * 2 + body.size * 2);
+/** Int32 length of a tokenized note's data blob. */
+function noteDataLength(tok: NoteTokens): number {
+  return 2 + tok.nh.size * 2 + tok.body.size * 2;
+}
+
+/**
+ * A tokenized note's record, each term mapped through idOf. The data blob
+ * is written into `into` when given (noteDataLength long), else into a
+ * fresh array.
+ */
+function encodeNote(
+  tok: NoteTokens,
+  idOf: (term: string) => number,
+  into?: Int32Array,
+): NoteRecord {
+  if (tok.skip) return { skip: true, tags: [], heads: [], data: null };
+  const { nh, body, headingCache } = tok;
+  const data = into ?? new Int32Array(noteDataLength(tok));
   let p = 0;
   data[p++] = nh.size;
   for (const [term, count] of nh) {
-    data[p++] = ids.get(term) as number;
+    data[p++] = idOf(term);
     data[p++] = count;
   }
   data[p++] = body.size;
   for (const [term, count] of body) {
-    data[p++] = ids.get(term) as number;
+    data[p++] = idOf(term);
     data[p++] = count;
   }
 
-  const heads: [string, number[]][] = headingOrder.map((key) => [
+  const heads: [string, number[]][] = tok.headingOrder.map((key) => [
     key,
-    [...(headingCache.get(key) as Map<string, number>).keys()].map(
-      (term) => ids.get(term) as number,
-    ),
+    [...(headingCache.get(key) as Map<string, number>).keys()].map(idOf),
   ]);
-  return { skip: false, tags: [...tags], heads, data };
+  return { skip: false, tags: tok.tags, heads, data };
 }
+
+/** Tokenize and intern one note (the per-note delta path). */
+function extractNoteRecord(
+  vaultPath: string,
+  file: string,
+  store: SqliteOverviewStore,
+): NoteRecord {
+  const tok = tokenizeNote(vaultPath, file);
+  if (tok.skip) return encodeNote(tok, () => 0);
+  const vocab = new Set<string>();
+  addVocab(tok, vocab);
+  const ids = store.intern(vocab);
+  return encodeNote(tok, (term) => ids.get(term) as number);
+}
+
+/**
+ * One batch of a whole-folder build (#131): notes are tokenized and
+ * encoded at once over batch-local term indices, so the batch holds one
+ * term → index map and packed Int32 blobs rather than every note's term
+ * maps. After the batch is interned (one SQL round per CHUNK terms),
+ * globalize() rewrites a note's record over dictionary ids.
+ */
+class TermBatch {
+  private index = new Map<string, number>();
+  readonly terms: string[] = [];
+  private arena = new Int32Array(1 << 16);
+  private used = 0;
+  readonly idOf = (term: string): number => {
+    let i = this.index.get(term);
+    if (i === undefined) {
+      i = this.terms.length;
+      this.terms.push(term);
+      this.index.set(term, i);
+    }
+    return i;
+  };
+
+  /** Encode a tokenized note over local indices (its blob in the arena). */
+  add(tok: NoteTokens): NoteRecord {
+    if (tok.skip) return encodeNote(tok, this.idOf);
+    const len = noteDataLength(tok);
+    if (this.used + len > this.arena.length) {
+      // Earlier records keep views on the old buffer; it stays alive until
+      // the batch is done.
+      this.arena = new Int32Array(Math.max(len, this.arena.length * 2));
+      this.used = 0;
+    }
+    const into = this.arena.subarray(this.used, this.used + len);
+    this.used += len;
+    return encodeNote(tok, this.idOf, into);
+  }
+
+  /** A local record over dictionary ids g (data in one reused buffer). */
+  globalize(rec: NoteRecord, g: Int32Array): NoteRecord {
+    if (rec.data === null) return rec;
+    const a = rec.data;
+    if (globalScratch.length < a.length) {
+      globalScratch = new Int32Array(
+        Math.max(a.length, globalScratch.length * 2),
+      );
+    }
+    const data = globalScratch.subarray(0, a.length);
+    const nn = a[0];
+    data[0] = nn;
+    let p = 1;
+    for (let k = 0; k < nn; k++, p += 2) {
+      data[p] = g[a[p]];
+      data[p + 1] = a[p + 1];
+    }
+    const nb = a[p];
+    data[p++] = nb;
+    for (let k = 0; k < nb; k++, p += 2) {
+      data[p] = g[a[p]];
+      data[p + 1] = a[p + 1];
+    }
+    const heads: [string, number[]][] = rec.heads.map(([text, ids]) => [
+      text,
+      ids.map((i) => g[i]),
+    ]);
+    return { skip: false, tags: rec.tags, heads, data };
+  }
+}
+
+/**
+ * globalize's output buffer: a record is consumed (blob bound — the bind
+ * copies it — and aggregated) before the next one is globalized, so a cold
+ * build does not leave one ArrayBuffer per note for the GC to find.
+ */
+let globalScratch = new Int32Array(0);
 
 /**
  * A term's candidate-flag byte resolved lazily from the dictionary — the v1
@@ -1633,12 +1775,13 @@ function overviewFromStore(
           ignoreFingerprint,
           templatesFolder,
         );
-        store.setColdInterning(true);
+        store.beginColdBuild();
       } else {
         store.setMeta(ignoreFingerprint, templatesFolder);
         if (dfDepthMismatch) store.rebuildDft(maxDepth);
       }
       store.setDfDepth(maxDepth);
+      const rows = new FolderRowsBuilder();
       for (const folder of toAggregate) {
         const list = folderFiles.get(folder) ?? [];
         const listSet = new Set(list);
@@ -1649,65 +1792,101 @@ function overviewFromStore(
         for (const p of storedByFolder.get(folder) ?? []) {
           if (!listSet.has(p)) store.deleteNote(p, folder);
         }
-        const getRecord = (file: string): NoteRecord => {
-          const s = storedNotes.get(file);
-          const g = sigs.get(file) as OverviewFileSig;
-          const stored = store.getNote(file);
-          if (stored && s && s.mtime === g.mtime && s.size === g.size) {
-            if (s.folder !== folder) {
-              // Same file, different folder attribution (moved): the blob
-              // is still valid — re-attribute it instead of re-tokenizing.
-              store.upsertNote(
-                file,
-                folder,
-                s.mtime,
-                s.size,
-                stored.skip,
-                stored.tags,
-                stored.heads,
-                stored.data,
-              );
-            }
-            return {
-              skip: stored.skip === 1,
-              tags: JSON.parse(stored.tags) as string[],
-              heads: JSON.parse(stored.heads) as [string, number[]][],
-              data: stored.data === null ? null : i32(stored.data),
-            };
-          }
-          const rec = extractNoteRecord(vaultPath, file, store);
-          store.upsertNote(
-            file,
-            folder,
-            g.mtime,
-            g.size,
-            rec.skip ? 1 : 0,
-            JSON.stringify(rec.tags),
-            JSON.stringify(rec.heads),
-            rec.data === null ? null : u8(rec.data),
-          );
-          return rec;
-        };
         const fid = store.folderFid(folder);
         store.clearFolderAggregation(fid);
         const tags = new Set<string>();
         const warn: string[] = [];
-        // Notes stream into ft in path order, ord spaced 2^20 — the first-
-        // seen keys (nord/npos, hord/hpos) reproduce buildFolderData's tf
-        // order exactly, and the folder Map's insertion order is preserved.
-        list.forEach((file, i) => {
-          const ord = (i + 1) * ORD_GAP;
-          const rec = getRecord(file);
-          store.noteSetOrd(file, ord);
-          if (rec.skip) {
-            warn.push(`Skipping ${file} (malformed YAML frontmatter)`);
-            return;
+        // Notes aggregate in path order, ord spaced 2^20 — the first-seen
+        // keys (nord/npos, hord/hpos) reproduce buildFolderData's tf order
+        // exactly. Batches of up to COLD_BATCH notes (or COLD_BATCH_TERMS
+        // distinct terms) are tokenized, then interned through SQL in one
+        // lookup (#131): no whole-vault dictionary.
+        for (let b = 0; b < list.length; ) {
+          // Per note: a stored record (dictionary ids) or a fresh one over
+          // the batch's local term indices.
+          const recs: [NoteRecord, boolean][] = [];
+          const terms = new TermBatch();
+          const batch: string[] = [];
+          for (
+            let k = 0;
+            b + k < list.length &&
+            k < COLD_BATCH &&
+            terms.terms.length < COLD_BATCH_TERMS;
+            k++
+          ) {
+            const file = list[b + k];
+            batch.push(file);
+            const s = storedNotes.get(file);
+            const g = sigs.get(file) as OverviewFileSig;
+            const stored =
+              s && s.mtime === g.mtime && s.size === g.size
+                ? store.getNote(file)
+                : undefined;
+            if (stored && s) {
+              const ord = (b + k + 1) * ORD_GAP;
+              if (s.folder !== folder) {
+                // Same file, different folder attribution (moved): the
+                // blob is still valid — re-attribute it, no re-tokenizing.
+                store.upsertNote(
+                  file,
+                  folder,
+                  s.mtime,
+                  s.size,
+                  stored.skip,
+                  stored.tags,
+                  stored.heads,
+                  stored.data,
+                  ord,
+                );
+              } else {
+                store.noteSetOrd(file, ord);
+              }
+              recs.push([
+                {
+                  skip: stored.skip === 1,
+                  tags: JSON.parse(stored.tags) as string[],
+                  heads: JSON.parse(stored.heads) as [string, number[]][],
+                  data: stored.data === null ? null : i32(stored.data),
+                },
+                false,
+              ]);
+            } else {
+              recs.push([terms.add(tokenizeNote(vaultPath, file)), true]);
+            }
           }
-          for (const tag of rec.tags) tags.add(tag);
-          store.streamFolderNote(fid, ord, rec);
-        });
-        store.fillFolderCand(fid, folderKeywordTokens(folder));
-        store.bumpFolderDft(fid);
+          const ids = store.internList(terms.terms);
+          const start = b;
+          b += batch.length;
+          for (let k = 0; k < batch.length; k++) {
+            const file = batch[k];
+            const i = start + k;
+            let [rec, fresh] = recs[k];
+            if (fresh) {
+              rec = terms.globalize(rec, ids);
+              const g = sigs.get(file) as OverviewFileSig;
+              store.upsertNote(
+                file,
+                folder,
+                g.mtime,
+                g.size,
+                rec.skip ? 1 : 0,
+                JSON.stringify(rec.tags),
+                JSON.stringify(rec.heads),
+                rec.data === null ? null : u8(rec.data),
+                (i + 1) * ORD_GAP,
+              );
+            }
+            if (rec.skip) {
+              warn.push(`Skipping ${file} (malformed YAML frontmatter)`);
+              continue;
+            }
+            for (const tag of rec.tags) tags.add(tag);
+            rows.add(i, rec);
+          }
+        }
+        store.writeFolderRows(fid, rows, [...folderKeywordTokens(folder)]);
+        // A cold build counts dft once at the end (one GROUP BY).
+        if (!wipe) store.bumpFolderDft(fid);
         store.upsertFolder(
           folder,
           list.length,
@@ -1728,14 +1907,16 @@ function overviewFromStore(
         );
       }
       for (const folder of foldersToDelete) store.deleteFolder(folder);
-      store.flushColdTerms();
+      if (wipe) store.rebuildDft(maxDepth);
       store.endWrite(true);
-      store.setColdInterning(false);
+      store.endColdBuild();
+      globalScratch = new Int32Array(0);
       syncStats.whole = toAggregate;
       syncStats.delta = [...deltas.keys()];
     } catch (err) {
       store.endWrite(false);
-      store.setColdInterning(false);
+      store.endColdBuild();
+      globalScratch = new Int32Array(0);
       syncStats.orphanScans = 0;
       syncStats.renumbers = 0;
       throw err;

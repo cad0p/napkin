@@ -28,10 +28,12 @@ function loadMatter(): Matter {
  * Evict the cache when parsing throws so every parse of malformed content
  * fails deterministically.
  */
-function safeMatter(content: string): GrayMatterFile {
+function safeMatter(content: string, cache = true): GrayMatterFile {
   const matter = loadMatter();
   try {
-    return matter(content);
+    // Any options object (even {}, which resolves to the same defaults)
+    // bypasses gray-matter's process-lifetime cache.
+    return cache ? matter(content) : matter(content, {});
   } catch (err) {
     // Runtime-only API not present in gray-matter's type declarations.
     (matter as unknown as { clearCache: () => void }).clearCache();
@@ -47,9 +49,19 @@ export interface ParsedFrontmatter {
 
 /**
  * Parse YAML frontmatter from markdown content.
+ *
+ * gray-matter memoizes every parse it is given without options in a
+ * module-level object keyed by the content string — the content, its Buffer
+ * copy and the parse result stay reachable for the life of the process.
+ * One-pass scans over a whole vault (the overview's note tokenizing, #131)
+ * pass `{ cache: false }` so each note is garbage once it is tokenized; the
+ * parse result is the same either way.
  */
-export function parseFrontmatter(content: string): ParsedFrontmatter {
-  const result = safeMatter(content);
+export function parseFrontmatter(
+  content: string,
+  opts?: { cache?: boolean },
+): ParsedFrontmatter {
+  const result = safeMatter(content, opts?.cache ?? true);
   return {
     properties: result.data,
     body: result.content,
