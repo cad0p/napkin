@@ -137,7 +137,18 @@ import { findVault, NAPKIN_MARKER, VaultNotFoundError } from "@cad0p/napkin/vaul
 const vault = findVault("/path/to/project"); // throws VaultNotFoundError
 ```
 
-Both entries also resolve through `require()` (Node's `require(esm)`), which
+To build the overview without loading the whole SDK — a short-lived
+process that only needs the vault map — import the slim overview entry. It
+returns exactly what `Napkin#overview` returns and skips the search,
+bases, canvas, tasks, and templates modules:
+
+```typescript
+import { buildVaultOverview } from "@cad0p/napkin/overview";
+
+const overview = buildVaultOverview("/path/to/project"); // = new Napkin(path).overview()
+```
+
+All entries also resolve through `require()` (Node's `require(esm)`), which
 returns the same module instance as `import`.
 
 ---

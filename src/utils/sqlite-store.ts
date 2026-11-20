@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import type {
   IndexDiff,
@@ -20,6 +19,11 @@ import {
   linkCountKey,
   linkTarget,
 } from "./search-cache.js";
+import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
+
+// Re-exported so tests can reach the loader through this module without
+// caring which file defines it (loadSqlite moved to sqlite-loader, #123).
+export { loadSqlite };
 
 /**
  * The SQLite search-index store (#106, part of #94).
@@ -67,7 +71,6 @@ import {
  * `JsonStore`.
  */
 
-type SqliteModule = typeof import("node:sqlite");
 type DatabaseSync = import("node:sqlite").DatabaseSync;
 type StatementSync = import("node:sqlite").StatementSync;
 
@@ -79,54 +82,6 @@ const SCHEMA_VERSION = 2;
 let busyTimeoutMs = 5000;
 export function setBusyTimeoutForTests(ms: number): void {
   busyTimeoutMs = ms;
-}
-
-let sqliteModule: SqliteModule | null | undefined;
-
-/**
- * Import `node:sqlite`, suppressing only its ExperimentalWarning (Node 22
- * prints it on first load; 24+ print nothing). The warning is filtered for
- * the synchronous duration of the `require` only, so every other warning —
- * experimental or not — still reaches stderr.
- *
- * The module is loaded through `createRequire` because a static `import`
- * would run before this code has a chance to install the filter.
- */
-export function loadSqlite(): SqliteModule | null {
-  if (sqliteModule !== undefined) return sqliteModule;
-  const emitWarning = process.emitWarning;
-  process.emitWarning = function (
-    this: typeof process,
-    warning: unknown,
-    ...rest: unknown[]
-  ) {
-    const message =
-      typeof warning === "string"
-        ? warning
-        : (warning as { message?: string } | undefined)?.message;
-    const opt = rest[0];
-    const type =
-      typeof opt === "string"
-        ? opt
-        : (opt as { type?: string } | undefined)?.type;
-    if (
-      typeof message === "string" &&
-      message.includes("SQLite") &&
-      typeof type === "string" &&
-      type.includes("Experimental")
-    ) {
-      return undefined as never;
-    }
-    return emitWarning.apply(process, [warning, ...rest] as never);
-  } as typeof process.emitWarning;
-  try {
-    sqliteModule = createRequire(import.meta.url)("node:sqlite");
-  } catch {
-    sqliteModule = null;
-  } finally {
-    process.emitWarning = emitWarning;
-  }
-  return sqliteModule ?? null;
 }
 
 const SCHEMA_DDL = `

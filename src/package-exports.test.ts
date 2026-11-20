@@ -80,7 +80,11 @@ describe("package exports (#121)", () => {
         import { createRequire } from "node:module";
         const req = createRequire(${JSON.stringify(path.join(ROOT, "package.json"))});
         const out = {};
-        for (const spec of ["@cad0p/napkin", "@cad0p/napkin/vault"]) {
+        for (const spec of [
+          "@cad0p/napkin",
+          "@cad0p/napkin/vault",
+          "@cad0p/napkin/overview",
+        ]) {
           const viaRequire = req(spec);
           const viaImport = await import(spec);
           out[spec] = {
@@ -106,6 +110,10 @@ describe("package exports (#121)", () => {
         ]),
       );
       expect(out["@cad0p/napkin/vault"].same).toBe(true);
+      expect(out["@cad0p/napkin/overview"].keys).toEqual(
+        expect.arrayContaining(["buildVaultOverview"]),
+      );
+      expect(out["@cad0p/napkin/overview"].same).toBe(true);
     },
     20_000,
   );
