@@ -1,9 +1,14 @@
+import matter from "gray-matter";
 import { describe, expect, test } from "vitest";
 import {
   parseFrontmatter,
   removeProperty,
   setProperty,
 } from "./frontmatter.js";
+
+// gray-matter's clearCache() replaces the cache object, so read it each time.
+const cacheKeys = (): string[] =>
+  Object.keys((matter as unknown as { cache: Record<string, unknown> }).cache);
 
 describe("parseFrontmatter", () => {
   test("parses YAML frontmatter", () => {
@@ -38,6 +43,38 @@ describe("parseFrontmatter", () => {
     expect(() => parseFrontmatter(bad)).toThrow();
     expect(() => parseFrontmatter(bad)).toThrow();
     expect(() => parseFrontmatter(bad)).toThrow();
+  });
+
+  test("does not fill gray-matter's parse cache by default (#132)", () => {
+    matter.clearCache();
+    // The same module instance napkin parses with: a call without options
+    // does cache.
+    matter("---\ntitle: probe\n---\nBody");
+    expect(cacheKeys()).toHaveLength(1);
+    matter.clearCache();
+    for (let i = 0; i < 200; i++) {
+      const parsed = parseFrontmatter(`---\ntitle: n${i}\n---\nBody ${i}`);
+      expect(parsed.properties.title).toBe(`n${i}`);
+    }
+    expect(() =>
+      parseFrontmatter("---\ntags: [#malformed, #unique-d]\n---\nBody"),
+    ).toThrow();
+    setProperty("---\ntitle: a\n---\nBody", "status", "draft");
+    removeProperty("---\ntitle: a\nstatus: x\n---\nBody", "status");
+    expect(cacheKeys()).toHaveLength(0);
+  });
+
+  test("{ cache: true } opts in, and a failed cached parse still throws every time", () => {
+    matter.clearCache();
+    const good = "---\ntitle: cached\n---\nBody";
+    expect(parseFrontmatter(good, { cache: true }).properties.title).toBe(
+      "cached",
+    );
+    expect(cacheKeys()).toEqual([good]);
+    const bad = "---\ntags: [#malformed, #unique-e]\n---\nBody";
+    expect(() => parseFrontmatter(bad, { cache: true })).toThrow();
+    expect(() => parseFrontmatter(bad, { cache: true })).toThrow();
+    matter.clearCache();
   });
 
   test("valid content still parses after a malformed parse", () => {
