@@ -62,11 +62,21 @@ const COLLAPSE_SIMILARITY = 0.15;
 const COLLAPSE_COSINE_TOP_TERMS = 60;
 const COLLAPSE_PAIRWISE_CAP = 20;
 /** Notes tokenized per SQL interning round of a whole-folder build (#131). */
-const COLD_BATCH = 256;
+let COLD_BATCH = 256;
 /** A batch closes early once it holds this many distinct terms: the batch
  *  map is the cold build's largest live structure, and V8 sizes the next
  *  heap limit as a multiple of the live set. */
-const COLD_BATCH_TERMS = 1 << 16;
+let COLD_BATCH_TERMS = 1 << 16;
+
+/** Test seam: whole-folder batch bounds (notes, distinct terms); no
+ *  arguments restores the defaults. */
+export function setOverviewColdBatchForTests(
+  notes = 256,
+  terms = 1 << 16,
+): void {
+  COLD_BATCH = notes;
+  COLD_BATCH_TERMS = terms;
+}
 const FRONTMATTER_RE = /^---[\s\S]*?---\n?/;
 const ATX_HEADING_LINE_RE = /^#{1,6}\s+.+$/gm;
 const WIKILINK_ONLY_RE = /^\[\[[^\]]+(?:\|[^\]]+)?\]\]$/;

@@ -475,6 +475,22 @@ function streamNoteIntoFt(
 /** Cold-build Bloom filter size: 2^24 bits (2 MB); with 4 probes about
  *  0.7% false positives at 1.45M terms, degrading gracefully beyond. */
 const COLD_FILTER_BITS = 1 << 24;
+let coldFilterBits = COLD_FILTER_BITS;
+
+/** Test seam: the cold Bloom filter's size in bits (a power of two ≥ 32);
+ *  no argument restores the default. */
+export function setOverviewColdFilterBitsForTests(
+  bits = COLD_FILTER_BITS,
+): void {
+  coldFilterBits = bits;
+}
+
+/** Test seam: the cold Bloom filter's primitives. */
+export const coldFilterForTests = {
+  create: (bits: number): Uint32Array => new Uint32Array(bits >>> 5),
+  add: (f: Uint32Array, term: string): void => filterAdd(f, term),
+  has: (f: Uint32Array, term: string): boolean => filterHas(f, term),
+};
 
 /** termHash's second hash (an out-parameter, so hashing allocates nothing). */
 let termHash2 = 0;
@@ -1280,7 +1296,7 @@ export class SqliteOverviewStore {
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)");
     this.db.exec("PRAGMA cache_size = -16384");
     this.cold = true;
-    this.coldSeen = new Uint32Array(COLD_FILTER_BITS >>> 5);
+    this.coldSeen = new Uint32Array(coldFilterBits >>> 5);
   }
 
   /** Leave cold-build mode (after commit or rollback). */
