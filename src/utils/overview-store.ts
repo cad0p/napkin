@@ -1,9 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { OVERVIEW_CACHE_VERSION } from "./overview-cache.js";
+import {
+  folderDepth,
+  folderKeywordTokens,
+  termFlags,
+} from "./overview-terms.js";
 import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
 
 /**
- * The SQLite per-note overview store (#118).
+ * The SQLite per-note overview store (#118, schema v2 #125).
  *
  * `.napkin/cache/overview-v2.db` — a separate, versioned file name next to
  * the search store's `index-v2.db` (deliberately NOT tables in that
@@ -22,16 +28,19 @@ import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
  * (note rank, first-seen position within the note)) — and re-tokenizes only
  * the notes whose (mtime, size) actually changed.
  *
- * Schema (v1, `PRAGMA user_version = 1`):
+ * Schema (v2, `PRAGMA user_version = 2`, #125): per-folder term data lives
+ * as SQL ROWS instead of per-folder blobs, so a miss updates rows instead of
+ * re-materializing dense per-folder arrays in JS.
  *
  *   meta(k, v)                              'format' (OVERVIEW_CACHE_VERSION),
  *                                           'ignore_fp', 'templates_folder',
- *                                           'flags' (Uint8 blob, below)
+ *                                           'df_depth' (depth bound dft was
+ *                                           built under)
  *   terms(id, term UNIQUE)                  the term dictionary (bigrams
  *                                           included); ids carry no meaning
  *                                           beyond identity within this DB
  *   notes(path, folder, mtime, size,        one row per note; (mtime, size)
- *         skip, tags, heads, data)          is the freshness key (the same
+ *         skip, tags, heads, data, ord)     is the freshness key (the same
  *                                           pair the JSON folder sig uses).
  *                                           skip=1 marks a malformed-
  *                                           frontmatter note; tags is JSON,
@@ -43,34 +52,47 @@ import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
  *                                           [nNh, (id,count)×nNh, nBody,
  *                                           (id,count)×nBody] — non-heading
  *                                           weighted terms, then body terms,
- *                                           each in first-seen order
- *   folders(path, notes, tags, warn,        one row per folder — the
- *           tfids, cand, full)              aggregate its notes' blobs
- *                                           produce: tfids is an Int32Array
- *                                           of tf term ids in tf order (the
- *                                           df input), cand an Int32Array of
- *                                           (id, tf) keyword-candidate pairs
- *                                           in tf order (every
- *                                           isCandidateKeyword input is
- *                                           folder-local, so the filter runs
- *                                           at aggregation time), full is an
- *                                           optional Int32Array holding the
- *                                           folder's complete term data
- *                                           ([nTf,(id,tf)×, nBody,(id,tf)×,
- *                                           nHead,(id,n)×, nHeadOnly,ids×,
- *                                           nTop,(id,tf)×]) — populated only
- *                                           for folders a sibling collapse
- *                                           could touch (full bodyTF is
- *                                           needed to merge exactly)
+ *                                           each in first-seen order.
+ *                                           ord is the note's order key,
+ *                                           spaced 2^20 apart in JS
+ *                                           path-sort order.
+ *   folders(path, notes, tags, warn)        one row per folder — the
+ *                                           aggregate its notes' blobs
+ *                                           produce. notes/tags/warn stay
+ *                                           per-folder scalars; the term
+ *                                           data moved into rows.
+ *   fdir(fid, path UNIQUE)                  folder ids for the row tables
+ *   ft(fid, tid, w, lc,                     one row per folder term:
+ *      nord, npos, hord, hpos)              w = non-heading weighted count,
+ *      PK(fid, tid) WITHOUT ROWID           lc = number of distinct heading
+ *                                           texts containing the term,
+ *                                           (nord,npos)/(hord,hpos) = first
+ *                                           note (by ord) and position
+ *                                           outside/inside headings
+ *   cand(fid, tid, tf, sec,                 keyword candidates in tf order:
+ *        o1, o2) PK(fid, tid)               tf = w + 3·[lc>0]; (sec,o1,o2) =
+ *        WITHOUT ROWID                      (0,nord,npos) when w>0 else
+ *                                           (1,hord,hpos). The candidate
+ *                                           filter (bigram tf≥2, not a
+ *                                           self-pair, not a folder token,
+ *                                           heading-only needs lc≥2) runs
+ *                                           in SQL from the term text.
+ *   dft(tid, n)                             document frequency over stored
+ *                                           folders at depth ≤ meta.df_depth
+ *   headrc(fid, text, n)                    refcount of distinct heading
+ *      PK(fid, text) WITHOUT ROWID          texts per folder — drives lc
  *
- * The 'flags' meta blob is a dense Uint8Array indexed by term id:
- * bit 0 = term contains a space (bigram), bit 1 = self-pair ("x x"). It
- * replaces per-row term-text reads at aggregation and scoring time.
+ * Collapse merge data (#112 r3 step 4 keeps the full-equivalent derivation):
+ * the v1 `full` blob is gone; the collapse path derives a folder's
+ * tf/body/heading maps from ft rows plus the body section of its ordered
+ * note blobs — computed lazily only for collapse-candidate folders.
  *
- * There is intentionally no secondary index on term ids and no SQL-side df:
- * document frequency is exact by construction when recomputed on each miss
- * from the folders' tfids blobs (~25 ms on a 29k-note vault), and writes are
- * a handful of per-note upserts plus one folder row each.
+ * A v1 file (per-folder tfids/cand/full blobs + meta flags) is migrated in
+ * place on open — one transaction streams each note's stored blob into ft,
+ * refcounts heading texts into headrc/lc, builds cand with the SQL filter
+ * and dft with one GROUP BY — when its meta.format is current. A stale
+ * format or any migration failure parks the file aside and the cold path
+ * rebuilds it.
  *
  * The DB is disposable: open failure, corruption, or a schema-version
  * mismatch renames the file aside and recreates it; a second failure makes
@@ -83,7 +105,13 @@ type StatementSync = import("node:sqlite").StatementSync;
 
 const CACHE_DIR = "cache";
 const DB_FILE = "overview-v2.db";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+/**
+ * notes.ord spacing: notes get (i+1)·2^20 in JS path-sort order, so a later
+ * per-note insert lands midway between neighbours before a folder has to be
+ * renumbered (the 2^20 gap allows twenty halvings).
+ */
+export const ORD_GAP = 1 << 20;
 
 let busyTimeoutMs = 5000;
 /** Test seam: SQLite busy timeout in ms (default 5000). */
@@ -91,16 +119,81 @@ export function setOverviewBusyTimeoutForTests(ms: number): void {
   busyTimeoutMs = ms;
 }
 
-const SCHEMA_DDL =
-  [
-    "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v)",
-    // No UNIQUE constraint: the cold dictionary flush inserts in id order
-    // (append-only on the rowid) and builds terms_term afterwards — a live
-    // UNIQUE index would take 1.4M random inserts either way (~7 s vs ~2 s).
-    "CREATE TABLE IF NOT EXISTS terms(id INTEGER PRIMARY KEY, term TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS notes(path TEXT PRIMARY KEY, folder TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, skip INTEGER NOT NULL, tags TEXT NOT NULL, heads TEXT NOT NULL, data BLOB)",
-    "CREATE TABLE IF NOT EXISTS folders(path TEXT PRIMARY KEY, notes INTEGER NOT NULL, tags TEXT NOT NULL, warn TEXT NOT NULL, tfids BLOB, cand BLOB, full BLOB)",
-  ].join(";\n") + ";";
+const SCHEMA_DDL = `${[
+  "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v)",
+  // No UNIQUE constraint: the cold dictionary flush inserts in id order
+  // (append-only on the rowid) and builds terms_term afterwards — a live
+  // UNIQUE index would take 1.4M random inserts either way (~7 s vs ~2 s).
+  "CREATE TABLE IF NOT EXISTS terms(id INTEGER PRIMARY KEY, term TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS notes(path TEXT PRIMARY KEY, folder TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, skip INTEGER NOT NULL, tags TEXT NOT NULL, heads TEXT NOT NULL, data BLOB, ord INTEGER)",
+  "CREATE TABLE IF NOT EXISTS folders(path TEXT PRIMARY KEY, notes INTEGER NOT NULL, tags TEXT NOT NULL, warn TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS fdir(fid INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS ft(fid INTEGER NOT NULL, tid INTEGER NOT NULL, w INTEGER NOT NULL, lc INTEGER NOT NULL, nord INTEGER, npos INTEGER, hord INTEGER, hpos INTEGER, PRIMARY KEY(fid, tid)) WITHOUT ROWID",
+  "CREATE TABLE IF NOT EXISTS cand(fid INTEGER NOT NULL, tid INTEGER NOT NULL, tf INTEGER NOT NULL, sec INTEGER NOT NULL, o1 INTEGER NOT NULL, o2 INTEGER NOT NULL, PRIMARY KEY(fid, tid)) WITHOUT ROWID",
+  "CREATE TABLE IF NOT EXISTS dft(tid INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS headrc(fid INTEGER NOT NULL, text TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(fid, text)) WITHOUT ROWID",
+  "CREATE INDEX IF NOT EXISTS notes_fo ON notes(folder, ord)",
+].join(";\n")}`;
+
+/**
+ * Folder term upserts — shared by the v1→v2 migration and the whole-folder
+ * re-aggregation a miss performs. json_each carries the note's term lists
+ * across the JS↔SQLite boundary once per note instead of once per term.
+ *
+ * First-seen keys: coalesce keeps the earliest note's ord; when the key was
+ * NULL (the row exists only because the OTHER section created it), the CASE
+ * installs this section's position. Column references in DO UPDATE SET read
+ * the pre-update row, so the two expressions test the same condition.
+ */
+const SQL_FT_NH =
+  "INSERT INTO ft(fid, tid, w, lc, nord, npos) " +
+  "SELECT ?1, e.value ->> 0, e.value ->> 1, 0, ?2, e.key FROM json_each(?3) e " +
+  "WHERE true ON CONFLICT(fid, tid) DO UPDATE SET w = w + excluded.w, " +
+  "nord = coalesce(nord, excluded.nord), " +
+  "npos = CASE WHEN nord IS NULL THEN excluded.npos ELSE npos END";
+const SQL_FT_H =
+  "INSERT INTO ft(fid, tid, w, lc, hord, hpos) " +
+  "SELECT ?1, e.value, 0, 0, ?2, e.key FROM json_each(?3) e " +
+  "WHERE true ON CONFLICT(fid, tid) DO UPDATE SET " +
+  "hord = coalesce(hord, excluded.hord), " +
+  "hpos = CASE WHEN hord IS NULL THEN excluded.hpos ELSE hpos END";
+const SQL_HEADRC =
+  "INSERT INTO headrc(fid, text, n) VALUES(?1, ?2, 1) " +
+  "ON CONFLICT(fid, text) DO UPDATE SET n = n + 1 RETURNING n";
+const SQL_LC =
+  "UPDATE ft SET lc = lc + 1 WHERE fid = ?1 " +
+  "AND tid IN (SELECT value FROM json_each(?2))";
+
+/**
+ * The candidate filter as SQL — aggregateFolder's isCandidateKeyword over
+ * the term text: a bigram (term contains a space) needs tf ≥ 2 and must not
+ * be an "x x" self-pair; any other term must not be a folder token; a
+ * heading-only term (w = 0) needs lc ≥ 2.
+ */
+const SQL_CAND =
+  "INSERT INTO cand(fid, tid, tf, sec, o1, o2) " +
+  "SELECT f.fid, f.tid, f.w + (f.lc > 0) * 3, f.w = 0, " +
+  "CASE WHEN f.w > 0 THEN f.nord ELSE f.hord END, " +
+  "CASE WHEN f.w > 0 THEN f.npos ELSE f.hpos END " +
+  "FROM ft f JOIN terms t ON t.id = f.tid " +
+  "WHERE f.fid = ?1 AND NOT (f.w = 0 AND f.lc < 2) " +
+  "AND CASE WHEN instr(t.term, ' ') > 0 " +
+  "THEN f.w + (f.lc > 0) * 3 >= 2 AND " +
+  "substr(t.term, 1, instr(t.term, ' ') - 1) <> substr(t.term, instr(t.term, ' ') + 1) " +
+  "ELSE t.id NOT IN (SELECT value FROM json_each(?2)) END";
+
+/** tf order for a folder's ft rows: non-heading terms by (nord,npos), then
+ *  heading-only terms by (hord,hpos) — ORDER BY key shared by the collapse
+ *  derivation and (via cand.sec/o1/o2) the stored candidate order. */
+const SQL_TF_ORDER =
+  "(w = 0), CASE WHEN w > 0 THEN nord ELSE hord END, " +
+  "CASE WHEN w > 0 THEN npos ELSE hpos END";
+
+/** Folder depth as SQL — folderDepth's exact rule ('/' → 0, else slash
+ *  count + 1), used by the dft rebuild's depth bound. */
+const SQL_FOLDER_DEPTH =
+  "CASE WHEN d.path = '/' THEN 0 " +
+  "ELSE length(d.path) - length(replace(d.path, '/', '')) + 1 END";
 
 interface Stmts {
   metaGet: StatementSync;
@@ -110,12 +203,34 @@ interface Stmts {
   noteUpsert: StatementSync;
   noteDelete: StatementSync;
   noteDeleteFolder: StatementSync;
+  noteSetOrd: StatementSync;
+  noteBodiesFolder: StatementSync;
   folderUpsert: StatementSync;
   folderDelete: StatementSync;
   folderPaths: StatementSync;
-  folderInfo: StatementSync;
   folderRows: StatementSync;
-  folderFull: StatementSync;
+  fdirEnsure: StatementSync;
+  fdirGet: StatementSync;
+  fdirDelete: StatementSync;
+  ftDeleteFolder: StatementSync;
+  candDeleteFolder: StatementSync;
+  headrcDeleteFolder: StatementSync;
+  ftAddNh: StatementSync;
+  ftAddH: StatementSync;
+  headrcBump: StatementSync;
+  lcBump: StatementSync;
+  candFill: StatementSync;
+  candFolder: StatementSync;
+  dftDecFolder: StatementSync;
+  dftIncFolder: StatementSync;
+  dftPrune: StatementSync;
+  dftAll: StatementSync;
+  dftClear: StatementSync;
+  dftRebuild: StatementSync;
+  ftFolderTids: StatementSync;
+  ftFolderTfPairs: StatementSync;
+  ftFolderHead: StatementSync;
+  ftFolderHeadOnly: StatementSync;
   termIdsBatch: StatementSync;
   termTextsBatch: StatementSync;
   termInsert: StatementSync;
@@ -144,23 +259,67 @@ function prepareAll(db: DatabaseSync): Stmts {
     // upserts is immune to the stale-note cleanup of its previous folder.
     noteDelete: db.prepare("DELETE FROM notes WHERE path = ? AND folder = ?"),
     noteDeleteFolder: db.prepare("DELETE FROM notes WHERE folder = ?"),
+    noteSetOrd: db.prepare("UPDATE notes SET ord = ? WHERE path = ?"),
+    noteBodiesFolder: db.prepare(
+      "SELECT data FROM notes WHERE folder = ? ORDER BY ord",
+    ),
     folderUpsert: db.prepare(
-      "INSERT INTO folders(path, notes, tags, warn, tfids, cand, full) " +
-        "VALUES(?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO folders(path, notes, tags, warn) VALUES(?, ?, ?, ?) " +
         "ON CONFLICT(path) DO UPDATE SET notes = excluded.notes, " +
-        "tags = excluded.tags, warn = excluded.warn, " +
-        "tfids = excluded.tfids, cand = excluded.cand, " +
-        "full = excluded.full",
+        "tags = excluded.tags, warn = excluded.warn",
     ),
     folderDelete: db.prepare("DELETE FROM folders WHERE path = ?"),
     folderPaths: db.prepare("SELECT path FROM folders"),
-    folderInfo: db.prepare(
-      "SELECT path, full IS NOT NULL AS hasFull FROM folders",
-    ),
     folderRows: db.prepare(
-      "SELECT path, notes, tags, warn, tfids, cand FROM folders",
+      "SELECT f.path, f.notes, f.tags, f.warn, d.fid FROM folders f " +
+        "JOIN fdir d ON d.path = f.path",
     ),
-    folderFull: db.prepare("SELECT full FROM folders WHERE path = ?"),
+    fdirEnsure: db.prepare(
+      "INSERT INTO fdir(path) VALUES(?) ON CONFLICT(path) " +
+        "DO UPDATE SET path = excluded.path RETURNING fid",
+    ),
+    fdirGet: db.prepare("SELECT fid FROM fdir WHERE path = ?"),
+    fdirDelete: db.prepare("DELETE FROM fdir WHERE fid = ?"),
+    ftDeleteFolder: db.prepare("DELETE FROM ft WHERE fid = ?"),
+    candDeleteFolder: db.prepare("DELETE FROM cand WHERE fid = ?"),
+    headrcDeleteFolder: db.prepare("DELETE FROM headrc WHERE fid = ?"),
+    ftAddNh: db.prepare(SQL_FT_NH),
+    ftAddH: db.prepare(SQL_FT_H),
+    headrcBump: db.prepare(SQL_HEADRC),
+    lcBump: db.prepare(SQL_LC),
+    candFill: db.prepare(SQL_CAND),
+    candFolder: db.prepare(
+      "SELECT tid, tf FROM cand WHERE fid = ? ORDER BY sec, o1, o2",
+    ),
+    dftDecFolder: db.prepare(
+      "UPDATE dft SET n = n - 1 WHERE tid IN " +
+        "(SELECT tid FROM ft WHERE fid = ?)",
+    ),
+    dftIncFolder: db.prepare(
+      "INSERT INTO dft(tid, n) SELECT tid, 1 FROM ft WHERE fid = ? " +
+        "ON CONFLICT(tid) DO UPDATE SET n = n + 1",
+    ),
+    dftPrune: db.prepare("DELETE FROM dft WHERE n <= 0"),
+    dftAll: db.prepare("SELECT tid, n FROM dft"),
+    dftClear: db.prepare("DELETE FROM dft"),
+    dftRebuild: db.prepare(
+      "INSERT INTO dft(tid, n) SELECT f.tid, COUNT(*) FROM ft f " +
+        "JOIN fdir d ON d.fid = f.fid WHERE " +
+        SQL_FOLDER_DEPTH +
+        " <= ?1 GROUP BY f.tid",
+    ),
+    ftFolderTids: db.prepare("SELECT tid FROM ft WHERE fid = ?"),
+    ftFolderTfPairs: db.prepare(
+      "SELECT tid, w + (lc > 0) * 3 AS tf FROM ft WHERE fid = ? " +
+        "ORDER BY " +
+        SQL_TF_ORDER,
+    ),
+    ftFolderHead: db.prepare(
+      "SELECT tid, lc FROM ft WHERE fid = ? AND lc > 0 ORDER BY hord, hpos",
+    ),
+    ftFolderHeadOnly: db.prepare(
+      "SELECT tid FROM ft WHERE fid = ? AND w = 0 AND lc > 0",
+    ),
     // Bulk dictionary lookups: a JSON array of terms/ids crosses the
     // JS↔SQLite boundary once per ~5000 entries instead of once per term.
     termIdsBatch: db.prepare(
@@ -186,7 +345,7 @@ export interface StoredNoteMeta {
   size: number;
 }
 
-/** One stored note's full record, as aggregateFolder consumes it. */
+/** One stored note's full record, as the folder streaming consumes it. */
 export interface StoredNoteRecord {
   skip: number;
   /** JSON string[]: the note's tags. */
@@ -197,7 +356,7 @@ export interface StoredNoteRecord {
   data: Uint8Array | null;
 }
 
-/** One stored folder row (term data as blobs). */
+/** One stored folder row plus its fdir id (term data lives in the row tables). */
 export interface StoredFolderRow {
   path: string;
   notes: number;
@@ -205,14 +364,82 @@ export interface StoredFolderRow {
   tags: string;
   /** JSON string[]: warnings emitted while building the folder. */
   warn: string;
-  /** Int32Array blob: tf term ids in tf order. */
-  tfids: Uint8Array;
-  /** Int32Array blob: (term id, tf) candidate pairs in tf order. */
-  cand: Uint8Array;
+  fid: number;
+}
+
+/**
+ * The pieces of one note's record the ft/headrc streaming consumes — the
+ * same slices aggregateFolder accumulated: non-heading (id,count) pairs in
+ * first-seen order, the distinct heading-seen ids in first-seen order, and
+ * the per-unique-heading-text term lists.
+ */
+export interface StreamedNote {
+  skip: boolean;
+  heads: [string, number[]][];
+  data: Int32Array | null;
+}
+
+/** Decode a stored note row into the streamed form. */
+function decodeStoredNote(row: StoredNoteRecord): StreamedNote {
+  return {
+    skip: row.skip === 1,
+    heads: JSON.parse(row.heads) as [string, number[]][],
+    data:
+      row.data === null
+        ? null
+        : row.data.byteOffset % 4 === 0
+          ? new Int32Array(
+              row.data.buffer,
+              row.data.byteOffset,
+              row.data.byteLength >> 2,
+            )
+          : new Int32Array(row.data.slice().buffer),
+  };
+}
+
+/** Stream one note's record into ft/headrc — migrate2's exact upserts. */
+function streamNoteIntoFt(
+  stmts: Pick<Stmts, "ftAddNh" | "ftAddH" | "headrcBump" | "lcBump">,
+  fid: number,
+  ord: number,
+  rec: StreamedNote,
+): void {
+  if (rec.skip || rec.data === null) return;
+  const a = rec.data;
+  const nn = a[0];
+  const nhPairs: [number, number][] = [];
+  for (let k = 0, p = 1; k < nn; k++, p += 2) {
+    nhPairs.push([a[p], a[p + 1]]);
+  }
+  const seen = new Set<number>();
+  const hIds: number[] = [];
+  for (const [, ids] of rec.heads) {
+    for (const id of ids) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        hIds.push(id);
+      }
+    }
+  }
+  if (nhPairs.length > 0) {
+    stmts.ftAddNh.run(fid, ord, JSON.stringify(nhPairs));
+  }
+  if (hIds.length > 0) {
+    stmts.ftAddH.run(fid, ord, JSON.stringify(hIds));
+  }
+  for (const [text, ids] of rec.heads) {
+    const row = stmts.headrcBump.get(fid, text) as { n: number };
+    // First occurrence of this heading text in the folder: its terms gain
+    // one distinct-heading-text count.
+    if (row.n === 1) stmts.lcBump.run(fid, JSON.stringify(ids));
+  }
 }
 
 /** Why the last tryOpen failed, so a reopen failure can say corrupt vs busy. */
 let lastOpenError = "";
+/** Set when a failed open was a failed v1→v2 migration (park immediately —
+ *  retrying the same data in the other journal mode cannot help). */
+let migrationFailed = false;
 
 /** Test/diagnostic seam: the error string of the most recent failed open. */
 export function lastOverviewOpenError(): string {
@@ -230,6 +457,119 @@ function writeCacheGitignore(dir: string): void {
   fs.writeFileSync(gitignore, "*\n");
 }
 
+/**
+ * In-place v1 → v2 migration, inside one transaction (#125). Streams each
+ * note's stored blob into ft in JS path-sort order (ord spaced 2^20),
+ * refcounts heading texts into headrc/lc, builds cand per folder with the
+ * SQL filter, and dft with one GROUP BY over every stored folder (df_depth
+ * is set to the deepest stored folder, making the unfiltered count exact);
+ * a later run at a different depth rebuilds dft under its own bound.
+ * Any failure rolls back and the caller parks the file for a cold rebuild.
+ */
+function migrateV1ToV2(db: DatabaseSync): void {
+  const format = (
+    db.prepare("SELECT v FROM meta WHERE k = 'format'").get() as
+      | { v: unknown }
+      | undefined
+  )?.v;
+  if (format !== OVERVIEW_CACHE_VERSION) {
+    throw new Error(
+      "overview v1 store has stale format " +
+        String(format) +
+        ", expected " +
+        OVERVIEW_CACHE_VERSION,
+    );
+  }
+  // 16 MB page cache for the migration transaction (measured optimum on the
+  // 29.5k-note vault: 11 s, ~106 MB peak).
+  db.exec("PRAGMA cache_size = -16384");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    db.exec(
+      [
+        "CREATE TABLE fdir(fid INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL)",
+        "CREATE TABLE ft(fid INTEGER NOT NULL, tid INTEGER NOT NULL, w INTEGER NOT NULL, lc INTEGER NOT NULL, nord INTEGER, npos INTEGER, hord INTEGER, hpos INTEGER, PRIMARY KEY(fid, tid)) WITHOUT ROWID",
+        "CREATE TABLE cand(fid INTEGER NOT NULL, tid INTEGER NOT NULL, tf INTEGER NOT NULL, sec INTEGER NOT NULL, o1 INTEGER NOT NULL, o2 INTEGER NOT NULL, PRIMARY KEY(fid, tid)) WITHOUT ROWID",
+        "CREATE TABLE dft(tid INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+        "CREATE TABLE headrc(fid INTEGER NOT NULL, text TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(fid, text)) WITHOUT ROWID",
+        "ALTER TABLE notes ADD COLUMN ord INTEGER",
+        "CREATE INDEX notes_fo ON notes(folder, ord)",
+      ].join(";\n"),
+    );
+    const q = {
+      paths: db.prepare("SELECT path FROM notes WHERE folder = ?"),
+      note: db.prepare(
+        "SELECT skip, tags, heads, data FROM notes WHERE path = ?",
+      ),
+      setOrd: db.prepare("UPDATE notes SET ord = ? WHERE path = ?"),
+      fdirIns: db.prepare("INSERT INTO fdir(fid, path) VALUES(?, ?)"),
+      ftAddNh: db.prepare(SQL_FT_NH),
+      ftAddH: db.prepare(SQL_FT_H),
+      headrcBump: db.prepare(SQL_HEADRC),
+      lcBump: db.prepare(SQL_LC),
+      cand: db.prepare(SQL_CAND),
+      tokIds: db.prepare(
+        "SELECT id FROM terms WHERE term IN (SELECT value FROM json_each(?))",
+      ),
+    };
+    const folders = (
+      db.prepare("SELECT path FROM folders").all() as unknown as {
+        path: string;
+      }[]
+    )
+      .map((r) => r.path)
+      .sort();
+    let fid = 0;
+    let maxStoredDepth = 0;
+    for (const folder of folders) {
+      fid++;
+      q.fdirIns.run(fid, folder);
+      const depth = folderDepth(folder);
+      if (depth > maxStoredDepth) maxStoredDepth = depth;
+      const paths = (q.paths.all(folder) as unknown as { path: string }[])
+        .map((r) => r.path)
+        .sort();
+      paths.forEach((p, i) => {
+        const ord = (i + 1) * ORD_GAP;
+        q.setOrd.run(ord, p);
+        const row = q.note.get(p) as unknown as StoredNoteRecord;
+        streamNoteIntoFt(q, fid, ord, decodeStoredNote(row));
+      });
+      const tokIds = (
+        q.tokIds.all(
+          JSON.stringify([...folderKeywordTokens(folder)]),
+        ) as unknown as { id: number }[]
+      ).map((r) => r.id);
+      q.cand.run(fid, JSON.stringify(tokIds));
+    }
+    db.exec(
+      "INSERT INTO dft(tid, n) SELECT tid, count(*) FROM ft GROUP BY tid",
+    );
+    db.prepare(
+      "INSERT INTO meta(k, v) VALUES('df_depth', ?) " +
+        "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+    ).run(maxStoredDepth);
+    // The v1 derived blobs and the meta flag array are superseded by the
+    // row tables; a missing column (a partially-migrated v1 file) must fail
+    // the migration loudly so the file is parked, not half-dropped.
+    db.exec("ALTER TABLE folders DROP COLUMN tfids");
+    db.exec("ALTER TABLE folders DROP COLUMN cand");
+    db.exec("ALTER TABLE folders DROP COLUMN full");
+    db.exec("DELETE FROM meta WHERE k IN ('flags', 'df')");
+    db.exec("COMMIT");
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Rollback best-effort: the file gets parked either way.
+    }
+    throw error;
+  } finally {
+    db.exec("PRAGMA cache_size = -2048");
+  }
+}
+
 function tryOpen(
   sqlite: SqliteModule,
   dbPath: string,
@@ -238,9 +578,9 @@ function tryOpen(
   let db: DatabaseSync | undefined;
   try {
     db = new sqlite.DatabaseSync(dbPath, { timeout: busyTimeoutMs });
-    db.exec("PRAGMA journal_mode = " + journalMode);
+    db.exec(`PRAGMA journal_mode = ${journalMode}`);
     db.exec("PRAGMA synchronous = NORMAL");
-    db.exec("PRAGMA busy_timeout = " + busyTimeoutMs);
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
     // Small page cache: the connection is closed when the overview finishes,
     // so nothing stays resident between calls.
     db.exec("PRAGMA cache_size = -2048");
@@ -249,23 +589,35 @@ function tryOpen(
       | { user_version: number }
       | undefined;
     const version = row?.user_version ?? 0;
-    // A versioned file name covers cross-version skew; a nonzero, different
-    // user_version means a same-name schema we cannot read — rebuild.
-    if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (version === 1) {
+      try {
+        migrateV1ToV2(db);
+      } catch (error) {
+        migrationFailed = true;
+        throw error;
+      }
+    } else if (version !== 0 && version !== SCHEMA_VERSION) {
+      // A versioned file name covers cross-version skew; a nonzero, different
+      // user_version means a same-name schema we cannot read — rebuild.
       throw new Error(
-        "overview schema version " + version + ", expected " + SCHEMA_VERSION,
+        `overview schema version ${version}, expected ${SCHEMA_VERSION}`,
       );
     }
     db.exec(SCHEMA_DDL);
-    db.exec("PRAGMA user_version = " + SCHEMA_VERSION);
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     // Probe the tables a schema-skewed file might be missing columns on.
     db.prepare("SELECT id, term FROM terms LIMIT 0").get();
     db.prepare(
-      "SELECT path, folder, mtime, size, skip, tags, heads, data FROM notes LIMIT 0",
+      "SELECT path, folder, mtime, size, skip, tags, heads, data, ord FROM notes LIMIT 0",
     ).get();
+    db.prepare("SELECT path, notes, tags, warn FROM folders LIMIT 0").get();
+    db.prepare("SELECT fid, path FROM fdir LIMIT 0").get();
     db.prepare(
-      "SELECT path, notes, tags, warn, tfids, cand, full FROM folders LIMIT 0",
+      "SELECT fid, tid, w, lc, nord, npos, hord, hpos FROM ft LIMIT 0",
     ).get();
+    db.prepare("SELECT fid, tid, tf, sec, o1, o2 FROM cand LIMIT 0").get();
+    db.prepare("SELECT tid, n FROM dft LIMIT 0").get();
+    db.prepare("SELECT fid, text, n FROM headrc LIMIT 0").get();
     return db;
   } catch (error) {
     lastOpenError = error instanceof Error ? error.message : String(error);
@@ -278,13 +630,6 @@ function tryOpen(
   }
 }
 
-/** term → flags byte: bit 0 = contains a space, bit 1 = "x x" self-pair. */
-function termFlags(term: string): number {
-  const sp = term.indexOf(" ");
-  if (sp < 0) return 0;
-  return term.slice(0, sp) === term.slice(sp + 1) ? 3 : 1;
-}
-
 export class SqliteOverviewStore {
   private closed = false;
   /**
@@ -295,13 +640,13 @@ export class SqliteOverviewStore {
    * a transaction"), silently pinning the overview to the JSON fallback.
    */
   private txOpen = false;
-  private flagsValue: Uint8Array | null = null;
   private maxId = -1;
   /** Cold-build interning: an in-memory dict while the whole vault is
    *  rewritten, so 1.4M first-seen terms skip per-term SQL probes. */
   private coldDict: Map<string, number> | null = null;
   private coldIds: Map<number, string> | null = null;
   private coldTerms: string[] = [];
+  private coldFlushed = 0;
 
   private constructor(
     private readonly dbPath: string,
@@ -324,27 +669,23 @@ export class SqliteOverviewStore {
       this.closed = false;
       return;
     }
-    throw new Error(
-      "cannot reopen overview db " + this.dbPath + ": " + lastOpenError,
-    );
+    throw new Error(`cannot reopen overview store: ${lastOpenError}`);
   }
 
   private closeDb(): void {
+    if (this.closed) return;
+    this.closed = true;
     try {
       this.db.close();
     } catch {
-      // Already closed.
+      // Closing a broken database is best-effort.
     }
-    this.txOpen = false;
-    this.closed = true;
   }
 
   /**
-   * Open the vault's SQLite overview store, creating it when missing.
+   * Open (or create) the vault's overview store; null when the file cannot
+   * be used at all (the caller falls back to the JSON folder cache).
    *
-   * Recovery ladder mirrors SqliteStore: open with WAL (then DELETE
-   * journaling); on failure rename the file aside and repeat; on failure
-   * again return null so the caller falls back to the JSON folder cache.
    * An existing overview-folders-cache.json is NOT imported — a cold build
    * is one pass over the vault, well inside the miss budget, and importing
    * would materialise exactly the in-memory structures this store exists to
@@ -374,12 +715,14 @@ export class SqliteOverviewStore {
    * The validation keys the stored data was built under: the folder-data
    * format version, the ignore fingerprint, and the templates folder. A
    * mismatch means the whole store is a miss — like the JSON cache, it is
-   * discarded wholesale rather than partially trusted.
+   * discarded wholesale rather than partially trusted. df_depth is the
+   * depth bound dft currently counts folders under.
    */
   metaState(): {
     format?: number;
     ignoreFp?: string;
     templatesFolder?: string;
+    dfDepth?: number;
   } {
     this.ensureOpen();
     const read = (k: string): unknown =>
@@ -387,19 +730,22 @@ export class SqliteOverviewStore {
     const format = read("format");
     const ignoreFp = read("ignore_fp");
     const templatesFolder = read("templates_folder");
+    const dfDepth = read("df_depth");
     return {
       format: typeof format === "number" ? format : undefined,
       ignoreFp: typeof ignoreFp === "string" ? ignoreFp : undefined,
       templatesFolder:
         typeof templatesFolder === "string" ? templatesFolder : undefined,
+      dfDepth: typeof dfDepth === "number" ? dfDepth : undefined,
     };
   }
 
   // ── Term dictionary ───────────────────────────────────────────────
   //
-  // ids are stable within this DB only. flags[] is a dense per-id byte array
-  // persisted in meta ('flags') and rebuilt on open; maxTermId is the SQL
-  // MAX(id), so sparse deletes never matter.
+  // ids are stable within this DB only; maxTermId is the SQL MAX(id), so
+  // sparse deletes never matter. There is no flags blob in v2: the cand
+  // filter derives bigram/self-pair from the term text in SQL, and the JS
+  // side resolves a term's text when it needs it.
 
   /** Largest term id in use (0 when the dictionary is empty). */
   maxTermId(): number {
@@ -413,30 +759,6 @@ export class SqliteOverviewStore {
     return this.maxId;
   }
 
-  /** The dense per-id flag array (bit 0 = bigram, bit 1 = self-pair). */
-  flags(): Uint8Array {
-    this.ensureOpen();
-    if (this.flagsValue === null) {
-      const row = this.stmts.metaGet.get("flags") as { v: unknown } | undefined;
-      this.flagsValue =
-        row?.v instanceof Uint8Array
-          ? new Uint8Array(row.v)
-          : new Uint8Array(Math.max(1 << 16, this.maxTermId() + 1));
-    }
-    return this.flagsValue;
-  }
-
-  private setFlag(id: number, flag: number): void {
-    let flags = this.flags();
-    if (id >= flags.length) {
-      const next = new Uint8Array(Math.max(id + 1, flags.length * 2));
-      next.set(flags);
-      this.flagsValue = next;
-      flags = next;
-    }
-    flags[id] = flag;
-  }
-
   /**
    * Cold-build interning mode: the caller enables it when the whole store is
    * being rewritten, so interning uses an in-memory dict and terms are
@@ -447,12 +769,13 @@ export class SqliteOverviewStore {
     this.coldDict = on ? new Map() : null;
     this.coldIds = on ? new Map() : null;
     this.coldTerms = [];
+    this.coldFlushed = 0;
   }
 
   /**
    * Intern every term in the iterable, returning term → id. New terms are
    * sorted before inserting (the UNIQUE index is append-friendly that way);
-   * in cold mode they only collect in memory until flushColdTerms().
+   * in cold mode they only collect in memory until the next flush.
    */
   intern(terms: Iterable<string>): Map<string, number> {
     this.ensureOpen();
@@ -465,7 +788,6 @@ export class SqliteOverviewStore {
           this.coldDict.set(term, id);
           this.coldIds?.set(id, term);
           this.coldTerms.push(term);
-          this.setFlag(id, termFlags(term));
         }
         ids.set(term, id);
       }
@@ -483,30 +805,26 @@ export class SqliteOverviewStore {
       const id = ++this.maxId;
       this.stmts.termInsert.run(id, term);
       ids.set(term, id);
-      this.setFlag(id, termFlags(term));
     }
     return ids;
   }
 
   /**
-   * Persist the cold-mode dictionary: json_each insert-selects in id order
-   * (ids were assigned in first-seen order at intern() time, so this is an
-   * append-only write on the rowid b-tree), then the UNIQUE term index is
-   * built once — a live index would take 1.4M random-order inserts instead.
+   * Insert the cold-mode terms not yet flushed — in id order, which is
+   * append-only on the rowid b-tree. Called per folder before its cand
+   * INSERT so the SQL candidate filter's terms JOIN sees the folder's
+   * terms; the UNIQUE term index is only built by the final flush.
    */
-  flushColdTerms(): void {
-    if (this.coldDict === null || this.coldTerms.length === 0) return;
-    this.ensureOpen();
+  private flushColdDelta(): void {
+    if (this.coldDict === null) return;
     const coldDict = this.coldDict;
-    // Id-ordered insert: append-only on the rowid b-tree, ~0.5 s for 1.4M
-    // rows. The UNIQUE term index is built after the bulk load — creating
-    // it first would take random-order inserts and dominate the flush.
     const ins = this.db.prepare(
       "INSERT INTO terms(id, term) " +
         "SELECT e.value ->> 0, e.value ->> 1 FROM json_each(?) e",
     );
     const rows: (number | string)[][] = [];
-    for (const term of this.coldTerms) {
+    for (let i = this.coldFlushed; i < this.coldTerms.length; i++) {
+      const term = this.coldTerms[i];
       rows.push([coldDict.get(term) as number, term]);
       if (rows.length >= CHUNK) {
         ins.run(JSON.stringify(rows));
@@ -514,16 +832,18 @@ export class SqliteOverviewStore {
       }
     }
     if (rows.length > 0) ins.run(JSON.stringify(rows));
-    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)");
+    this.coldFlushed = this.coldTerms.length;
   }
 
-  /** Persist the flags blob (call inside the write transaction). */
-  saveFlags(): void {
-    if (this.flagsValue === null) return;
-    this.stmts.metaSet.run(
-      "flags",
-      this.flagsValue.subarray(0, this.maxTermId() + 1),
-    );
+  /**
+   * Persist the cold-mode dictionary (call inside the write transaction):
+   * flushes the pending terms, then builds the UNIQUE term index once — a
+   * live index during the bulk load would take 1.4M random-order inserts.
+   */
+  flushColdTerms(): void {
+    if (this.coldDict === null) return;
+    this.flushColdDelta();
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)");
   }
 
   /**
@@ -581,9 +901,10 @@ export class SqliteOverviewStore {
   // ── Write path ────────────────────────────────────────────────────
   //
   // One write transaction covers everything a miss rebuilds: note upserts,
-  // note/folder deletions, folder rewrites, and the meta update. Every
-  // folder's row commits atomically — a crash can never leave a folder row
-  // that claims data which is missing.
+  // note/folder deletions, folder row rewrites, ft/cand/headrc rows, the
+  // dft adjustments, and the meta update. Every folder's rows commit
+  // atomically — a crash can never leave a folder row that claims data
+  // which is missing.
 
   beginWrite(): void {
     this.ensureOpen();
@@ -599,8 +920,17 @@ export class SqliteOverviewStore {
 
   /** Drop every row and record the validation keys (whole-store miss). */
   resetData(format: number, ignoreFp: string, templatesFolder: string): void {
-    for (const table of ["folders", "notes", "terms"]) {
-      this.db.exec("DELETE FROM " + table);
+    for (const table of [
+      "folders",
+      "notes",
+      "terms",
+      "fdir",
+      "ft",
+      "cand",
+      "dft",
+      "headrc",
+    ]) {
+      this.db.exec(`DELETE FROM ${table}`);
     }
     this.maxId = 0;
     this.stmts.metaSet.run("format", format);
@@ -612,6 +942,22 @@ export class SqliteOverviewStore {
   setMeta(ignoreFp: string, templatesFolder: string): void {
     this.stmts.metaSet.run("ignore_fp", ignoreFp);
     this.stmts.metaSet.run("templates_folder", templatesFolder);
+  }
+
+  /** Record the depth bound dft counts folders under (write txn open). */
+  setDfDepth(maxDepth: number): void {
+    this.stmts.metaSet.run("df_depth", maxDepth);
+  }
+
+  /**
+   * Rebuild dft over the stored folders at depth ≤ maxDepth (write txn
+   * open) — the run's folder set changed bound. Incremental dft
+   * adjustments during this transaction then keep it exact.
+   */
+  rebuildDft(maxDepth: number): void {
+    this.stmts.dftClear.run();
+    this.stmts.dftRebuild.run(maxDepth);
+    this.setDfDepth(maxDepth);
   }
 
   /** Freshness metadata of every stored note. */
@@ -654,29 +1000,67 @@ export class SqliteOverviewStore {
     this.stmts.noteDelete.run(path, folder);
   }
 
+  /** Assign a note's order key (write txn open). */
+  noteSetOrd(path: string, ord: number): void {
+    this.stmts.noteSetOrd.run(ord, path);
+  }
+
+  /** The folder's fdir id, creating the row when missing (write txn open). */
+  folderFid(path: string): number {
+    const row = this.stmts.fdirEnsure.get(path) as { fid: number };
+    return row.fid;
+  }
+
+  /**
+   * Drop the folder's term rows before a re-aggregation (write txn open):
+   * its old term set leaves dft first, then ft/cand/headrc go.
+   */
+  clearFolderAggregation(fid: number): void {
+    this.stmts.dftDecFolder.run(fid);
+    this.stmts.dftPrune.run();
+    this.stmts.ftDeleteFolder.run(fid);
+    this.stmts.candDeleteFolder.run(fid);
+    this.stmts.headrcDeleteFolder.run(fid);
+  }
+
+  /** Stream one note's record into the folder's ft/headrc rows. */
+  streamFolderNote(fid: number, ord: number, rec: StreamedNote): void {
+    streamNoteIntoFt(this.stmts, fid, ord, rec);
+  }
+
+  /**
+   * Fill the folder's cand rows with the SQL candidate filter (write txn
+   * open, after every note streamed). Flushes pending cold-interned terms
+   * first so the filter's terms JOIN sees them.
+   */
+  fillFolderCand(fid: number, tokens: Iterable<string>): void {
+    this.flushColdDelta();
+    const ids = [...this.idsForTerms([...tokens]).values()];
+    this.stmts.candFill.run(fid, JSON.stringify(ids));
+  }
+
+  /** Add the folder's term set to dft (write txn open, after streaming). */
+  bumpFolderDft(fid: number): void {
+    this.stmts.dftIncFolder.run(fid);
+  }
+
   /** Insert or replace one folder's aggregate row (write txn open). */
   upsertFolder(
     path: string,
     notes: number,
     tagsJson: string,
     warnJson: string,
-    tfids: Uint8Array,
-    cand: Uint8Array,
-    full: Uint8Array | null,
   ): void {
-    this.stmts.folderUpsert.run(
-      path,
-      notes,
-      tagsJson,
-      warnJson,
-      tfids,
-      cand,
-      full,
-    );
+    this.stmts.folderUpsert.run(path, notes, tagsJson, warnJson);
   }
 
-  /** Delete one folder and every note attributed to it (write txn open). */
+  /** Delete one folder and every row attributed to it (write txn open). */
   deleteFolder(folder: string): void {
+    const row = this.stmts.fdirGet.get(folder) as { fid: number } | undefined;
+    if (row !== undefined) {
+      this.clearFolderAggregation(row.fid);
+      this.stmts.fdirDelete.run(row.fid);
+    }
     this.stmts.folderDelete.run(folder);
     this.stmts.noteDeleteFolder.run(folder);
   }
@@ -689,22 +1073,11 @@ export class SqliteOverviewStore {
     );
   }
 
-  /** Every stored folder's path and whether it carries a full blob. */
-  storedFolderInfo(): { path: string; hasFull: boolean }[] {
-    this.ensureOpen();
-    return (
-      this.stmts.folderInfo.all() as unknown as {
-        path: string;
-        hasFull: number;
-      }[]
-    ).map((r) => ({ path: r.path, hasFull: r.hasFull === 1 }));
-  }
-
   // ── Read path ─────────────────────────────────────────────────────
   //
-  // folderRows loads every folder's tfids/cand blobs at once (a few MB on a
-  // large vault — the df pass needs tfids anyway); the much rarer collapse
-  // path loads one group's full blobs at a time.
+  // folderRows lists the folder scalars once; candidates and the collapse
+  // term data are read per folder from the row tables — df comes from dft,
+  // never from a per-folder scan.
 
   /** Run the read phase inside one read transaction (consistent snapshot). */
   readSnapshot<T>(fn: () => T): T {
@@ -721,19 +1094,90 @@ export class SqliteOverviewStore {
     }
   }
 
-  /** Every stored folder's row, including the tfids/cand blobs. */
+  /** Every stored folder's row (scalars + fdir id). */
   folderRows(): StoredFolderRow[] {
     this.ensureOpen();
     return this.stmts.folderRows.all() as unknown as StoredFolderRow[];
   }
 
-  /** One folder's full-blob (null when the folder never needed one). */
-  folderFull(path: string): Uint8Array | null {
+  /** One folder's (term id, tf) candidate pairs in tf order. */
+  folderCandPairs(fid: number): Int32Array {
     this.ensureOpen();
-    const row = this.stmts.folderFull.get(path) as
-      | { full: Uint8Array | null }
-      | undefined;
-    return row?.full ?? null;
+    const rows = this.stmts.candFolder.all(fid) as unknown as {
+      tid: number;
+      tf: number;
+    }[];
+    const out = new Int32Array(rows.length * 2);
+    for (let i = 0; i < rows.length; i++) {
+      out[2 * i] = rows[i].tid;
+      out[2 * i + 1] = rows[i].tf;
+    }
+    return out;
+  }
+
+  /** Fill target[tid] = df for every dft row (streaming — the table is
+   *  dictionary-sized, so it is never materialised as objects). */
+  fillDf(target: Int32Array): void {
+    this.ensureOpen();
+    for (const row of this.stmts.dftAll.iterate() as Iterable<{
+      tid: number;
+      n: number;
+    }>) {
+      target[row.tid] = row.n;
+    }
+  }
+
+  /** A folder's term ids (its df contribution — the collapse correction). */
+  folderTfIds(fid: number): Int32Array {
+    const rows = this.stmts.ftFolderTids.all(fid) as unknown as {
+      tid: number;
+    }[];
+    return Int32Array.from(rows, (r) => r.tid);
+  }
+
+  /** A folder's (term id, tf) pairs in tf order (collapse merge input). */
+  folderTfPairs(fid: number): Int32Array {
+    const rows = this.stmts.ftFolderTfPairs.all(fid) as unknown as {
+      tid: number;
+      tf: number;
+    }[];
+    const out = new Int32Array(rows.length * 2);
+    for (let i = 0; i < rows.length; i++) {
+      out[2 * i] = rows[i].tid;
+      out[2 * i + 1] = rows[i].tf;
+    }
+    return out;
+  }
+
+  /** A folder's heading-line counts: term id → distinct heading texts. */
+  folderHeadCounts(fid: number): Map<number, number> {
+    const rows = this.stmts.ftFolderHead.all(fid) as unknown as {
+      tid: number;
+      lc: number;
+    }[];
+    return new Map(rows.map((r) => [r.tid, r.lc]));
+  }
+
+  /** A folder's heading-only term ids (collapse merge input). */
+  folderHeadOnlyIds(fid: number): Set<number> {
+    const rows = this.stmts.ftFolderHeadOnly.all(fid) as unknown as {
+      tid: number;
+    }[];
+    return new Set(rows.map((r) => r.tid));
+  }
+
+  /**
+   * A folder's ordered note data blobs — the lazy source of its bodyTF
+   * pairs for the collapse merge (the v1 `full` blob's body section).
+   * ord was assigned in JS path-sort order at aggregation time, so the
+   * blobs arrive in exactly the order the folder was aggregated.
+   */
+  folderNoteBodies(path: string): (Uint8Array | null)[] {
+    this.ensureOpen();
+    const rows = this.stmts.noteBodiesFolder.all(path) as unknown as {
+      data: Uint8Array | null;
+    }[];
+    return rows.map((r) => r.data);
   }
 
   /** Close the connection; the next call reopens it lazily. */
@@ -757,6 +1201,8 @@ export class SqliteOverviewStore {
     folders: number;
     notes: number;
     terms: number;
+    ft: number;
+    cand: number;
   } {
     this.ensureOpen();
     const scalar = (sql: string): number => {
@@ -767,6 +1213,8 @@ export class SqliteOverviewStore {
       folders: scalar("SELECT COUNT(*) AS n FROM folders"),
       notes: scalar("SELECT COUNT(*) AS n FROM notes"),
       terms: scalar("SELECT COUNT(*) AS n FROM terms"),
+      ft: scalar("SELECT COUNT(*) AS n FROM ft"),
+      cand: scalar("SELECT COUNT(*) AS n FROM cand"),
     };
   }
 
@@ -776,34 +1224,17 @@ export class SqliteOverviewStore {
         notes: number;
         tags: string[];
         warn: string[];
-        hasFull: boolean;
-        tfids: number;
-        cand: number;
       }
     | undefined {
     this.ensureOpen();
     const row = this.db
-      .prepare(
-        "SELECT notes, tags, warn, tfids, cand, full FROM folders WHERE path = ?",
-      )
-      .get(folder) as
-      | {
-          notes: number;
-          tags: string;
-          warn: string;
-          tfids: Uint8Array | null;
-          cand: Uint8Array | null;
-          full: Uint8Array | null;
-        }
-      | undefined;
+      .prepare("SELECT notes, tags, warn FROM folders WHERE path = ?")
+      .get(folder) as { notes: number; tags: string; warn: string } | undefined;
     if (row === undefined) return undefined;
     return {
       notes: row.notes,
       tags: JSON.parse(row.tags) as string[],
       warn: JSON.parse(row.warn) as string[],
-      hasFull: row.full !== null,
-      tfids: row.tfids === null ? 0 : row.tfids.byteLength >> 2,
-      cand: row.cand === null ? 0 : row.cand.byteLength >> 2,
     };
   }
 
@@ -815,18 +1246,10 @@ export class SqliteOverviewStore {
   /** Test-only: one folder's candidate pairs resolved to term text. */
   folderCandForTests(folder: string): [string, number][] {
     this.ensureOpen();
-    const row = this.db
-      .prepare("SELECT cand FROM folders WHERE path = ?")
-      .get(folder) as { cand: Uint8Array | null } | undefined;
-    if (row?.cand == null) return [];
-    const a =
-      row.cand.byteOffset % 4 === 0
-        ? new Int32Array(
-            row.cand.buffer,
-            row.cand.byteOffset,
-            row.cand.byteLength >> 2,
-          )
-        : new Int32Array(row.cand.slice().buffer);
+    const fid = (this.stmts.fdirGet.get(folder) as { fid: number } | undefined)
+      ?.fid;
+    if (fid === undefined) return [];
+    const a = this.folderCandPairs(fid);
     const ids: number[] = [];
     for (let i = 0; i < a.length; i += 2) ids.push(a[i]);
     const texts = this.termTexts(ids);
@@ -842,11 +1265,10 @@ export class SqliteOverviewStore {
     return this.idsForTerms([term]).get(term);
   }
 
-  /** Test-only: the id↔flag of a stored term. */
+  /** Test-only: a stored term's flag byte (bit 0 = bigram, bit 1 = self-pair). */
   flagForTests(term: string): number | undefined {
-    const id = this.termIdForTests(term);
-    if (id === undefined) return undefined;
-    return this.flags()[id];
+    if (this.termIdForTests(term) === undefined) return undefined;
+    return termFlags(term);
   }
 }
 
@@ -941,13 +1363,17 @@ export function resetOverviewStoresForTests(): void {
 
 /**
  * The open ladder: WAL journaling, then DELETE (for filesystems where
- * shared-memory WAL cannot mmap); on failure park the file aside (with its
- * -wal/-shm sidecars — an orphaned WAL replays into the fresh database and
- * resurrects the very rows we parked) and repeat once. Returns null when a
- * freshly created database still cannot be opened.
+ * shared-memory WAL cannot mmap); a failed v1→v2 migration skips the second
+ * mode (the same data fails identically) and parks the file; on open
+ * failure park the file aside (with its -wal/-shm sidecars — an orphaned
+ * WAL replays into the fresh database and resurrects the very rows we
+ * parked) and repeat once. Returns null when a freshly created database
+ * still cannot be opened.
  */
 function openDb(sqlite: SqliteModule, dbPath: string): DatabaseSync | null {
+  migrationFailed = false;
   for (const mode of ["WAL", "DELETE"] as const) {
+    if (migrationFailed) break;
     const db = tryOpen(sqlite, dbPath, mode);
     if (db !== null) return db;
   }
@@ -964,7 +1390,10 @@ function parkAside(dbPath: string): void {
   const stamp = Date.now();
   for (const suffix of ["", "-wal", "-shm"]) {
     try {
-      fs.renameSync(dbPath + suffix, dbPath + suffix + ".corrupt-" + stamp);
+      fs.renameSync(
+        `${dbPath}${suffix}`,
+        `${dbPath}${suffix}.corrupt-${stamp}`,
+      );
     } catch {
       // A missing sidecar is fine.
     }

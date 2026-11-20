@@ -19,10 +19,18 @@ import {
 } from "../utils/overview-cache.js";
 import {
   createOverviewStore,
+  ORD_GAP,
   reportOverviewStoreFailure,
   type SqliteOverviewStore,
   type StoredFolderRow,
 } from "../utils/overview-store.js";
+import {
+  folderDepth,
+  folderKeywordTokens,
+  stripNoise,
+  termFlags,
+  tokenize,
+} from "../utils/overview-terms.js";
 
 export interface OverviewFolder {
   path: string;
@@ -41,20 +49,6 @@ export interface VaultOverview {
   warnings?: string[];
 }
 
-const CODE_BLOCK_RE = /```[\s\S]*?```/g;
-const INLINE_CODE_RE = /`[^`]+`/g;
-const URL_RE = /https?:\/\/[^\s)>\]]+/g;
-const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-const HEX_HASH_RE = /\b[a-f0-9]{8,}\b/g;
-// Structured noise from imported/converted documents (OCR'd PDFs, DocuSign
-// exports, HTML conversions). Stripped before tokenization so ID shrapnel
-// ("DAB4-BCF3-..." → "dab", "bcf") never reaches keyword scoring.
-const DASHED_HEX_RE = /\b[0-9a-f]{2,}(?:-[0-9a-f]{2,})+\b/gi;
-const DIGIT_BLOB_RE = /\b(?=[0-9a-z]*\d)(?=[0-9a-z]*[a-z])[0-9a-z]{6,}\b/gi;
-const HTML_TAG_RE = /<\/?[a-z][^>]*>/gi;
-const HTML_ENTITY_RE = /&[a-z]+;|&#\d+;/gi;
-const HEXLETTER_RUN_RE = /\b[a-f]{7,}\b/gi;
-
 // Homogeneous-sibling collapse: parents with at least this many children
 // whose term distributions are at least this similar (mean pairwise cosine
 // over top terms) are rendered as a single aggregate row. Tuned against a
@@ -64,147 +58,10 @@ const COLLAPSE_MIN_CHILDREN = 5;
 const COLLAPSE_SIMILARITY = 0.15;
 const COLLAPSE_COSINE_TOP_TERMS = 60;
 const COLLAPSE_PAIRWISE_CAP = 20;
-const TOKEN_RE = /[a-z]{3,}/g;
 const FRONTMATTER_RE = /^---[\s\S]*?---\n?/;
 const ATX_HEADING_LINE_RE = /^#{1,6}\s+.+$/gm;
 const WIKILINK_ONLY_RE = /^\[\[[^\]]+(?:\|[^\]]+)?\]\]$/;
 const ISO_DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}/;
-
-const STOP_WORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "and",
-  "or",
-  "but",
-  "in",
-  "on",
-  "at",
-  "to",
-  "for",
-  "of",
-  "with",
-  "by",
-  "from",
-  "is",
-  "it",
-  "as",
-  "be",
-  "was",
-  "are",
-  "this",
-  "that",
-  "not",
-  "has",
-  "have",
-  "had",
-  "will",
-  "can",
-  "may",
-  "do",
-  "does",
-  "did",
-  "been",
-  "being",
-  "would",
-  "could",
-  "should",
-  "its",
-  "my",
-  "your",
-  "our",
-  "their",
-  "his",
-  "her",
-  "we",
-  "they",
-  "you",
-  "he",
-  "she",
-  "all",
-  "each",
-  "every",
-  "both",
-  "few",
-  "more",
-  "most",
-  "other",
-  "some",
-  "such",
-  "than",
-  "too",
-  "very",
-  "just",
-  "about",
-  "above",
-  "after",
-  "again",
-  "also",
-  "any",
-  "because",
-  "before",
-  "between",
-  "down",
-  "during",
-  "even",
-  "first",
-  "get",
-  "how",
-  "if",
-  "into",
-  "like",
-  "made",
-  "make",
-  "many",
-  "much",
-  "new",
-  "no",
-  "now",
-  "off",
-  "old",
-  "only",
-  "one",
-  "out",
-  "over",
-  "own",
-  "same",
-  "so",
-  "still",
-  "then",
-  "there",
-  "these",
-  "those",
-  "through",
-  "under",
-  "up",
-  "use",
-  "used",
-  "using",
-  "want",
-  "way",
-  "well",
-  "what",
-  "when",
-  "where",
-  "which",
-  "while",
-  "who",
-  "why",
-  "work",
-  "see",
-  "here",
-  "need",
-  "etc",
-  "two",
-  "next",
-  "per",
-  "via",
-  "vs",
-  "yet",
-  "ago",
-  "due",
-  "tbd",
-]); // prettier-ignore
 
 interface WeightedTerms {
   /** Term → occurrence count for one source text. */
@@ -259,38 +116,6 @@ interface FolderData {
   noteCount: number;
 }
 
-const DIGIT_RE = /\d/;
-
-/**
- * Each replace is guarded by a necessary condition of its pattern (an email
- * must contain "@", a URL "http", ...) so clean prose skips the expensive
- * regex scans entirely. Guards never change the result: when the guard is
- * false the pattern cannot match. HEX_HASH_RE can skip when no digit remains
- * because HEXLETTER_RUN_RE has already removed pure-letter hex runs ≥7.
- */
-function stripNoise(text: string): string {
-  let out = text;
-  if (out.includes("```")) out = out.replace(CODE_BLOCK_RE, "");
-  if (out.includes("`")) out = out.replace(INLINE_CODE_RE, "");
-  if (out.includes("http")) out = out.replace(URL_RE, "");
-  if (out.includes("@")) out = out.replace(EMAIL_RE, "");
-  if (out.includes("<")) out = out.replace(HTML_TAG_RE, " ");
-  if (out.includes("&")) out = out.replace(HTML_ENTITY_RE, " ");
-  const hasDigit = DIGIT_RE.test(out);
-  if (out.includes("-")) out = out.replace(DASHED_HEX_RE, " ");
-  if (hasDigit) out = out.replace(DIGIT_BLOB_RE, " ");
-  out = out.replace(HEXLETTER_RUN_RE, " ");
-  if (hasDigit) out = out.replace(HEX_HASH_RE, "");
-  return out;
-}
-
-function tokenize(text: string): string[] {
-  const cleaned = stripNoise(text);
-  return (cleaned.toLowerCase().match(TOKEN_RE) || []).filter(
-    (w) => !STOP_WORDS.has(w),
-  );
-}
-
 /**
  * Term → occurrence count for one text, from a single tokenize() pass.
  * Unigrams are inserted before bigrams, each in first-occurrence order —
@@ -337,22 +162,6 @@ function buildTF(sources: WeightedTerms[]): Map<string, number> {
     mergeCounts(freq, source.counts, source.weight);
   }
   return freq;
-}
-
-/** Depth of a folder path: root `/` is 0, `amazon` is 1, `amazon/features` is 2. */
-function folderDepth(folder: string): number {
-  return folder === "/" ? 0 : folder.split("/").length;
-}
-
-function folderKeywordTokens(folderPath: string): Set<string> {
-  const tokens = new Set<string>();
-  for (const segment of folderPath.split("/")) {
-    for (const token of tokenize(segment)) {
-      tokens.add(token);
-      tokens.add(token.endsWith("s") ? token.slice(0, -1) : `${token}s`);
-    }
-  }
-  return tokens;
 }
 
 function shouldSkipOverviewFile(
@@ -1224,36 +1033,22 @@ function extractNoteRecord(
   return { skip: false, tags: [...tags], heads, data };
 }
 
-/** Dense accumulator arrays indexed by term id, grown as the dict grows. */
-interface DenseAgg {
-  /** Non-heading weighted counts. */
-  w: Int32Array;
-  /** Body counts (only tracked when the folder's full blob is needed). */
-  b: Int32Array;
-  /** Heading line counts (distinct heading texts containing the term). */
-  lc: Int32Array;
-  /** "Term id seen in a heading" marks. */
-  seen: Uint8Array;
-}
-
-function ensureDense(d: DenseAgg, size: number): void {
-  if (d.w.length >= size) return;
-  const n = Math.ceil(size * 1.1);
-  // Copy: counts already accumulated for this folder must survive the grow.
-  const grow = (a: Int32Array): Int32Array => {
-    const next = new Int32Array(n);
-    next.set(a);
-    return next;
-  };
-  const grow8 = (a: Uint8Array): Uint8Array => {
-    const next = new Uint8Array(n);
-    next.set(a);
-    return next;
-  };
-  d.w = grow(d.w);
-  d.b = grow(d.b);
-  d.lc = grow(d.lc);
-  d.seen = grow8(d.seen);
+/**
+ * A term's candidate-flag byte resolved lazily from the dictionary — the v1
+ * store kept this as a dense persisted array; v2 computes it from the term
+ * text (bit 0 = contains a space, bit 1 = "x x" self-pair).
+ */
+function flagOfId(
+  store: SqliteOverviewStore,
+  cache: Map<number, number>,
+  id: number,
+): number {
+  let flag = cache.get(id);
+  if (flag === undefined) {
+    flag = termFlags(store.termTexts([id]).get(id) ?? "");
+    cache.set(id, flag);
+  }
+  return flag;
 }
 
 interface FolderAggregate {
@@ -1261,71 +1056,55 @@ interface FolderAggregate {
   tfids: Int32Array;
   /** (id, tf) keyword-candidate pairs in tf order. */
   cand: Int32Array;
-  /** The full blob, or null when collapse cannot touch this folder. */
-  full: Int32Array | null;
   tags: string[];
   warn: string[];
   notes: number;
 }
 
 /**
- * Re-aggregate one folder from its notes' records — in file order — into
- * the derived blobs the read phase consumes. This is the streaming,
- * id-space equivalent of buildFolderData + the candidate filter:
+ * The reference aggregation: re-aggregate one folder from its notes'
+ * records — in file order — with dense per-id accumulators. In production
+ * the same result is produced by streaming each note into the SQL row
+ * tables (SqliteOverviewStore.streamFolderNote + the cand INSERT); this JS
+ * implementation is kept as the test oracle the row tables are verified
+ * against (#125). Its semantics:
  *
  *   tf order   = non-heading terms (note rank, note position), then
  *                heading-only terms (note rank, heading rank, position)
  *   tf values  = non-heading weight + 3 when the term occurs in a heading
  *   headingOnly = heading terms absent from the non-heading counts
  *   lineCount   = distinct heading texts containing the term
- *
- * needFull additionally tracks body counts and emits the collapse blob;
- * when false the body section of each note blob is skipped entirely.
  */
-function aggregateFolder(
+export function _aggregateFolder(
   store: SqliteOverviewStore,
   folder: string,
   files: string[],
   records: (file: string) => NoteRecord,
-  needFull: boolean,
-  dense: DenseAgg,
 ): FolderAggregate {
+  const size = store.maxTermId() + 16;
+  const w = new Int32Array(size);
+  const lc = new Int32Array(size);
+  const seen = new Uint8Array(size);
+  const flagCache = new Map<number, number>();
   const nhOrder: number[] = [];
   const hOrder: number[] = [];
-  const bodyOrder: number[] = [];
   const tags = new Set<string>();
   const texts = new Set<string>();
   const warn: string[] = [];
 
   for (const file of files) {
     const rec = records(file);
-    // Interning inside records() can grow the dictionary — ensureDense may
-    // replace the arrays, so the aliases are (re)bound per note.
-    ensureDense(dense, store.maxTermId() + 1);
-    const w = dense.w;
-    const b = dense.b;
-    const lc = dense.lc;
-    const seen = dense.seen;
     if (rec.skip) {
       warn.push(`Skipping ${file} (malformed YAML frontmatter)`);
       continue;
     }
     for (const tag of rec.tags) tags.add(tag);
     const a = rec.data as Int32Array;
-    let p = 0;
-    const nn = a[p++];
-    for (let k = 0; k < nn; k++, p += 2) {
+    const nn = a[0];
+    for (let k = 0, p = 1; k < nn; k++, p += 2) {
       const id = a[p];
       if (w[id] === 0) nhOrder.push(id);
       w[id] += a[p + 1];
-    }
-    const nb = a[p++];
-    if (needFull) {
-      for (let k = 0; k < nb; k++, p += 2) {
-        const id = a[p];
-        if (b[id] === 0) bodyOrder.push(id);
-        b[id] += a[p + 1];
-      }
     }
     for (const [text, ids] of rec.heads) {
       for (const id of ids) {
@@ -1340,15 +1119,9 @@ function aggregateFolder(
       }
     }
   }
-  const w = dense.w;
-  const b = dense.b;
-  const lc = dense.lc;
-  const seen = dense.seen;
 
   // tf order: non-heading terms, then heading terms never seen outside
-  // headings (w[id] === 0 marks those). Every id touched by w/b/lc/seen is
-  // in tfOrder — body terms are a subset of nh ∪ heading terms — so the
-  // reset loop over tfOrder clears every dense slot this folder used.
+  // headings (w[id] === 0 marks those).
   const tfOrder = nhOrder.slice();
   for (const id of hOrder) if (w[id] === 0) tfOrder.push(id);
 
@@ -1360,7 +1133,7 @@ function aggregateFolder(
   const cand: number[] = [];
   for (const id of tfOrder) {
     const tf = w[id] + (lc[id] > 0 ? 3 : 0);
-    const flag = store.flags()[id];
+    const flag = flagOfId(store, flagCache, id);
     if (flag & 1) {
       if (tf < 2 || flag & 2) continue;
     } else if (folderTokenIds.has(id)) {
@@ -1372,55 +1145,9 @@ function aggregateFolder(
     cand.push(id, tf);
   }
 
-  let full: Int32Array | null = null;
-  if (needFull) {
-    const headPairs: number[] = [];
-    const headOnly: number[] = [];
-    for (const id of hOrder) {
-      if (lc[id] > 0) headPairs.push(id, lc[id]);
-      if (w[id] === 0) headOnly.push(id);
-    }
-    const tfPairs: number[] = [];
-    for (const id of tfOrder) tfPairs.push(id, w[id] + (lc[id] > 0 ? 3 : 0));
-    const bodyPairs: number[] = [];
-    for (const id of bodyOrder) bodyPairs.push(id, b[id]);
-    const top = topTermPairsArray(bodyPairs);
-    full = new Int32Array(
-      5 +
-        tfPairs.length +
-        bodyPairs.length +
-        headPairs.length +
-        headOnly.length +
-        top.length,
-    );
-    let q = 0;
-    const put = (pairs: number[] | Int32Array) => {
-      full?.set(pairs, q);
-      q += pairs.length;
-    };
-    full[q++] = tfPairs.length;
-    put(tfPairs);
-    full[q++] = bodyPairs.length;
-    put(bodyPairs);
-    full[q++] = headPairs.length;
-    put(headPairs);
-    full[q++] = headOnly.length;
-    put(headOnly);
-    full[q++] = top.length;
-    put(top);
-  }
-
-  for (const id of tfOrder) {
-    w[id] = 0;
-    b[id] = 0;
-    lc[id] = 0;
-    seen[id] = 0;
-  }
-
   return {
     tfids: Int32Array.from(tfOrder),
     cand: Int32Array.from(cand),
-    full,
     tags: [...tags],
     warn,
     notes: files.length,
@@ -1454,30 +1181,46 @@ interface IdFolderData {
   noteCount: number;
 }
 
-/** Decode a folder's full blob into IdFolderData (tags/notes from the row). */
-function decodeFullBlob(
-  blob: Uint8Array,
-  tags: Set<string>,
-  noteCount: number,
+/**
+ * Derive a folder's complete term data from the row tables — the v2 form of
+ * the v1 `full` blob (#125). tf comes from the ft rows in tf order,
+ * head/headOnly from the lc/w columns, and bodyTF is accumulated from the
+ * body section of the folder's note blobs in ord order — the same data and
+ * order the aggregation encoded. Runs only for collapse candidates, so the
+ * common path never reads a note blob.
+ */
+function folderDataOf(
+  store: SqliteOverviewStore,
+  row: StoredFolderRow,
 ): IdFolderData {
-  const a = i32(blob);
-  let p = 0;
-  const take = (n: number): Int32Array => {
-    const out = a.subarray(p, p + n);
-    p += n;
-    return out;
-  };
-  const tf = take(a[p++]);
-  const bodyTF = take(a[p++]);
-  const headFlat = take(a[p++]);
-  const head = new Map<number, number>();
-  for (let i = 0; i < headFlat.length; i += 2) {
-    head.set(headFlat[i], headFlat[i + 1]);
+  const tf = store.folderTfPairs(row.fid);
+  const head = store.folderHeadCounts(row.fid);
+  const headOnly = store.folderHeadOnlyIds(row.fid);
+  const body = new Map<number, number>();
+  for (const blob of store.folderNoteBodies(row.path)) {
+    if (blob === null) continue;
+    const a = i32(blob);
+    let p = 1 + a[0] * 2;
+    const nb = a[p++];
+    for (let k = 0; k < nb; k++, p += 2) {
+      body.set(a[p], (body.get(a[p]) || 0) + a[p + 1]);
+    }
   }
-  const headOnlyFlat = take(a[p++]);
-  const headOnly = new Set<number>(headOnlyFlat);
-  const top = take(a[p++]);
-  return { tf, bodyTF, head, headOnly, top, tags, noteCount };
+  const bodyTF = new Int32Array(body.size * 2);
+  let q = 0;
+  for (const [id, count] of body) {
+    bodyTF[q++] = id;
+    bodyTF[q++] = count;
+  }
+  return {
+    tf,
+    bodyTF,
+    head,
+    headOnly,
+    top: topTermPairsArray(bodyTF),
+    tags: new Set(JSON.parse(row.tags) as string[]),
+    noteCount: row.notes,
+  };
 }
 
 /** Merge id-space folder data — mergeFolderData's exact semantics. */
@@ -1556,7 +1299,7 @@ function selectKeywordsById(
   maxKeywords: number,
   filter: ((id: number, tf: number) => boolean) | null,
 ): string[] {
-  const flags = store.flags();
+  const flagCache = new Map<number, number>();
   const scored: { id: number; score: number }[] = [];
   for (let i = 0; i + 1 < pairs.length; i += 2) {
     const id = pairs[i];
@@ -1573,7 +1316,7 @@ function selectKeywordsById(
     if (selected.length >= maxKeywords) break;
     if (suppressed.has(id)) continue;
     selected.push(id);
-    if (flags[id] & 1) {
+    if (flagOfId(store, flagCache, id) & 1) {
       // Suppress the bigram's unigram parts, by term id — the same test the
       // string-keyed path performs; a part absent from the dictionary
       // suppresses nothing.
@@ -1618,33 +1361,6 @@ function overviewFromStore(
     return idx === -1 ? "/" : folder.slice(0, idx);
   };
 
-  // Collapse relevance mirrors the merge gate below: parent != root, parent
-  // depth >= collapseDepth, >= COLLAPSE_MIN_CHILDREN in-run siblings. Those
-  // folders (members AND merge targets) need the full blob — merged data
-  // must sum complete term maps, and children removed by a deeper merge only
-  // shrink a group, so relevance computed pre-collapse never misses one.
-  const relevant = new Set<string>();
-  if (collapse) {
-    const childCount = new Map<string, number>();
-    for (const folder of live) {
-      if (folder === "/") continue;
-      const parent = parentOf(folder);
-      childCount.set(parent, (childCount.get(parent) ?? 0) + 1);
-    }
-    for (const folder of live) {
-      if (folder === "/") continue;
-      const parent = parentOf(folder);
-      if (
-        parent !== "/" &&
-        folderDepth(parent) >= collapseDepth &&
-        (childCount.get(parent) ?? 0) >= COLLAPSE_MIN_CHILDREN
-      ) {
-        relevant.add(folder);
-        relevant.add(parent);
-      }
-    }
-  }
-
   // ── Sync phase: re-tokenize changed notes, re-aggregate touched ─────
   const storedNotes = wipe
     ? new Map<
@@ -1662,12 +1378,12 @@ function overviewFromStore(
     list.push(m.path);
   }
   const storedFolders = wipe
-    ? new Map<string, boolean>()
-    : new Map(store.storedFolderInfo().map((r) => [r.path, r.hasFull]));
+    ? new Set<string>()
+    : new Set(store.storedFolderPaths());
 
   const toAggregate: string[] = [];
   for (const [folder, list] of folderFiles) {
-    let dirty = storedFolders.get(folder) === undefined;
+    let dirty = !storedFolders.has(folder);
     if (!dirty) {
       for (const f of list) {
         const s = storedNotes.get(f);
@@ -1686,16 +1402,9 @@ function overviewFromStore(
         }
       }
     }
-    if (
-      dirty ||
-      (relevant.has(folder) && storedFolders.get(folder) === false)
-    ) {
-      // dirty: a note was added/edited/removed — re-aggregate (re-reading
-      // note blobs, re-tokenizing only what changed). Not dirty but newly
-      // collapse-relevant without a full blob: re-aggregate for the blob —
-      // note blobs suffice, no tokenization.
-      toAggregate.push(folder);
-    }
+    // dirty: a note was added/edited/removed — re-aggregate (re-reading
+    // note blobs, re-tokenizing only what changed).
+    if (dirty) toAggregate.push(folder);
   }
   const foldersToDelete: string[] = [];
   for (const folder of storedFolders.keys()) {
@@ -1706,7 +1415,16 @@ function overviewFromStore(
     }
   }
 
-  if (wipe || toAggregate.length > 0 || foldersToDelete.length > 0) {
+  // dft counts stored folders at depth ≤ df_depth; when the run's
+  // bound differs the table is rebuilt under it before applying this run's
+  // incremental adjustments.
+  const dfDepthMismatch = !wipe && meta.dfDepth !== maxDepth;
+  if (
+    wipe ||
+    toAggregate.length > 0 ||
+    foldersToDelete.length > 0 ||
+    dfDepthMismatch
+  ) {
     store.beginWrite();
     try {
       if (wipe) {
@@ -1718,13 +1436,9 @@ function overviewFromStore(
         store.setColdInterning(true);
       } else {
         store.setMeta(ignoreFingerprint, templatesFolder);
+        if (dfDepthMismatch) store.rebuildDft(maxDepth);
       }
-      const dense: DenseAgg = {
-        w: new Int32Array(store.maxTermId() + 16),
-        b: new Int32Array(store.maxTermId() + 16),
-        lc: new Int32Array(store.maxTermId() + 16),
-        seen: new Uint8Array(store.maxTermId() + 16),
-      };
+      store.setDfDepth(maxDepth);
       for (const folder of toAggregate) {
         const list = folderFiles.get(folder) ?? [];
         const listSet = new Set(list);
@@ -1774,27 +1488,35 @@ function overviewFromStore(
           );
           return rec;
         };
-        const agg = aggregateFolder(
-          store,
-          folder,
-          list,
-          getRecord,
-          relevant.has(folder),
-          dense,
-        );
+        const fid = store.folderFid(folder);
+        store.clearFolderAggregation(fid);
+        const tags = new Set<string>();
+        const warn: string[] = [];
+        // Notes stream into ft in path order, ord spaced 2^20 — the first-
+        // seen keys (nord/npos, hord/hpos) reproduce buildFolderData's tf
+        // order exactly, and the folder Map's insertion order is preserved.
+        list.forEach((file, i) => {
+          const ord = (i + 1) * ORD_GAP;
+          const rec = getRecord(file);
+          store.noteSetOrd(file, ord);
+          if (rec.skip) {
+            warn.push(`Skipping ${file} (malformed YAML frontmatter)`);
+            return;
+          }
+          for (const tag of rec.tags) tags.add(tag);
+          store.streamFolderNote(fid, ord, rec);
+        });
+        store.fillFolderCand(fid, folderKeywordTokens(folder));
+        store.bumpFolderDft(fid);
         store.upsertFolder(
           folder,
-          agg.notes,
-          JSON.stringify(agg.tags),
-          JSON.stringify(agg.warn),
-          u8(agg.tfids),
-          u8(agg.cand),
-          agg.full === null ? null : u8(agg.full),
+          list.length,
+          JSON.stringify([...tags]),
+          JSON.stringify(warn),
         );
       }
       for (const folder of foldersToDelete) store.deleteFolder(folder);
       store.flushColdTerms();
-      store.saveFlags();
       store.endWrite(true);
       store.setColdInterning(false);
     } catch (err) {
@@ -1804,7 +1526,7 @@ function overviewFromStore(
     }
   }
 
-  // ── Read phase: df from tfids blobs, collapse, score ───────────────
+  // ── Read phase: df from dft, collapse, score ─────────────────────
   return store.readSnapshot(() => {
     const rowByPath = new Map(
       store.folderRows().map((r) => [r.path, r] as const),
@@ -1813,18 +1535,17 @@ function overviewFromStore(
     for (const folder of live) {
       const row = rowByPath.get(folder);
       if (row === undefined) {
-        throw new Error("overview store missing folder row: " + folder);
+        throw new Error(`overview store missing folder row: ${folder}`);
       }
       run.push(row);
     }
     const runSet = new Set(run.map((r) => r.path));
 
-    // Document frequency over the run's folders — exact by construction.
+    // Document frequency over the run's folders — exact by construction:
+    // dft counts every stored folder at depth ≤ df_depth, which is exactly
+    // the live set after the sync phase.
     const df = new Int32Array(store.maxTermId() + 1);
-    for (const r of run) {
-      const ids = i32(r.tfids);
-      for (let i = 0; i < ids.length; i++) df[ids[i]]++;
-    }
+    store.fillDf(df);
 
     // ── Collapse decision (mirror of collapseHomogeneousSiblings) ──
     const removed = new Set<string>();
@@ -1840,15 +1561,9 @@ function overviewFromStore(
       if (removed.has(p)) return undefined;
       const row = rowByPath.get(p);
       if (!row || !runSet.has(p)) return undefined;
-      const blob = store.folderFull(p);
-      if (blob === null) {
-        throw new Error("overview store missing full blob: " + p);
-      }
-      return decodeFullBlob(
-        blob,
-        new Set(JSON.parse(row.tags) as string[]),
-        row.notes,
-      );
+      // v2 derives the collapse merge input from the row tables — every
+      // folder supplies it, no stored blob to miss.
+      return folderDataOf(store, row);
     };
 
     if (collapse) {
@@ -1923,7 +1638,7 @@ function overviewFromStore(
     for (const folder of dfAdjusted) {
       const row = rowByPath.get(folder);
       if (!row) continue;
-      const ids = i32(row.tfids);
+      const ids = store.folderTfIds(row.fid);
       for (let i = 0; i < ids.length; i++) df[ids[i]]--;
     }
     for (const data of mergedData.values()) {
@@ -1973,7 +1688,7 @@ function overviewFromStore(
     // cut: the sort keys (depth, notes, path) are known without scoring.
     const scored =
       maxRows > 0 ? Math.min(maxRows, entries.length) : entries.length;
-    const flags = store.flags();
+    const flagCache = new Map<number, number>();
     const folders: OverviewFolder[] = [];
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
@@ -1988,7 +1703,7 @@ function overviewFromStore(
           const head = e.data.head;
           const headOnly = e.data.headOnly;
           const filter = (id: number, tf: number): boolean => {
-            const flag = flags[id];
+            const flag = flagOfId(store, flagCache, id);
             if (flag & 1) {
               if (tf < 2 || flag & 2) return false;
             } else if (folderTokenIds.has(id)) {
@@ -2007,7 +1722,7 @@ function overviewFromStore(
         } else if (e.row) {
           keywords = selectKeywordsById(
             store,
-            i32(e.row.cand),
+            store.folderCandPairs(e.row.fid),
             df,
             totalFolders,
             maxKeywords,
@@ -2239,3 +1954,4 @@ export function getOverview(
 // Exported for differential testing against the pre-optimization oracle
 // (src/core/__tests__/overview.equivalence.test.ts). Not public API.
 export { stripNoise as _stripNoise, termCounts as _termCounts };
+// _aggregateFolder: the #125 row-table verification oracle (tests only).

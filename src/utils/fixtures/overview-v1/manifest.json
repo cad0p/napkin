@@ -1,0 +1,200 @@
+{
+  "files": [
+    {
+      "path": "NAPKIN.md",
+      "content": "# Fixture project\nContext note for the v1 fixture vault.",
+      "mtime": 1700000000000
+    },
+    {
+      "path": "root-note.md",
+      "content": "# Root note\nroot anchor zebra kumquat\nlevain hydration metrics",
+      "mtime": 1700000001000
+    },
+    {
+      "path": "alpha/kubernetes.md",
+      "content": "# Cluster\nkubernetes ingress routing autoscaling telemetry dashboards alpha\n## Deploy notes\nlevain hydration metrics pipeline",
+      "mtime": 1700000002000
+    },
+    {
+      "path": "alpha/mesh.md",
+      "content": "# Mesh\nkubernetes service mesh service mesh sidecar proxies\n## Deploy notes\nsolo uniqueheading\ndata data data",
+      "mtime": 1700000003000
+    },
+    {
+      "path": "beta/payroll.md",
+      "content": "# Payroll\npayroll withholding contractors ledger invoices quarterly",
+      "mtime": 1700000004000
+    },
+    {
+      "path": "beta/ledger.md",
+      "content": "# Ledger\ndouble entry ledger reconciliation journal corrections audit",
+      "mtime": 1700000005000
+    },
+    {
+      "path": "beta/broken.md",
+      "content": "---\n  bad: [unclosed\n---\nmalformed frontmatter body",
+      "mtime": 1700000006000
+    },
+    {
+      "path": "imports/tenant-0/contract.md",
+      "content": "# Contract\nlease agreement landlord tenant signature\nrent schedule lease term appendix\nbank guarantee insurance occupancy suite 100",
+      "mtime": 1700000007000
+    },
+    {
+      "path": "imports/tenant-1/contract.md",
+      "content": "# Contract\nlease agreement landlord tenant signature\nrent schedule lease term appendix\nbank guarantee insurance occupancy suite 101",
+      "mtime": 1700000008000
+    },
+    {
+      "path": "imports/tenant-2/contract.md",
+      "content": "# Contract\nlease agreement landlord tenant signature\nrent schedule lease term appendix\nbank guarantee insurance occupancy suite 102",
+      "mtime": 1700000009000
+    },
+    {
+      "path": "deep/a/b/note.md",
+      "content": "# Deep note\nabyssal trench bathysphere hadal pelagic",
+      "mtime": 1700000010000
+    }
+  ],
+  "config": {
+    "overview": {
+      "depth": 3,
+      "keywords": 8,
+      "collapse": true,
+      "collapseDepth": 2,
+      "maxRows": 100
+    },
+    "search": {
+      "limit": 30,
+      "contextLines": 5,
+      "resultsPerPage": 10,
+      "freshnessMs": 0
+    },
+    "daily": {
+      "folder": "Inbox/Daily",
+      "format": "YYYY-MM-DD"
+    },
+    "templates": {
+      "folder": "Templates"
+    },
+    "graph": {
+      "renderer": "auto"
+    },
+    "ignore": {
+      "respectGitignore": true,
+      "dotfiles": true
+    },
+    "vault": {
+      "root": "."
+    }
+  },
+  "expected": {
+    "context": "# Fixture project\nContext note for the v1 fixture vault.",
+    "overview": [
+      {
+        "path": "/",
+        "notes": 1,
+        "keywords": [
+          "root",
+          "root note",
+          "anchor",
+          "zebra",
+          "kumquat",
+          "levain",
+          "hydration",
+          "metrics"
+        ],
+        "tags": []
+      },
+      {
+        "path": "beta",
+        "notes": 3,
+        "keywords": [
+          "ledger",
+          "payroll",
+          "double",
+          "entry",
+          "reconciliation",
+          "journal",
+          "corrections",
+          "audit"
+        ],
+        "tags": []
+      },
+      {
+        "path": "alpha",
+        "notes": 2,
+        "keywords": [
+          "mesh",
+          "kubernetes",
+          "data",
+          "service",
+          "service mesh",
+          "ingress",
+          "routing",
+          "autoscaling"
+        ],
+        "tags": []
+      },
+      {
+        "path": "imports/tenant-0",
+        "notes": 1,
+        "keywords": [
+          "contract",
+          "lease",
+          "agreement",
+          "landlord",
+          "signature",
+          "rent",
+          "schedule",
+          "term"
+        ],
+        "tags": []
+      },
+      {
+        "path": "imports/tenant-1",
+        "notes": 1,
+        "keywords": [
+          "contract",
+          "lease",
+          "agreement",
+          "landlord",
+          "signature",
+          "rent",
+          "schedule",
+          "term"
+        ],
+        "tags": []
+      },
+      {
+        "path": "imports/tenant-2",
+        "notes": 1,
+        "keywords": [
+          "contract",
+          "lease",
+          "agreement",
+          "landlord",
+          "signature",
+          "rent",
+          "schedule",
+          "term"
+        ],
+        "tags": []
+      },
+      {
+        "path": "deep/a/b",
+        "notes": 1,
+        "keywords": [
+          "note",
+          "abyssal",
+          "trench",
+          "bathysphere",
+          "hadal",
+          "pelagic"
+        ],
+        "tags": []
+      }
+    ],
+    "warnings": ["Skipping beta/broken.md (malformed YAML frontmatter)"]
+  }
+}
