@@ -86,8 +86,14 @@ export function loadIgnorer(
 
 /**
  * md5 fingerprint of the ignore-relevant state: the `ignore.*` config values
- * plus the ignore files' {mtime, size} (absent file = "none" marker). The
- * search cache folds this in so any ignore change triggers a cold rebuild.
+ * plus each ignore file's vault-relative name and content (absent file =
+ * "none" marker). The search and overview caches fold this in so any ignore
+ * change triggers a cold rebuild.
+ *
+ * Content, not absolute path or mtime (#128): a vault that is moved, copied
+ * or cloned elsewhere, or whose ignore file is rewritten with the same rules
+ * (git checkout, editor save), keeps its fingerprint and its caches. Both
+ * files are small, so reading them per call costs about what the stat did.
  *
  * `.gitignore` is only hashed when `respectGitignore` is true — when the
  * flag is off the file has no effect on ignore state, so editing it must not
@@ -102,20 +108,32 @@ export function ignoreFingerprint(
   hash.update(
     `respectGitignore=${config.ignore.respectGitignore}\ndotfiles=${config.ignore.dotfiles}\n`,
   );
-  hash.update(fileSig(path.join(contentPath, NAPKINIGNORE_FILE)));
+  updateFileSig(hash, contentPath, NAPKINIGNORE_FILE);
   if (config.ignore.respectGitignore) {
-    hash.update(fileSig(path.join(contentPath, GITIGNORE_FILE)));
+    updateFileSig(hash, contentPath, GITIGNORE_FILE);
   }
   return hash.digest("hex");
 }
 
-function fileSig(filePath: string): string {
+/**
+ * Feed one ignore file into the fingerprint: its vault-relative name, its
+ * byte length (so the boundary to the next file is unambiguous) and its raw
+ * bytes; "none" when it cannot be read.
+ */
+function updateFileSig(
+  hash: crypto.Hash,
+  contentPath: string,
+  name: string,
+): void {
+  let bytes: Buffer;
   try {
-    const stat = fs.statSync(filePath);
-    return `${filePath}\0mtime=${stat.mtimeMs},size=${stat.size}\n`;
+    bytes = fs.readFileSync(path.join(contentPath, name));
   } catch {
-    return `${filePath}\0none\n`;
+    hash.update(`${name}\0none\n`);
+    return;
   }
+  hash.update(`${name}\0len=${bytes.length}\n`);
+  hash.update(bytes);
 }
 
 function buildIgnorer(contentPath: string, configPath: string): Ignorer {
