@@ -42,6 +42,7 @@ All notable changes to this project will be documented in this file.
 - *(search)* Query the SQLite store per search instead of loading the index (closes #109) ([#113](https://github.com/cad0p/napkin/pull/113))
 - *(overview)* Walk the vault only to the configured depth (closes #117) ([#119](https://github.com/cad0p/napkin/pull/119))
 - *(overview)* Per-note term blobs so a miss re-reads only the changed notes (closes #118) ([#120](https://github.com/cad0p/napkin/pull/120))
+- *(overview)* Slim @cad0p/napkin/overview entry (closes #123) ([#124](https://github.com/cad0p/napkin/pull/124))
 
 ### ⚙️ Miscellaneous Tasks
 
