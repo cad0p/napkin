@@ -74,8 +74,9 @@ export function setOverviewColdBatchForTests(
   notes = 256,
   terms = 1 << 16,
 ): void {
-  COLD_BATCH = notes;
-  COLD_BATCH_TERMS = terms;
+  // A bound of 0 would never close a batch with anything in it.
+  COLD_BATCH = Math.max(1, notes);
+  COLD_BATCH_TERMS = Math.max(1, terms);
 }
 const FRONTMATTER_RE = /^---[\s\S]*?---\n?/;
 const ATX_HEADING_LINE_RE = /^#{1,6}\s+.+$/gm;
@@ -1909,11 +1910,13 @@ function overviewFromStore(
       if (wipe) store.rebuildDft(maxDepth);
       store.endWrite(true);
       store.endColdBuild();
+      globalScratch = new Int32Array(0);
       syncStats.whole = toAggregate;
       syncStats.delta = [...deltas.keys()];
     } catch (err) {
       store.endWrite(false);
       store.endColdBuild();
+      globalScratch = new Int32Array(0);
       syncStats.orphanScans = 0;
       syncStats.renumbers = 0;
       throw err;

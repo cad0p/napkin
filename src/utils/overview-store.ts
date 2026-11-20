@@ -1147,6 +1147,8 @@ export class SqliteOverviewStore {
    * cold build's lookups. A false positive only costs a lookup that misses.
    */
   private coldSeen: Uint32Array | null = null;
+  /** terms(term) index known to exist on this connection (#131). */
+  private termIndexReady = false;
   /** Bulk ft insert statements, prepared on first whole-folder write. */
   private ftBulk: { many: StatementSync; one: StatementSync } | null = null;
   /** Per-note delta statements, prepared on first use (see prepareDelta). */
@@ -1329,6 +1331,16 @@ export class SqliteOverviewStore {
    */
   internList(list: string[]): Int32Array {
     this.ensureOpen();
+    // The json_each lookup joins on terms(term): without the index it is a
+    // full dictionary scan per looked-up term (minutes on a 1.45M-term
+    // dictionary). Every store written since #120 has it, but a file from
+    // anywhere else must not silently turn each miss into that scan.
+    if (!this.termIndexReady) {
+      this.db.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS terms_term ON terms(term)",
+      );
+      this.termIndexReady = true;
+    }
     // A store opened in this process may never have read the dictionary's
     // high-water mark (only a wipe or maxTermId() sets it): new ids must
     // continue after MAX(id), never restart at 0.
@@ -1366,15 +1378,25 @@ export class SqliteOverviewStore {
     missing.sort((a, b) =>
       list[a] < list[b] ? -1 : list[a] > list[b] ? 1 : 0,
     );
+    // The list is meant to be distinct; a repeated term must still get one
+    // id, not a second insert that fails the UNIQUE index and rolls the run
+    // back into the JSON fallback.
+    const unique: string[] = [];
     const first = this.maxId + 1;
-    for (let i = 0; i < missing.length; i += CHUNK) {
-      const part: string[] = [];
-      const end = Math.min(i + CHUNK, missing.length);
-      for (let j = i; j < end; j++) part.push(list[missing[j]]);
-      this.stmts.termInsertBulk.run(first + i, JSON.stringify(part));
+    for (let j = 0; j < missing.length; j++) {
+      const term = list[missing[j]];
+      if (unique.length === 0 || unique[unique.length - 1] !== term) {
+        unique.push(term);
+      }
+      g[missing[j]] = first + unique.length - 1;
     }
-    for (let j = 0; j < missing.length; j++) g[missing[j]] = first + j;
-    this.maxId += missing.length;
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      this.stmts.termInsertBulk.run(
+        first + i,
+        JSON.stringify(unique.slice(i, i + CHUNK)),
+      );
+    }
+    this.maxId += unique.length;
     return g;
   }
 

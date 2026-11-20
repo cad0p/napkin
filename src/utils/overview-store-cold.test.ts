@@ -12,6 +12,8 @@ import {
 } from "../core/overview.js";
 import {
   coldFilterForTests,
+  createOverviewStore,
+  type SqliteOverviewStore,
   setOverviewColdFilterBitsForTests,
 } from "./overview-store.js";
 import { loadSqlite } from "./sqlite-loader.js";
@@ -302,6 +304,83 @@ describe("cold batch build (#131)", () => {
       if (coldFilterForTests.has(fresh, `unseen term ${i}`)) maybe++;
     }
     expect(maybe).toBeLessThan(10);
+  });
+
+  test("internList gives a repeated term one id (no UNIQUE failure)", () => {
+    const v = vault(fixture());
+    overview(v);
+    const store = createOverviewStore(v.vaultPath) as SqliteOverviewStore;
+    expect(store).not.toBeNull();
+    const before = store.maxTermId();
+    const g = store.internList(["zz dup", "zz other", "zz dup"]);
+    expect(g[0]).toBe(g[2]);
+    expect(g[1]).not.toBe(g[0]);
+    expect(Math.min(...g)).toBeGreaterThan(before);
+    expect(store.maxTermId()).toBe(before + 2);
+    // Interning again finds both: no new ids.
+    expect([...store.internList(["zz other", "zz dup"])]).toEqual([g[1], g[0]]);
+    expect(store.maxTermId()).toBe(before + 2);
+    resetOverviewIndexForTests();
+    // rows() asserts no term is stored twice.
+    rows(v.vaultPath);
+  });
+
+  test("a store without the terms(term) index gets it back, and a miss still commits", () => {
+    const v = vault(fixture());
+    const first = JSON.stringify(overview(v));
+    resetOverviewIndexForTests();
+    const dbFile = path.join(v.vaultPath, "cache", "overview-v3.db");
+    const sqlite = loadSqlite();
+    if (sqlite === null) throw new Error("node:sqlite unavailable");
+    const indexed = (): boolean => {
+      const db = new sqlite.DatabaseSync(dbFile, { readOnly: true });
+      try {
+        return (
+          db
+            .prepare(
+              "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'terms_term'",
+            )
+            .get() !== undefined
+        );
+      } finally {
+        db.close();
+      }
+    };
+    expect(indexed()).toBe(true);
+    const db = new sqlite.DatabaseSync(dbFile);
+    try {
+      db.exec("DROP INDEX terms_term");
+    } finally {
+      db.close();
+    }
+    expect(indexed()).toBe(false);
+
+    // A cache hit needs no interning and must not change anything.
+    expect(JSON.stringify(overview(v))).toBe(first);
+
+    // A miss: a new note with a term no other note has.
+    const folder = Object.keys(fixture())
+      .filter((n) => n.includes("/"))
+      .sort()[0]
+      .split("/")[0];
+    write(
+      v,
+      `${folder}/zz-new.md`,
+      "# Quokkasaurus\n\nquokkasaurus quokkasaurus\n",
+    );
+    overview(v);
+    expect(_lastOverviewSyncStats().delta).toContain(folder);
+    resetOverviewIndexForTests();
+    expect(indexed()).toBe(true);
+    const check = new sqlite.DatabaseSync(dbFile, { readOnly: true });
+    try {
+      const hit = check
+        .prepare("SELECT count(*) AS n FROM terms WHERE term = 'quokkasaurus'")
+        .get() as { n: number };
+      expect(hit.n).toBe(1);
+    } finally {
+      check.close();
+    }
   });
 });
 

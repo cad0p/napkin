@@ -108,7 +108,10 @@ build has never seen), and aggregated per folder in typed arrays before
 the folder's rows are bulk-inserted in term-id order. There is no
 in-memory term dictionary, so memory stays bounded by one batch and one
 folder rather than by the vault: on a 29.5k-note vault the cold build
-peaks around 210–230 MB instead of ~600 MB. Document frequency is counted
+peaks around 210–250 MB instead of ~600 MB with the flags pi-napkin runs
+the overview child with (`--max-semi-space-size=2`, `MALLOC_ARENA_MAX=1`);
+with V8's default young generation the peak is higher (279 MB on a
+synthetic 30k-note vault with 1.47M terms). Document frequency is counted
 once at the end with one `GROUP BY`, and the build runs with a 16 MB page
 cache for its transaction only.
 
