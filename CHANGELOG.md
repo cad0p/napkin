@@ -25,6 +25,7 @@ All notable changes to this project will be documented in this file.
 - *(search)* Persist the incremental diff, atomically and throttled (closes #84)
 - *(search)* Read note text from disk instead of caching it (closes #85) ([#95](https://github.com/cad0p/napkin/pull/95))
 - *(search)* Keep basename BM25 stats exact across incremental updates (closes #100) ([#103](https://github.com/cad0p/napkin/pull/103))
+- *(ignore)* Key the cache fingerprint on ignore-file content, not absolute path and mtime (closes #128) ([#129](https://github.com/cad0p/napkin/pull/129))
 
 ### 💼 Other
 
