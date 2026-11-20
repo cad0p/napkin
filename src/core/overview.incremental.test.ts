@@ -19,7 +19,7 @@ import { getOverview } from "./overview.js";
  * folder deletes/adds, option changes, and ignore-rule changes.
  *
  * #118 moved the default per-folder store to SQLite
- * (.napkin/cache/overview-v2.db). Tests that assert on the JSON cache FILE
+ * (.napkin/cache/overview-v3.db). Tests that assert on the JSON cache FILE
  * (overview-folders-cache.json — its bytes, its mtime, its compaction) pin the
  * vault to the JSON fallback via useJsonOverviewStore; behavioral tests run
  * the default store. overview-store.test.ts covers the SQLite side directly.

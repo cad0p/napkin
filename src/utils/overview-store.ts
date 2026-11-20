@@ -11,10 +11,14 @@ import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
 /**
  * The SQLite per-note overview store (#118, schema v2 #125).
  *
- * `.napkin/cache/overview-v2.db` — a separate, versioned file name next to
+ * `.napkin/cache/overview-v3.db` — a separate, versioned file name next to
  * the search store's `index-v2.db` (deliberately NOT tables in that
  * database: the two stores have different lifecycles, and a schema bump here
- * must not force a search-index rebuild). It replaces
+ * must not force a search-index rebuild). The file name changes with every
+ * on-disk schema, so napkin versions on different schemas (pi's pinned copy
+ * and the CLI, say) each keep their own file instead of parking and
+ * rebuilding each other's: schema v1 (#118) lives in `overview-v2.db`,
+ * schema v2 (#125) in `overview-v3.db`. It replaces
  * `overview-folders-cache.json` as the per-folder data store — the JSON
  * file stays only as the fallback for environments where SQLite cannot be
  * used, the same rule the search store follows.
@@ -87,24 +91,29 @@ import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
  * tf/body/heading maps from ft rows plus the body section of its ordered
  * note blobs — computed lazily only for collapse-candidate folders.
  *
- * A v1 file (per-folder tfids/cand/full blobs + meta flags) is migrated in
- * place on open — one transaction streams each note's stored blob into ft,
+ * When `overview-v3.db` does not exist yet and a schema-v1 `overview-v2.db`
+ * with a current meta.format does, the v1 file is migrated WITHOUT being
+ * modified: a read-only connection copies it with VACUUM INTO, the copy is
+ * migrated (one transaction streams each note's stored blob into ft,
  * refcounts heading texts into headrc/lc, builds cand with the SQL filter
- * and dft with one GROUP BY — when its meta.format is current. A stale
- * format or any migration failure parks the file aside and the cold path
- * rebuilds it.
+ * and dft with one GROUP BY), and the result is linked into place. A stale
+ * format or a failed migration leaves the v1 file alone and the cold path
+ * builds `overview-v3.db`; the v1 file stays for older napkin versions.
  *
  * The DB is disposable: open failure, corruption, or a schema-version
  * mismatch renames the file aside and recreates it; a second failure makes
  * `open()` return null so `createOverviewStore` falls back to the JSON
- * folder cache.
+ * folder cache. A BUSY/locked database is never parked — another process
+ * holds it and it is healthy — `open()` returns null for this run instead.
  */
 
 type DatabaseSync = import("node:sqlite").DatabaseSync;
 type StatementSync = import("node:sqlite").StatementSync;
 
 const CACHE_DIR = "cache";
-const DB_FILE = "overview-v2.db";
+const DB_FILE = "overview-v3.db";
+/** The schema-v1 store (#118) — the read-only migration source. */
+const LEGACY_V1_DB_FILE = "overview-v2.db";
 const SCHEMA_VERSION = 2;
 /**
  * notes.ord spacing: notes get (i+1)·2^20 in JS path-sort order, so a later
@@ -590,9 +599,22 @@ function inChunks<T>(arr: T[], size: number, fn: (json: string) => void): void {
 
 /** Why the last tryOpen failed, so a reopen failure can say corrupt vs busy. */
 let lastOpenError = "";
-/** Set when a failed open was a failed v1→v2 migration (park immediately —
- *  retrying the same data in the other journal mode cannot help). */
-let migrationFailed = false;
+/** Set when the last tryOpen failed because another connection holds the
+ *  database (BUSY/LOCKED): the file is healthy, so it must not be parked. */
+let openBusy = false;
+
+/** SQLITE_BUSY (5) or SQLITE_LOCKED (6), including extended codes. */
+function isBusyError(error: unknown): boolean {
+  const code = (error as { errcode?: unknown } | null)?.errcode;
+  if (typeof code === "number") {
+    const primary = code & 0xff;
+    if (primary === 5 || primary === 6) return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /database is locked|database table is locked|SQLITE_BUSY/i.test(
+    message,
+  );
+}
 
 /** Test/diagnostic seam: the error string of the most recent failed open. */
 export function lastOverviewOpenError(): string {
@@ -617,7 +639,8 @@ function writeCacheGitignore(dir: string): void {
  * SQL filter, and dft with one GROUP BY over every stored folder (df_depth
  * is set to the deepest stored folder, making the unfiltered count exact);
  * a later run at a different depth rebuilds dft under its own bound.
- * Any failure rolls back and the caller parks the file for a cold rebuild.
+ * Runs on a private copy of the v1 file (see migrateLegacyStore); any
+ * failure discards the copy and the caller takes the cold path.
  */
 function migrateV1ToV2(db: DatabaseSync): void {
   const format = (
@@ -704,7 +727,7 @@ function migrateV1ToV2(db: DatabaseSync): void {
     ).run(maxStoredDepth);
     // The v1 derived blobs and the meta flag array are superseded by the
     // row tables; a missing column (a partially-migrated v1 file) must fail
-    // the migration loudly so the file is parked, not half-dropped.
+    // the migration loudly so the copy is discarded, not half-dropped.
     db.exec("ALTER TABLE folders DROP COLUMN tfids");
     db.exec("ALTER TABLE folders DROP COLUMN cand");
     db.exec("ALTER TABLE folders DROP COLUMN full");
@@ -715,7 +738,7 @@ function migrateV1ToV2(db: DatabaseSync): void {
     try {
       db.exec("ROLLBACK");
     } catch {
-      // Rollback best-effort: the file gets parked either way.
+      // Rollback best-effort: the copy is discarded either way.
     }
     throw error;
   } finally {
@@ -742,14 +765,7 @@ function tryOpen(
       | { user_version: number }
       | undefined;
     const version = row?.user_version ?? 0;
-    if (version === 1) {
-      try {
-        migrateV1ToV2(db);
-      } catch (error) {
-        migrationFailed = true;
-        throw error;
-      }
-    } else if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (version !== 0 && version !== SCHEMA_VERSION) {
       // A versioned file name covers cross-version skew; a nonzero, different
       // user_version means a same-name schema we cannot read — rebuild.
       throw new Error(
@@ -757,7 +773,10 @@ function tryOpen(
       );
     }
     db.exec(SCHEMA_DDL);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    // Only a fresh file needs the version written: the pragma takes the
+    // write lock, and a live writer elsewhere must not make a healthy,
+    // current file look unusable.
+    if (version === 0) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     // Probe the tables a schema-skewed file might be missing columns on.
     db.prepare("SELECT id, term FROM terms LIMIT 0").get();
     db.prepare(
@@ -774,12 +793,112 @@ function tryOpen(
     return db;
   } catch (error) {
     lastOpenError = error instanceof Error ? error.message : String(error);
+    openBusy = isBusyError(error);
     try {
       db?.close();
     } catch {
       // Nothing to close cleanly.
     }
     return null;
+  }
+}
+
+/** A stale migration copy older than this belongs to a crashed process. */
+const STALE_MIGRATION_MS = 60 * 60 * 1000;
+
+/**
+ * Build `dbPath` (schema v2) from the schema-v1 file at `legacyPath`
+ * without modifying it (#125): a read-only connection VACUUMs it INTO a
+ * private copy (committed WAL frames included), the copy is migrated with
+ * no journal (a failure discards it anyway), switched to WAL, and linked
+ * into place — never over an existing file, so a concurrent process that
+ * won the race keeps its store.
+ *
+ * "busy" when the v1 file is locked (the caller falls back for this run
+ * and retries next run); "none" when there is nothing to migrate or the
+ * migration failed (the cold path builds dbPath; the v1 file is untouched).
+ */
+function migrateLegacyStore(
+  sqlite: SqliteModule,
+  legacyPath: string,
+  dbPath: string,
+): "done" | "busy" | "none" {
+  if (fs.existsSync(dbPath) || !fs.existsSync(legacyPath)) return "none";
+  const dir = path.dirname(dbPath);
+  const prefix = `${path.basename(dbPath)}.migrating-`;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      const file = path.join(dir, name);
+      if (Date.now() - fs.statSync(file).mtimeMs > STALE_MIGRATION_MS) {
+        fs.rmSync(file, { force: true });
+      }
+    }
+  } catch {
+    // Sweeping a crashed run's leftovers is best-effort.
+  }
+  const tmp = `${dbPath}.migrating-${process.pid}`;
+  const dropTmp = (): void => {
+    for (const suffix of ["", "-journal", "-wal", "-shm"]) {
+      fs.rmSync(`${tmp}${suffix}`, { force: true });
+    }
+  };
+  let src: DatabaseSync | undefined;
+  let db: DatabaseSync | undefined;
+  try {
+    dropTmp();
+    src = new sqlite.DatabaseSync(legacyPath, {
+      readOnly: true,
+      timeout: busyTimeoutMs,
+    });
+    const version = (
+      src.prepare("PRAGMA user_version").get() as { user_version: number }
+    ).user_version;
+    if (version !== 1) return "none";
+    const format = (
+      src.prepare("SELECT v FROM meta WHERE k = 'format'").get() as
+        | { v: unknown }
+        | undefined
+    )?.v;
+    if (format !== OVERVIEW_CACHE_VERSION) return "none";
+    src.exec(`VACUUM INTO '${tmp.replaceAll("'", "''")}'`);
+    src.close();
+    src = undefined;
+    db = new sqlite.DatabaseSync(tmp);
+    db.exec("PRAGMA journal_mode = OFF");
+    db.exec("PRAGMA synchronous = OFF");
+    migrateV1ToV2(db);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.close();
+    db = undefined;
+    try {
+      // link() refuses to replace an existing file: a store another
+      // process created meanwhile (and may hold open) is never clobbered.
+      fs.linkSync(tmp, dbPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST" && !fs.existsSync(dbPath)) {
+        // No hard links on this filesystem: rename (still checked above).
+        fs.renameSync(tmp, dbPath);
+      }
+    }
+    return fs.existsSync(dbPath) ? "done" : "none";
+  } catch (error) {
+    lastOpenError = error instanceof Error ? error.message : String(error);
+    return isBusyError(error) ? "busy" : "none";
+  } finally {
+    for (const conn of [src, db]) {
+      try {
+        conn?.close();
+      } catch {
+        // Already closed or broken: the copy is dropped below.
+      }
+    }
+    try {
+      dropTmp();
+    } catch {
+      // A leftover copy is swept by a later run.
+    }
   }
 }
 
@@ -834,6 +953,7 @@ export class SqliteOverviewStore {
   private closeDb(): void {
     if (this.closed) return;
     this.closed = true;
+    this.maxId = -1;
     this.deltaStmts = null;
     this.topStmt = null;
     try {
@@ -865,6 +985,14 @@ export class SqliteOverviewStore {
       return null;
     }
 
+    // First run on the v2 schema: migrate from the v1 file, leaving it for
+    // older napkin versions. A locked v1 file means this run falls back.
+    if (
+      migrateLegacyStore(sqlite, path.join(dir, LEGACY_V1_DB_FILE), dbPath) ===
+      "busy"
+    ) {
+      return null;
+    }
     const db = openDb(sqlite, dbPath);
     if (db === null) return null;
     return new SqliteOverviewStore(dbPath, db, prepareAll(db));
@@ -954,6 +1082,10 @@ export class SqliteOverviewStore {
       }
       return ids;
     }
+    // A store opened in this process may never have read the dictionary's
+    // high-water mark (only a wipe or maxTermId() sets it): new ids must
+    // continue after MAX(id), never restart at 0.
+    this.maxTermId();
     const list = [...terms];
     for (let i = 0; i < list.length; i += CHUNK) {
       const rows = this.stmts.termIdsBatch.all(
@@ -1071,6 +1203,9 @@ export class SqliteOverviewStore {
     this.ensureOpen();
     this.db.exec("BEGIN IMMEDIATE");
     this.txOpen = true;
+    // Another process may have interned terms since the high-water mark was
+    // read: re-read it under the write lock.
+    this.maxId = -1;
   }
 
   endWrite(commit: boolean): void {
@@ -1860,24 +1995,25 @@ export function resetOverviewStoresForTests(): void {
 
 /**
  * The open ladder: WAL journaling, then DELETE (for filesystems where
- * shared-memory WAL cannot mmap); a failed v1→v2 migration skips the second
- * mode (the same data fails identically) and parks the file; on open
- * failure park the file aside (with its -wal/-shm sidecars — an orphaned
- * WAL replays into the fresh database and resurrects the very rows we
- * parked) and repeat once. Returns null when a freshly created database
- * still cannot be opened.
+ * shared-memory WAL cannot mmap); on open failure park the file aside
+ * (with its -wal/-shm sidecars — an orphaned WAL replays into the fresh
+ * database and resurrects the very rows we parked) and repeat once. A
+ * BUSY/locked failure returns null at once: another connection holds a
+ * healthy file, and parking it would rename it under a live writer (the
+ * caller falls back for this run and the next run retries). Returns null
+ * when a freshly created database still cannot be opened.
  */
 function openDb(sqlite: SqliteModule, dbPath: string): DatabaseSync | null {
-  migrationFailed = false;
   for (const mode of ["WAL", "DELETE"] as const) {
-    if (migrationFailed) break;
     const db = tryOpen(sqlite, dbPath, mode);
     if (db !== null) return db;
+    if (openBusy) return null;
   }
   parkAside(dbPath);
   for (const mode of ["WAL", "DELETE"] as const) {
     const db = tryOpen(sqlite, dbPath, mode);
     if (db !== null) return db;
+    if (openBusy) return null;
   }
   return null;
 }

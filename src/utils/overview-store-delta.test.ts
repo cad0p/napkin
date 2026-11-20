@@ -62,7 +62,7 @@ function rawDb(vaultPath: string) {
   const sqlite = loadSqlite();
   if (sqlite === null) throw new Error("node:sqlite unavailable");
   return new sqlite.DatabaseSync(
-    path.join(vaultPath, "cache", "overview-v2.db"),
+    path.join(vaultPath, "cache", "overview-v3.db"),
     { readOnly: true },
   );
 }

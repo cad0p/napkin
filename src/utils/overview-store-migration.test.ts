@@ -1,13 +1,21 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
-import { _aggregateFolder, getOverview } from "../core/overview.js";
+import {
+  _aggregateFolder,
+  _lastOverviewSyncStats,
+  getOverview,
+} from "../core/overview.js";
 import {
   createOverviewStore,
+  lastOverviewOpenError,
   ORD_GAP,
-  type SqliteOverviewStore,
+  resetOverviewStoresForTests,
+  SqliteOverviewStore,
+  setOverviewBusyTimeoutForTests,
 } from "./overview-store.js";
 import { loadSqlite } from "./sqlite-loader.js";
 import {
@@ -79,13 +87,45 @@ function fixtureVault(): TempVault {
   return v;
 }
 
-function rawDb(vaultPath: string) {
+const V1_FILE = "overview-v2.db";
+const V2_FILE = "overview-v3.db";
+
+function rawDb(vaultPath: string, file = V2_FILE) {
   const sqlite = loadSqlite();
   if (sqlite === null) throw new Error("node:sqlite unavailable");
-  return new sqlite.DatabaseSync(
-    path.join(vaultPath, "cache", "overview-v2.db"),
-    { readOnly: true },
-  );
+  return new sqlite.DatabaseSync(path.join(vaultPath, "cache", file), {
+    readOnly: true,
+  });
+}
+
+function sha(file: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(file))
+    .digest("hex");
+}
+
+function userVersion(vaultPath: string, file: string): number {
+  const db = rawDb(vaultPath, file);
+  try {
+    return (db.prepare("PRAGMA user_version").get() as { user_version: number })
+      .user_version;
+  } finally {
+    db.close();
+  }
+}
+
+/** A fixture vault whose cache dir holds the v1 store (overview-v2.db). */
+function fixtureVaultWithV1(): { v: TempVault; v1Path: string } {
+  const v = fixtureVault();
+  const v1Path = path.join(v.vaultPath, "cache", V1_FILE);
+  fs.mkdirSync(path.dirname(v1Path), { recursive: true });
+  fs.copyFileSync(path.join(FIXTURE_DIR, "overview-v2.db"), v1Path);
+  return { v, v1Path };
+}
+
+function cacheFiles(vaultPath: string): string[] {
+  return fs.readdirSync(path.join(vaultPath, "cache")).sort();
 }
 
 function i32(u: Uint8Array): Int32Array {
@@ -165,29 +205,33 @@ const FIXTURE: Record<string, string> = {
 };
 
 describe("overview store schema v2 (#125)", () => {
-  test("a v1 database migrates in place and serves the identical overview", () => {
-    const v = fixtureVault();
-    const dbPath = path.join(v.vaultPath, "cache", "overview-v2.db");
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    fs.copyFileSync(path.join(FIXTURE_DIR, "overview-v2.db"), dbPath);
+  test("a v1 database migrates into overview-v3.db and is left unchanged", () => {
+    const { v, v1Path } = fixtureVaultWithV1();
+    expect(userVersion(v.vaultPath, V1_FILE)).toBe(1);
+    const v1Hash = sha(v1Path);
 
-    const before = rawDb(v.vaultPath);
-    expect(
-      (before.prepare("PRAGMA user_version").get() as { user_version: number })
-        .user_version,
-    ).toBe(1);
-    before.close();
-
-    // The run misses the result cache, opens the store — migrating it — and
-    // serves every folder from the migrated rows.
+    // The run misses the result cache, opens the store — migrating a copy
+    // of the v1 file — and serves every folder from the migrated rows.
     const result = getOverview(v.vaultPath, v.vaultPath);
     expect(JSON.stringify(result)).toBe(JSON.stringify(MANIFEST.expected));
+
+    // The v1 file is byte-for-byte what older napkin versions wrote: they
+    // keep using it (no ping-pong of parks and rebuilds between versions).
+    expect(sha(v1Path)).toBe(v1Hash);
+    expect(userVersion(v.vaultPath, V1_FILE)).toBe(1);
+    const files = cacheFiles(v.vaultPath);
+    expect(files.some((f) => f.includes(".corrupt-"))).toBe(false);
+    expect(files.some((f) => f.includes(".migrating-"))).toBe(false);
 
     const after = rawDb(v.vaultPath);
     expect(
       (after.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
     ).toBe(2);
+    expect(
+      (after.prepare("PRAGMA journal_mode").get() as { journal_mode: string })
+        .journal_mode,
+    ).toBe("wal");
     // ords assigned in JS path-sort order, spaced ORD_GAP apart.
     const ords = after
       .prepare(
@@ -198,7 +242,7 @@ describe("overview store schema v2 (#125)", () => {
       ["alpha/kubernetes.md", "alpha/mesh.md"].sort(),
     );
     for (const [i, r] of ords.entries()) expect(r.ord).toBe((i + 1) * ORD_GAP);
-    // The v1 blobs are gone.
+    // The v1 blobs are gone from the migrated copy.
     const cols = after
       .prepare("SELECT name FROM pragma_table_info('folders')")
       .all() as { name: string }[];
@@ -211,47 +255,197 @@ describe("overview store schema v2 (#125)", () => {
     expect(
       after.prepare("SELECT v FROM meta WHERE k = 'flags'").get(),
     ).toBeUndefined();
-    expect(
-      fs
-        .readdirSync(path.dirname(dbPath))
-        .some((f) => f.startsWith("overview-v2.db.corrupt-")),
-    ).toBe(false);
     after.close();
 
     // Row tables equal the reference aggregation over the stored records.
     expectStoreConsistent(v);
+
+    // A second process finds overview-v3.db and does not migrate again.
+    resetOverviewStoresForTests();
+    const v2Hash = sha(path.join(v.vaultPath, "cache", V2_FILE));
+    fs.rmSync(path.join(v.vaultPath, "overview-cache.json"), { force: true });
+    expect(JSON.stringify(getOverview(v.vaultPath, v.vaultPath))).toBe(
+      JSON.stringify(MANIFEST.expected),
+    );
+    expect(_lastOverviewSyncStats().whole).toEqual([]);
+    expect(_lastOverviewSyncStats().delta).toEqual([]);
+    expect(sha(v1Path)).toBe(v1Hash);
+    resetOverviewStoresForTests();
+    expect(sha(path.join(v.vaultPath, "cache", V2_FILE))).toBe(v2Hash);
   });
 
-  test("a failed migration parks the file and the cold path matches", () => {
-    const v = fixtureVault();
-    const dbPath = path.join(v.vaultPath, "cache", "overview-v2.db");
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    fs.copyFileSync(path.join(FIXTURE_DIR, "overview-v2.db"), dbPath);
+  test("a failed migration leaves the v1 file alone and the cold path matches", () => {
+    const { v, v1Path } = fixtureVaultWithV1();
     // Corrupt one note's heads JSON: the migration's decode throws.
     const sqlite = loadSqlite();
     const db = new (
       sqlite as NonNullable<ReturnType<typeof loadSqlite>>
-    ).DatabaseSync(dbPath);
+    ).DatabaseSync(v1Path);
     db.prepare("UPDATE notes SET heads = 'not json' WHERE path = ?").run(
       "alpha/mesh.md",
     );
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     db.close();
+    const v1Hash = sha(v1Path);
 
     const result = getOverview(v.vaultPath, v.vaultPath);
     expect(JSON.stringify(result)).toBe(JSON.stringify(MANIFEST.expected));
+    expect(sha(v1Path)).toBe(v1Hash);
+    const files = cacheFiles(v.vaultPath);
+    expect(files.some((f) => f.includes(".corrupt-"))).toBe(false);
+    expect(files.some((f) => f.includes(".migrating-"))).toBe(false);
+    expect(userVersion(v.vaultPath, V2_FILE)).toBe(2);
+    expect(userVersion(v.vaultPath, V1_FILE)).toBe(1);
+    expectStoreConsistent(v);
+  });
+
+  test("a stale-format v1 file is not migrated and stays untouched", () => {
+    const { v, v1Path } = fixtureVaultWithV1();
+    const sqlite = loadSqlite();
+    const db = new (
+      sqlite as NonNullable<ReturnType<typeof loadSqlite>>
+    ).DatabaseSync(v1Path);
+    db.exec("UPDATE meta SET v = -1 WHERE k = 'format'");
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    db.close();
+    const v1Hash = sha(v1Path);
+    const result = getOverview(v.vaultPath, v.vaultPath);
+    expect(JSON.stringify(result)).toBe(JSON.stringify(MANIFEST.expected));
+    expect(sha(v1Path)).toBe(v1Hash);
+    expect(_lastOverviewSyncStats().whole.length).toBeGreaterThan(0);
+    expect(userVersion(v.vaultPath, V2_FILE)).toBe(2);
+    expectStoreConsistent(v);
+  });
+
+  test("a locked v1 file is neither parked nor migrated: this run falls back", () => {
+    const { v, v1Path } = fixtureVaultWithV1();
+    const sqlite = loadSqlite() as NonNullable<ReturnType<typeof loadSqlite>>;
+    // A writer mid-commit in rollback-journal mode excludes readers.
+    const holder = new sqlite.DatabaseSync(v1Path);
+    holder.exec("PRAGMA journal_mode = DELETE");
+    holder.exec("BEGIN EXCLUSIVE");
+    setOverviewBusyTimeoutForTests(50);
+    try {
+      expect(SqliteOverviewStore.open(v.vaultPath)).toBeNull();
+      const files = cacheFiles(v.vaultPath);
+      expect(files.some((f) => f.includes(".corrupt-"))).toBe(false);
+      expect(files.some((f) => f.includes(".migrating-"))).toBe(false);
+      expect(files).not.toContain(V2_FILE);
+    } finally {
+      holder.exec("ROLLBACK");
+      holder.close();
+      setOverviewBusyTimeoutForTests(5000);
+    }
+    // Lock released: the next run migrates.
+    const s = SqliteOverviewStore.open(v.vaultPath);
+    expect(s).not.toBeNull();
+    s?.close();
+    expect(userVersion(v.vaultPath, V2_FILE)).toBe(2);
+  });
+
+  test("a locked store file is never parked (busy open returns null)", () => {
+    const v = vault(FIXTURE);
+    getOverview(v.vaultPath, v.vaultPath);
+    resetOverviewStoresForTests();
+    const dbPath = path.join(v.vaultPath, "cache", V2_FILE);
+    const sqlite = loadSqlite() as NonNullable<ReturnType<typeof loadSqlite>>;
+    // Rollback-journal mode + an exclusive writer: opening in WAL needs the
+    // lock, so the open sees SQLITE_BUSY.
+    const holder = new sqlite.DatabaseSync(dbPath);
+    holder.exec("PRAGMA journal_mode = DELETE");
+    holder.exec("BEGIN EXCLUSIVE");
+    holder.exec("CREATE TABLE IF NOT EXISTS held(x)");
+    setOverviewBusyTimeoutForTests(50);
+    try {
+      expect(SqliteOverviewStore.open(v.vaultPath)).toBeNull();
+      expect(lastOverviewOpenError()).toMatch(/locked|busy/i);
+      expect(cacheFiles(v.vaultPath).some((f) => f.includes(".corrupt-"))).toBe(
+        false,
+      );
+    } finally {
+      holder.exec("ROLLBACK");
+      holder.close();
+      setOverviewBusyTimeoutForTests(5000);
+    }
+    expectStoreConsistent(v);
+  });
+
+  test("a write-locked WAL store opens without parking; the write falls back", () => {
+    const v = vault(FIXTURE);
+    const first = getOverview(v.vaultPath, v.vaultPath);
+    resetOverviewStoresForTests();
+    const dbPath = path.join(v.vaultPath, "cache", V2_FILE);
+    const sqlite = loadSqlite() as NonNullable<ReturnType<typeof loadSqlite>>;
+    const holder = new sqlite.DatabaseSync(dbPath);
+    holder.exec("BEGIN IMMEDIATE");
+    holder.exec("CREATE TABLE IF NOT EXISTS held(x)");
+    setOverviewBusyTimeoutForTests(50);
+    try {
+      const s = SqliteOverviewStore.open(v.vaultPath);
+      expect(s).not.toBeNull();
+      s?.close();
+      // A miss needs the write lock: this run falls back to the JSON path,
+      // with the same output, and nothing is parked.
+      fs.writeFileSync(
+        path.join(v.vaultPath, "beta/extra.md"),
+        "# Extra\nledger addendum",
+      );
+      const out = getOverview(v.vaultPath, v.vaultPath);
+      expect(out.overview.length).toBe(first.overview.length);
+      expect(cacheFiles(v.vaultPath).some((f) => f.includes(".corrupt-"))).toBe(
+        false,
+      );
+    } finally {
+      holder.exec("ROLLBACK");
+      holder.close();
+      setOverviewBusyTimeoutForTests(5000);
+    }
+    resetOverviewStoresForTests();
+    fs.rmSync(path.join(v.vaultPath, "overview-cache.json"), { force: true });
+    getOverview(v.vaultPath, v.vaultPath);
+    expect(_lastOverviewSyncStats().delta).toContain("beta");
+    expectStoreConsistent(v);
+  });
+
+  test("a fresh process's first miss interns after the stored max id and commits", () => {
+    const v = vault(FIXTURE);
+    getOverview(v.vaultPath, v.vaultPath);
+    const before = rawDb(v.vaultPath);
+    const maxBefore = (
+      before.prepare("SELECT MAX(id) AS m FROM terms").get() as { m: number }
+    ).m;
+    before.close();
+    // New process: no warm store object, no cached high-water mark.
+    resetOverviewStoresForTests();
+    fs.writeFileSync(
+      path.join(v.vaultPath, "alpha/novel.md"),
+      "# Gamma\nunprecedented zymurgic quixotism",
+    );
+    const incremental = getOverview(v.vaultPath, v.vaultPath);
+    // The delta committed through the store — no JSON fallback.
+    expect(_lastOverviewSyncStats().delta).toEqual(["alpha"]);
     expect(
-      fs
-        .readdirSync(path.dirname(dbPath))
-        .some((f) => f.startsWith("overview-v2.db.corrupt-")),
-    ).toBe(true);
+      fs.existsSync(path.join(v.vaultPath, "overview-folders-cache.json")),
+    ).toBe(false);
     const after = rawDb(v.vaultPath);
     expect(
-      (after.prepare("PRAGMA user_version").get() as { user_version: number })
-        .user_version,
-    ).toBe(2);
+      after
+        .prepare("SELECT path FROM notes WHERE path = 'alpha/novel.md'")
+        .get(),
+    ).toBeDefined();
+    const ids = after
+      .prepare(
+        "SELECT t.id FROM terms t WHERE t.term IN ('unprecedented', 'zymurgic', 'quixotism')",
+      )
+      .all() as { id: number }[];
     after.close();
+    expect(ids).toHaveLength(3);
+    for (const { id } of ids) expect(id).toBeGreaterThan(maxBefore);
     expectStoreConsistent(v);
+    dropOverviewStoreFiles(v.vaultPath);
+    expect(JSON.stringify(incremental)).toBe(
+      JSON.stringify(getOverview(v.vaultPath, v.vaultPath)),
+    );
   });
 
   test("cold build: every folder's cand and dft match the aggregation", () => {

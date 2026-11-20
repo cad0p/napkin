@@ -905,7 +905,7 @@ function buildOverviewRows(
 // ─── SQLite-backed pipeline (#118) ─────────────────────────────────
 //
 // The same collect → collapse → TF-IDF pipeline as above, but the per-folder
-// data lives in .napkin/cache/overview-v2.db (SqliteOverviewStore): one row
+// data lives in .napkin/cache/overview-v3.db (SqliteOverviewStore): one row
 // PER NOTE holding that note's term data as an Int32 blob, plus one derived
 // row per folder. A miss re-tokenizes only notes whose (mtime, size)
 // changed and re-aggregates each touched folder from its notes' blobs in
@@ -1599,8 +1599,10 @@ function overviewFromStore(
   }
   for (const folder of whole) deltas.delete(folder);
   const toAggregate = [...folderFiles.keys()].filter((f) => whole.has(f));
-  syncStats.whole = toAggregate;
-  syncStats.delta = [...deltas.keys()];
+  // whole/delta are recorded only once the write commits (a rolled-back
+  // sync applied nothing).
+  syncStats.whole = [];
+  syncStats.delta = [];
   syncStats.orphanScans = 0;
   syncStats.renumbers = 0;
   const foldersToDelete: string[] = [];
@@ -1729,9 +1731,13 @@ function overviewFromStore(
       store.flushColdTerms();
       store.endWrite(true);
       store.setColdInterning(false);
+      syncStats.whole = toAggregate;
+      syncStats.delta = [...deltas.keys()];
     } catch (err) {
       store.endWrite(false);
       store.setColdInterning(false);
+      syncStats.orphanScans = 0;
+      syncStats.renumbers = 0;
       throw err;
     }
   }
@@ -2072,7 +2078,7 @@ export function getOverview(
     templatesFolder,
   );
 
-  // The per-folder data store: SQLite (.napkin/cache/overview-v2.db, #118)
+  // The per-folder data store: SQLite (.napkin/cache/overview-v3.db, #125)
   // by default; the JSON per-folder cache is the fallback for environments
   // where SQLite cannot be used — same rule as the search store. Any store
   // error reports the failure and falls back for this run.
