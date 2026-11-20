@@ -45,6 +45,7 @@ All notable changes to this project will be documented in this file.
 - *(overview)* Per-note term blobs so a miss re-reads only the changed notes (closes #118) ([#120](https://github.com/cad0p/napkin/pull/120))
 - *(overview)* Slim @cad0p/napkin/overview entry (closes #123) ([#124](https://github.com/cad0p/napkin/pull/124))
 - *(overview)* Folder-term rows in SQLite, per-note deltas and SQL top-k scoring (closes #125, closes #126, closes #127) ([#130](https://github.com/cad0p/napkin/pull/130))
+- *(overview)* Cold build in batches without an in-memory term dictionary (closes #131) ([#133](https://github.com/cad0p/napkin/pull/133))
 
 ### ⚙️ Miscellaneous Tasks
 
