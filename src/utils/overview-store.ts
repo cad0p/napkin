@@ -145,24 +145,27 @@ const SCHEMA_DDL = `${[
  * installs this section's position. Column references in DO UPDATE SET read
  * the pre-update row, so the two expressions test the same condition.
  */
+// Parameters are plain positional `?` in left-to-right order: Node 22.13's
+// node:sqlite cannot bind numbered `?NNN` parameters positionally
+// ("column index out of range"), and 22.13 is the engines floor.
 const SQL_FT_NH =
   "INSERT INTO ft(fid, tid, w, lc, nord, npos) " +
-  "SELECT ?1, e.value ->> 0, e.value ->> 1, 0, ?2, e.key FROM json_each(?3) e " +
+  "SELECT ?, e.value ->> 0, e.value ->> 1, 0, ?, e.key FROM json_each(?) e " +
   "WHERE true ON CONFLICT(fid, tid) DO UPDATE SET w = w + excluded.w, " +
   "nord = coalesce(nord, excluded.nord), " +
   "npos = CASE WHEN nord IS NULL THEN excluded.npos ELSE npos END";
 const SQL_FT_H =
   "INSERT INTO ft(fid, tid, w, lc, hord, hpos) " +
-  "SELECT ?1, e.value, 0, 0, ?2, e.key FROM json_each(?3) e " +
+  "SELECT ?, e.value, 0, 0, ?, e.key FROM json_each(?) e " +
   "WHERE true ON CONFLICT(fid, tid) DO UPDATE SET " +
   "hord = coalesce(hord, excluded.hord), " +
   "hpos = CASE WHEN hord IS NULL THEN excluded.hpos ELSE hpos END";
 const SQL_HEADRC =
-  "INSERT INTO headrc(fid, text, n) VALUES(?1, ?2, 1) " +
+  "INSERT INTO headrc(fid, text, n) VALUES(?, ?, 1) " +
   "ON CONFLICT(fid, text) DO UPDATE SET n = n + 1 RETURNING n";
 const SQL_LC =
-  "UPDATE ft SET lc = lc + 1 WHERE fid = ?1 " +
-  "AND tid IN (SELECT value FROM json_each(?2))";
+  "UPDATE ft SET lc = lc + 1 WHERE fid = ? " +
+  "AND tid IN (SELECT value FROM json_each(?))";
 
 /**
  * The candidate filter as SQL — aggregateFolder's isCandidateKeyword over
@@ -176,11 +179,11 @@ const SQL_CAND =
   "CASE WHEN f.w > 0 THEN f.nord ELSE f.hord END, " +
   "CASE WHEN f.w > 0 THEN f.npos ELSE f.hpos END " +
   "FROM ft f JOIN terms t ON t.id = f.tid " +
-  "WHERE f.fid = ?1 AND NOT (f.w = 0 AND f.lc < 2) " +
+  "WHERE f.fid = ? AND NOT (f.w = 0 AND f.lc < 2) " +
   "AND CASE WHEN instr(t.term, ' ') > 0 " +
   "THEN f.w + (f.lc > 0) * 3 >= 2 AND " +
   "substr(t.term, 1, instr(t.term, ' ') - 1) <> substr(t.term, instr(t.term, ' ') + 1) " +
-  "ELSE t.id NOT IN (SELECT value FROM json_each(?2)) END";
+  "ELSE t.id NOT IN (SELECT value FROM json_each(?)) END";
 
 /** tf order for a folder's ft rows: non-heading terms by (nord,npos), then
  *  heading-only terms by (hord,hpos) — ORDER BY key shared by the collapse
@@ -221,6 +224,7 @@ interface Stmts {
   lcBump: StatementSync;
   candFill: StatementSync;
   candFolder: StatementSync;
+  dftOfIds: StatementSync;
   dftDecFolder: StatementSync;
   dftIncFolder: StatementSync;
   dftPrune: StatementSync;
@@ -243,17 +247,17 @@ function prepareAll(db: DatabaseSync): Stmts {
       "INSERT INTO meta(k, v) VALUES(?, ?) " +
         "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
     ),
-    noteMetaAll: db.prepare("SELECT path, folder, mtime, size FROM notes"),
+    noteMetaAll: db.prepare("SELECT path, folder, mtime, size, ord FROM notes"),
     noteGet: db.prepare(
       "SELECT skip, tags, heads, data FROM notes WHERE path = ?",
     ),
     noteUpsert: db.prepare(
-      "INSERT INTO notes(path, folder, mtime, size, skip, tags, heads, data) " +
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO notes(path, folder, mtime, size, skip, tags, heads, data, ord) " +
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(path) DO UPDATE SET folder = excluded.folder, " +
         "mtime = excluded.mtime, size = excluded.size, " +
         "skip = excluded.skip, tags = excluded.tags, " +
-        "heads = excluded.heads, data = excluded.data",
+        "heads = excluded.heads, data = excluded.data, ord = excluded.ord",
     ),
     // Folder-guarded: a row re-attributed to another folder by this run's
     // upserts is immune to the stale-note cleanup of its previous folder.
@@ -291,6 +295,9 @@ function prepareAll(db: DatabaseSync): Stmts {
     candFolder: db.prepare(
       "SELECT tid, tf FROM cand WHERE fid = ? ORDER BY sec, o1, o2",
     ),
+    dftOfIds: db.prepare(
+      "SELECT tid, n FROM dft WHERE tid IN (SELECT value FROM json_each(?))",
+    ),
     dftDecFolder: db.prepare(
       "UPDATE dft SET n = n - 1 WHERE tid IN " +
         "(SELECT tid FROM ft WHERE fid = ?)",
@@ -299,14 +306,19 @@ function prepareAll(db: DatabaseSync): Stmts {
       "INSERT INTO dft(tid, n) SELECT tid, 1 FROM ft WHERE fid = ? " +
         "ON CONFLICT(tid) DO UPDATE SET n = n + 1",
     ),
-    dftPrune: db.prepare("DELETE FROM dft WHERE n <= 0"),
+    // Targeted: only the folder's own term ids can have dropped to zero —
+    // a whole-table scan would walk the dictionary-sized dft on every miss.
+    dftPrune: db.prepare(
+      "DELETE FROM dft WHERE n <= 0 AND tid IN " +
+        "(SELECT tid FROM ft WHERE fid = ?)",
+    ),
     dftAll: db.prepare("SELECT tid, n FROM dft"),
     dftClear: db.prepare("DELETE FROM dft"),
     dftRebuild: db.prepare(
       "INSERT INTO dft(tid, n) SELECT f.tid, COUNT(*) FROM ft f " +
         "JOIN fdir d ON d.fid = f.fid WHERE " +
         SQL_FOLDER_DEPTH +
-        " <= ?1 GROUP BY f.tid",
+        " <= ? GROUP BY f.tid",
     ),
     ftFolderTids: db.prepare("SELECT tid FROM ft WHERE fid = ?"),
     ftFolderTfPairs: db.prepare(
@@ -343,6 +355,9 @@ export interface StoredNoteMeta {
   folder: string;
   mtime: number;
   size: number;
+  /** Order key within the folder (JS path-sort order); null only for a
+   *  row written before its folder's aggregation assigned one. */
+  ord: number | null;
 }
 
 /** One stored note's full record, as the folder streaming consumes it. */
@@ -432,6 +447,144 @@ function streamNoteIntoFt(
     // First occurrence of this heading text in the folder: its terms gain
     // one distinct-heading-text count.
     if (row.n === 1) stmts.lcBump.run(fid, JSON.stringify(ids));
+  }
+}
+
+/**
+ * One note's term lists in the shape the per-note delta consumes (#126):
+ * non-heading ids with their weighted counts (position = index), the
+ * distinct heading-seen ids in first-seen order (position = index) — the
+ * exact positions streamNoteIntoFt stores as npos/hpos — and the
+ * per-unique-heading-text term lists that drive headrc.
+ */
+interface NoteLists {
+  nh: number[];
+  nhc: number[];
+  h: number[];
+  texts: [string, number[]][];
+}
+
+const EMPTY_LISTS: NoteLists = { nh: [], nhc: [], h: [], texts: [] };
+
+function noteLists(rec: StreamedNote | null): NoteLists {
+  if (rec === null || rec.skip || rec.data === null) return EMPTY_LISTS;
+  const a = rec.data;
+  const nn = a[0];
+  const nh: number[] = [];
+  const nhc: number[] = [];
+  for (let k = 0, p = 1; k < nn; k++, p += 2) {
+    nh.push(a[p]);
+    nhc.push(a[p + 1]);
+  }
+  const seen = new Set<number>();
+  const h: number[] = [];
+  for (const [, ids] of rec.heads) {
+    for (const id of ids) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        h.push(id);
+      }
+    }
+  }
+  return { nh, nhc, h, texts: rec.heads };
+}
+
+/** One ft row as the delta reads and rewrites it. */
+interface FtRow {
+  w: number;
+  lc: number;
+  nord: number | null;
+  npos: number | null;
+  hord: number | null;
+  hpos: number | null;
+}
+
+const EMPTY_ROW: FtRow = {
+  w: 0,
+  lc: 0,
+  nord: null,
+  npos: null,
+  hord: null,
+  hpos: null,
+};
+
+/** Statements only a per-note delta needs — prepared on first use so the
+ *  open (and the hit path) pays nothing for them. */
+interface DeltaStmts {
+  ftGet: StatementSync;
+  ftPut: StatementSync;
+  ftDel: StatementSync;
+  candDel: StatementSync;
+  candFill: StatementSync;
+  dftInc: StatementSync;
+  dftDec: StatementSync;
+  dftZero: StatementSync;
+  headrcInc: StatementSync;
+  headrcDec: StatementSync;
+  headrcDel: StatementSync;
+  later: StatementSync;
+  summaries: StatementSync;
+  ords: StatementSync;
+}
+
+function prepareDelta(db: DatabaseSync): DeltaStmts {
+  return {
+    ftGet: db.prepare(
+      "SELECT tid, w, lc, nord, npos, hord, hpos FROM ft " +
+        "WHERE fid = ? AND tid IN (SELECT value FROM json_each(?))",
+    ),
+    ftPut: db.prepare(
+      "INSERT INTO ft(fid, tid, w, lc, nord, npos, hord, hpos) " +
+        "SELECT ?, e.value ->> 0, e.value ->> 1, e.value ->> 2, " +
+        "e.value ->> 3, e.value ->> 4, e.value ->> 5, e.value ->> 6 " +
+        "FROM json_each(?) e WHERE true ON CONFLICT(fid, tid) DO UPDATE " +
+        "SET w = excluded.w, lc = excluded.lc, nord = excluded.nord, " +
+        "npos = excluded.npos, hord = excluded.hord, hpos = excluded.hpos",
+    ),
+    ftDel: db.prepare(
+      "DELETE FROM ft WHERE fid = ? " +
+        "AND tid IN (SELECT value FROM json_each(?))",
+    ),
+    candDel: db.prepare(
+      "DELETE FROM cand WHERE fid = ? " +
+        "AND tid IN (SELECT value FROM json_each(?))",
+    ),
+    candFill: db.prepare(
+      `${SQL_CAND} AND f.tid IN (SELECT value FROM json_each(?))`,
+    ),
+    dftInc: db.prepare(
+      "INSERT INTO dft(tid, n) SELECT value, 1 FROM json_each(?) WHERE true " +
+        "ON CONFLICT(tid) DO UPDATE SET n = n + 1",
+    ),
+    dftDec: db.prepare(
+      "UPDATE dft SET n = n - 1 WHERE tid IN (SELECT value FROM json_each(?))",
+    ),
+    dftZero: db.prepare(
+      "DELETE FROM dft WHERE n <= 0 " +
+        "AND tid IN (SELECT value FROM json_each(?))",
+    ),
+    headrcInc: db.prepare(SQL_HEADRC),
+    headrcDec: db.prepare(
+      "UPDATE headrc SET n = n - 1 WHERE fid = ? AND text = ? RETURNING n",
+    ),
+    headrcDel: db.prepare(
+      "DELETE FROM headrc WHERE fid = ? AND text = ? AND n <= 0",
+    ),
+    later: db.prepare(
+      "SELECT ord, skip, heads, data FROM notes " +
+        "WHERE folder = ? AND ord > ? ORDER BY ord",
+    ),
+    summaries: db.prepare(
+      "SELECT path, skip, tags FROM notes WHERE folder = ?",
+    ),
+    ords: db.prepare("SELECT path, ord FROM notes WHERE folder = ?"),
+  };
+}
+
+/** Run fn over arr in size-element JSON batches (json_each bulk calls). */
+function inChunks<T>(arr: T[], size: number, fn: (json: string) => void): void {
+  for (let i = 0; i < arr.length; i += size) {
+    fn(JSON.stringify(arr.slice(i, i + size)));
   }
 }
 
@@ -647,6 +800,10 @@ export class SqliteOverviewStore {
   private coldIds: Map<number, string> | null = null;
   private coldTerms: string[] = [];
   private coldFlushed = 0;
+  /** Per-note delta statements, prepared on first use (see prepareDelta). */
+  private deltaStmts: DeltaStmts | null = null;
+  /** The SQL top-k statement over this connection's temp scoring tables. */
+  private topStmt: StatementSync | null = null;
 
   private constructor(
     private readonly dbPath: string,
@@ -666,6 +823,8 @@ export class SqliteOverviewStore {
     if (db !== null) {
       this.db = db;
       this.stmts = prepareAll(db);
+      this.deltaStmts = null;
+      this.topStmt = null;
       this.closed = false;
       return;
     }
@@ -675,6 +834,8 @@ export class SqliteOverviewStore {
   private closeDb(): void {
     if (this.closed) return;
     this.closed = true;
+    this.deltaStmts = null;
+    this.topStmt = null;
     try {
       this.db.close();
     } catch {
@@ -982,6 +1143,7 @@ export class SqliteOverviewStore {
     tagsJson: string,
     headsJson: string,
     data: Uint8Array | null,
+    ord: number | null = null,
   ): void {
     this.stmts.noteUpsert.run(
       path,
@@ -992,6 +1154,7 @@ export class SqliteOverviewStore {
       tagsJson,
       headsJson,
       data,
+      ord,
     );
   }
 
@@ -1017,7 +1180,7 @@ export class SqliteOverviewStore {
    */
   clearFolderAggregation(fid: number): void {
     this.stmts.dftDecFolder.run(fid);
-    this.stmts.dftPrune.run();
+    this.stmts.dftPrune.run(fid);
     this.stmts.ftDeleteFolder.run(fid);
     this.stmts.candDeleteFolder.run(fid);
     this.stmts.headrcDeleteFolder.run(fid);
@@ -1026,6 +1189,272 @@ export class SqliteOverviewStore {
   /** Stream one note's record into the folder's ft/headrc rows. */
   streamFolderNote(fid: number, ord: number, rec: StreamedNote): void {
     streamNoteIntoFt(this.stmts, fid, ord, rec);
+  }
+
+  private delta(): DeltaStmts {
+    this.ensureOpen();
+    if (this.deltaStmts === null) this.deltaStmts = prepareDelta(this.db);
+    return this.deltaStmts;
+  }
+
+  /**
+   * Apply one note's change to its folder's rows (#126, write txn open):
+   * oldRec is the record the rows currently reflect (null for an added
+   * note), newRec the record that replaces it (null for a deleted note).
+   * The notes table must already hold the post-change state for this note
+   * (row upserted or deleted) and every other note of the folder must be
+   * what the rows reflect — the orphan scan reads the later notes.
+   *
+   * Only the touched term ids — the old record's ∪ the new record's — are
+   * read and rewritten:
+   *   - w moves by the count difference; lc moves through headrc: a heading
+   *     text whose refcount goes 0→1 adds one to each of its ids' lc, 1→0
+   *     subtracts one;
+   *   - first-seen keys: a term the new record contains takes this note's
+   *     (ord, pos) when its key is NULL or not earlier than ord; a term
+   *     whose first occurrence WAS this note and that this note no longer
+   *     contains, but the folder still does (w > 0 / lc > 0), is an orphan —
+   *     the later notes are streamed in ord order until every orphan has
+   *     its new first occurrence;
+   *   - rows reaching w = lc = 0 are deleted, cand rows are rebuilt for the
+   *     touched ids only, and dft moves ±1 for each row created or removed
+   *     (when countDf: the folder is inside dft's depth bound).
+   *
+   * Returns the number of later notes the orphan scan read.
+   */
+  applyNoteDelta(
+    fid: number,
+    folder: string,
+    ord: number,
+    oldRec: StreamedNote | null,
+    newRec: StreamedNote | null,
+    tokenIds: number[],
+    countDf: boolean,
+  ): number {
+    const q = this.delta();
+    const O = noteLists(oldRec);
+    const N = noteLists(newRec);
+    interface Touch {
+      dW: number;
+      dLc: number;
+      row: FtRow | null;
+      next: FtRow;
+    }
+    const st = new Map<number, Touch>();
+    const touch = (id: number): Touch => {
+      let t = st.get(id);
+      if (t === undefined) {
+        t = { dW: 0, dLc: 0, row: null, next: EMPTY_ROW };
+        st.set(id, t);
+      }
+      return t;
+    };
+    for (let i = 0; i < O.nh.length; i++) touch(O.nh[i]).dW -= O.nhc[i];
+    for (let i = 0; i < N.nh.length; i++) touch(N.nh[i]).dW += N.nhc[i];
+    for (const id of O.h) touch(id);
+    for (const id of N.h) touch(id);
+    // Heading refcounts: release the old texts first, then take the new —
+    // a text kept by the edit goes 1→0→1 and nets to zero.
+    for (const [text, ids] of O.texts) {
+      const row = q.headrcDec.get(fid, text) as { n: number } | undefined;
+      if (row !== undefined && row.n <= 0) {
+        q.headrcDel.run(fid, text);
+        for (const id of ids) touch(id).dLc--;
+      }
+    }
+    for (const [text, ids] of N.texts) {
+      const row = q.headrcInc.get(fid, text) as { n: number };
+      if (row.n === 1) for (const id of ids) touch(id).dLc++;
+    }
+    const ids = [...st.keys()];
+    inChunks(ids, CHUNK, (json) => {
+      for (const r of q.ftGet.all(fid, json) as unknown as (FtRow & {
+        tid: number;
+      })[]) {
+        (st.get(r.tid) as Touch).row = r;
+      }
+    });
+
+    const nPos = new Map<number, number>();
+    for (let i = 0; i < N.nh.length; i++) nPos.set(N.nh[i], i);
+    const hPos = new Map<number, number>();
+    for (let i = 0; i < N.h.length; i++) hPos.set(N.h[i], i);
+    const nhOrphans = new Set<number>();
+    const hOrphans = new Set<number>();
+    for (const [id, t] of st) {
+      const r = t.row ?? EMPTY_ROW;
+      const w = r.w + t.dW;
+      const lc = r.lc + t.dLc;
+      let { nord, npos, hord, hpos } = r;
+      const pn = nPos.get(id);
+      if (pn !== undefined) {
+        if (nord === null || nord >= ord) {
+          nord = ord;
+          npos = pn;
+        }
+      } else if (nord === ord) {
+        if (w > 0) nhOrphans.add(id);
+        nord = null;
+        npos = null;
+      }
+      if (w === 0) {
+        nord = null;
+        npos = null;
+      }
+      const ph = hPos.get(id);
+      if (ph !== undefined) {
+        if (hord === null || hord >= ord) {
+          hord = ord;
+          hpos = ph;
+        }
+      } else if (hord === ord) {
+        if (lc > 0) hOrphans.add(id);
+        hord = null;
+        hpos = null;
+      }
+      if (lc === 0) {
+        hord = null;
+        hpos = null;
+      }
+      t.next = { w, lc, nord, npos, hord, hpos };
+    }
+
+    // Orphan scan: the later notes in ord order, one blob at a time, until
+    // every orphaned first occurrence is placed.
+    let scanned = 0;
+    if (nhOrphans.size > 0 || hOrphans.size > 0) {
+      for (const row of q.later.iterate(folder, ord) as Iterable<{
+        ord: number;
+        skip: number;
+        heads: string;
+        data: Uint8Array | null;
+      }>) {
+        scanned++;
+        const L = noteLists(
+          decodeStoredNote({
+            skip: row.skip,
+            tags: "[]",
+            heads: hOrphans.size > 0 ? row.heads : "[]",
+            data: row.data,
+          }),
+        );
+        if (nhOrphans.size > 0) {
+          for (let i = 0; i < L.nh.length; i++) {
+            const id = L.nh[i];
+            if (nhOrphans.delete(id)) {
+              const n = (st.get(id) as Touch).next;
+              n.nord = row.ord;
+              n.npos = i;
+            }
+          }
+        }
+        if (hOrphans.size > 0) {
+          for (let i = 0; i < L.h.length; i++) {
+            const id = L.h[i];
+            if (hOrphans.delete(id)) {
+              const n = (st.get(id) as Touch).next;
+              n.hord = row.ord;
+              n.hpos = i;
+            }
+          }
+        }
+        if (nhOrphans.size === 0 && hOrphans.size === 0) break;
+      }
+      if (nhOrphans.size > 0 || hOrphans.size > 0) {
+        throw new Error(
+          `overview rows inconsistent: ${nhOrphans.size + hOrphans.size} orphaned terms in ${folder} have no later occurrence`,
+        );
+      }
+    }
+
+    const put: (number | null)[][] = [];
+    const created: number[] = [];
+    const removed: number[] = [];
+    for (const [id, t] of st) {
+      const n = t.next;
+      if (n.w === 0 && n.lc === 0) {
+        if (t.row !== null) removed.push(id);
+        continue;
+      }
+      if (t.row === null) created.push(id);
+      put.push([id, n.w, n.lc, n.nord, n.npos, n.hord, n.hpos]);
+    }
+    inChunks(ids, CHUNK, (json) => q.candDel.run(fid, json));
+    inChunks(removed, CHUNK, (json) => q.ftDel.run(fid, json));
+    inChunks(put, 2000, (json) => q.ftPut.run(fid, json));
+    const tok = JSON.stringify(tokenIds);
+    inChunks(ids, CHUNK, (json) => q.candFill.run(fid, tok, json));
+    if (countDf) {
+      inChunks(created, CHUNK, (json) => q.dftInc.run(json));
+      inChunks(removed, CHUNK, (json) => {
+        q.dftDec.run(json);
+        q.dftZero.run(json);
+      });
+    }
+    return scanned;
+  }
+
+  /**
+   * Renumber a folder's order keys to (i+1)·ORD_GAP in their current order
+   * (write txn open) — the midpoint inserts ran out of gap. ord order IS the
+   * JS path order, so a row_number over ord keeps the order; the first-seen
+   * keys in ft (nord, hord) and cand.o1 are remapped through the same map.
+   * Returns the folder's new path → ord map.
+   */
+  renumberFolder(fid: number, folder: string): Map<string, number> {
+    const q = this.delta();
+    this.db.exec(
+      "CREATE TEMP TABLE IF NOT EXISTS ordmap(o INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+    );
+    this.db.exec("DELETE FROM temp.ordmap");
+    this.db
+      .prepare(
+        "INSERT INTO temp.ordmap(o, n) SELECT ord, " +
+          "row_number() OVER (ORDER BY ord) * ? FROM notes " +
+          "WHERE folder = ? AND ord IS NOT NULL",
+      )
+      .run(ORD_GAP, folder);
+    this.db
+      .prepare(
+        "UPDATE ft SET " +
+          "nord = (SELECT n FROM temp.ordmap WHERE o = ft.nord), " +
+          "hord = (SELECT n FROM temp.ordmap WHERE o = ft.hord) " +
+          "WHERE fid = ?",
+      )
+      .run(fid);
+    this.db
+      .prepare(
+        "UPDATE cand SET o1 = (SELECT n FROM temp.ordmap WHERE o = cand.o1) " +
+          "WHERE fid = ?",
+      )
+      .run(fid);
+    this.db
+      .prepare(
+        "UPDATE notes SET ord = (SELECT n FROM temp.ordmap WHERE o = notes.ord) " +
+          "WHERE folder = ?",
+      )
+      .run(folder);
+    this.db.exec("DELETE FROM temp.ordmap");
+    const out = new Map<string, number>();
+    for (const r of q.ords.all(folder) as unknown as {
+      path: string;
+      ord: number;
+    }[]) {
+      out.set(r.path, r.ord);
+    }
+    return out;
+  }
+
+  /** A folder's notes' (path, skip, tags) — the folder row's tags/warn
+   *  are recomputed from these after a delta (no term data read). */
+  folderNoteSummaries(
+    folder: string,
+  ): { path: string; skip: number; tags: string }[] {
+    return this.delta().summaries.all(folder) as unknown as {
+      path: string;
+      skip: number;
+      tags: string;
+    }[];
   }
 
   /**
@@ -1112,6 +1541,74 @@ export class SqliteOverviewStore {
       out[2 * i] = rows[i].tid;
       out[2 * i + 1] = rows[i].tf;
     }
+    return out;
+  }
+
+  /**
+   * Set up the SQL top-k scoring tables for this read phase (#126):
+   * temp.idf(df → log(1 + totalFolders / df)) with the logs computed in V8
+   * — SQLite's ln() may differ from V8's by an ULP, the bound double does
+   * not — over every df value a candidate can have (1 … stored folder
+   * count + mergedCount, the most a collapse merge can add), and
+   * temp.dfadj with the collapse correction (empty when nothing collapsed).
+   */
+  prepareScoring(
+    totalFolders: number,
+    mergedCount: number,
+    dfDelta: Map<number, number>,
+  ): void {
+    this.ensureOpen();
+    this.db.exec(
+      "CREATE TEMP TABLE IF NOT EXISTS idf(df INTEGER PRIMARY KEY, v REAL NOT NULL)",
+    );
+    this.db.exec(
+      "CREATE TEMP TABLE IF NOT EXISTS dfadj(tid INTEGER PRIMARY KEY, d INTEGER NOT NULL)",
+    );
+    this.db.exec("DELETE FROM temp.idf");
+    this.db.exec("DELETE FROM temp.dfadj");
+    const folders = (
+      this.db.prepare("SELECT count(*) AS n FROM fdir").get() as { n: number }
+    ).n;
+    const ins = this.db.prepare("INSERT INTO temp.idf(df, v) VALUES(?, ?)");
+    for (let df = 1; df <= folders + mergedCount + 1; df++) {
+      ins.run(df, Math.log(1 + totalFolders / df));
+    }
+    const adj: number[][] = [];
+    for (const [tid, d] of dfDelta) if (d !== 0) adj.push([tid, d]);
+    const insAdj = this.db.prepare(
+      "INSERT INTO temp.dfadj(tid, d) " +
+        "SELECT e.value ->> 0, e.value ->> 1 FROM json_each(?) e",
+    );
+    inChunks(adj, CHUNK, (json) => insAdj.run(json));
+    this.topStmt = this.db.prepare(
+      "SELECT c.tid FROM cand c LEFT JOIN dft d ON d.tid = c.tid " +
+        "LEFT JOIN temp.dfadj a ON a.tid = c.tid " +
+        "JOIN temp.idf i ON i.df = max(1, coalesce(d.n, 0) + coalesce(a.d, 0)) " +
+        "WHERE c.fid = ? ORDER BY c.tf * i.v DESC, c.sec, c.o1, c.o2 LIMIT ?",
+    );
+  }
+
+  /** A folder's best `limit` candidate ids by (tf·idf desc, tf order) —
+   *  prepareScoring must have run in this read phase. */
+  topCandidates(fid: number, limit: number): number[] {
+    if (this.topStmt === null) throw new Error("prepareScoring not run");
+    return (this.topStmt.all(fid, limit) as unknown as { tid: number }[]).map(
+      (r) => r.tid,
+    );
+  }
+
+  /** dft counts for a set of term ids (absent ids are left out). */
+  dfOfIds(ids: number[]): Map<number, number> {
+    this.ensureOpen();
+    const out = new Map<number, number>();
+    inChunks(ids, CHUNK, (json) => {
+      for (const r of this.stmts.dftOfIds.all(json) as unknown as {
+        tid: number;
+        n: number;
+      }[]) {
+        out.set(r.tid, r.n);
+      }
+    });
     return out;
   }
 

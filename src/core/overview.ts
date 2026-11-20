@@ -23,6 +23,8 @@ import {
   reportOverviewStoreFailure,
   type SqliteOverviewStore,
   type StoredFolderRow,
+  type StoredNoteMeta,
+  type StoredNoteRecord,
 } from "../utils/overview-store.js";
 import {
   folderDepth,
@@ -1294,22 +1296,62 @@ function topPairsCosine(a: Int32Array, b: Int32Array): number {
 function selectKeywordsById(
   store: SqliteOverviewStore,
   pairs: Int32Array,
-  df: Int32Array,
+  dfOf: (id: number) => number,
   totalFolders: number,
   maxKeywords: number,
   filter: ((id: number, tf: number) => boolean) | null,
 ): string[] {
-  const flagCache = new Map<number, number>();
   const scored: { id: number; score: number }[] = [];
   for (let i = 0; i + 1 < pairs.length; i += 2) {
     const id = pairs[i];
     const tf = pairs[i + 1];
     if (filter !== null && !filter(id, tf)) continue;
-    const docFreq = Math.max(1, df[id]);
+    const docFreq = Math.max(1, dfOf(id));
     scored.push({ id, score: tf * Math.log(1 + totalFolders / docFreq) });
   }
   scored.sort((a, b) => b.score - a.score);
+  return pickKeywords(store, scored, maxKeywords);
+}
 
+/**
+ * selectKeywordsById for a stored folder, as a SQL top-k (#126): the folder's
+ * cand rows are joined with dft (plus the collapse correction) and the JS-
+ * computed idf table, and only the best 3·maxKeywords by (score desc, then
+ * candidate order) come back — no candidate list, no dense df array.
+ *
+ * The LIMIT is exact: pickKeywords visits at most maxKeywords selected
+ * entries plus the unigram parts each selected bigram suppresses (at most
+ * two each), so it never reads past the first 3·maxKeywords entries of the
+ * stable score sort, and ORDER BY score DESC, sec, o1, o2 is that sort (the
+ * candidate order is the stable sort's tie order). The score is the same
+ * IEEE product: SQLite multiplies the integer tf by the double idf that V8
+ * computed (SqliteOverviewStore.prepareScoring).
+ */
+function selectStoredKeywords(
+  store: SqliteOverviewStore,
+  fid: number,
+  maxKeywords: number,
+): string[] {
+  const ids = store.topCandidates(fid, Math.max(1, 3 * maxKeywords));
+  return pickKeywords(
+    store,
+    ids.map((id) => ({ id })),
+    maxKeywords,
+  );
+}
+
+/**
+ * The selection walk over score-sorted candidates: take ids in order until
+ * maxKeywords are selected, skipping the unigram parts of an already
+ * selected bigram. Term text is resolved only for the selected ids and the
+ * parts of selected bigrams.
+ */
+function pickKeywords(
+  store: SqliteOverviewStore,
+  scored: readonly { id: number }[],
+  maxKeywords: number,
+): string[] {
+  const flagCache = new Map<number, number>();
   const selected: number[] = [];
   const suppressed = new Set<number>();
   for (const { id } of scored) {
@@ -1331,6 +1373,150 @@ function selectKeywordsById(
   }
   const texts = store.termTexts(selected);
   return selected.map((id) => texts.get(id) ?? "");
+}
+
+/** A changed note's role in its folder's delta (#126). */
+type NoteOp = "add" | "edit" | "del";
+
+/** What the last store sync did — a test seam (#126): which folders were
+ *  aggregated whole vs updated by per-note deltas, how many later notes
+ *  the orphan scans read, and how many folder renumbers ran. */
+const syncStats = {
+  whole: [] as string[],
+  delta: [] as string[],
+  orphanScans: 0,
+  renumbers: 0,
+};
+
+/** Test-only: the last store sync's statistics (see syncStats). */
+export function _lastOverviewSyncStats(): Readonly<typeof syncStats> {
+  return syncStats;
+}
+
+/** A stored note row decoded into the record form. */
+function storedRecord(stored: StoredNoteRecord): NoteRecord {
+  return {
+    skip: stored.skip === 1,
+    tags: JSON.parse(stored.tags) as string[],
+    heads: JSON.parse(stored.heads) as [string, number[]][],
+    data: stored.data === null ? null : i32(stored.data),
+  };
+}
+
+/** Index of the first element of a JS-sorted list that sorts after p. */
+function insertionIndex(sorted: string[], p: string): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] < p) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Apply one stored folder's note changes as per-note deltas (#126, write
+ * txn open), in path order. An added note takes the order key midway
+ * between its neighbours (last + ORD_GAP when it sorts last); when no gap
+ * is left the folder is renumbered first. Each op updates the notes table,
+ * then the folder's rows for the note's terms only. The folder row's
+ * scalars (notes, tags, warn) are recomputed from the notes' summaries in
+ * path order — the order the whole-folder aggregation builds them in.
+ */
+function applyFolderDeltas(
+  store: SqliteOverviewStore,
+  vaultPath: string,
+  folder: string,
+  ops: Map<string, NoteOp>,
+  list: string[],
+  storedPaths: string[],
+  storedNotes: Map<string, StoredNoteMeta>,
+  sigs: Map<string, OverviewFileSig>,
+): void {
+  const fid = store.folderFid(folder);
+  let ordOf = new Map<string, number>();
+  for (const p of storedPaths) {
+    ordOf.set(p, storedNotes.get(p)?.ord as number);
+  }
+  const sorted = storedPaths.slice().sort();
+  const tokens = [...folderKeywordTokens(folder)];
+  const slot = (at: number): { prev: number; next: number | null } => ({
+    prev: at > 0 ? (ordOf.get(sorted[at - 1]) as number) : 0,
+    next: at < sorted.length ? (ordOf.get(sorted[at]) as number) : null,
+  });
+  for (const p of [...ops.keys()].sort()) {
+    const kind = ops.get(p) as NoteOp;
+    let oldRec: NoteRecord | null = null;
+    let newRec: NoteRecord | null = null;
+    let ord: number;
+    if (kind === "add") {
+      const at = insertionIndex(sorted, p);
+      let { prev, next } = slot(at);
+      ord = next === null ? prev + ORD_GAP : Math.floor((prev + next) / 2);
+      if (ord <= prev || (next !== null && ord >= next)) {
+        ordOf = store.renumberFolder(fid, folder);
+        syncStats.renumbers++;
+        ({ prev, next } = slot(at));
+        ord = next === null ? prev + ORD_GAP : Math.floor((prev + next) / 2);
+      }
+      sorted.splice(at, 0, p);
+      ordOf.set(p, ord);
+    } else {
+      ord = ordOf.get(p) as number;
+      const stored = store.getNote(p);
+      if (stored !== undefined) oldRec = storedRecord(stored);
+    }
+    if (kind === "del") {
+      store.deleteNote(p, folder);
+      sorted.splice(insertionIndex(sorted, p), 1);
+      ordOf.delete(p);
+    } else {
+      const g = sigs.get(p) as OverviewFileSig;
+      newRec = extractNoteRecord(vaultPath, p, store);
+      store.upsertNote(
+        p,
+        folder,
+        g.mtime,
+        g.size,
+        newRec.skip ? 1 : 0,
+        JSON.stringify(newRec.tags),
+        JSON.stringify(newRec.heads),
+        newRec.data === null ? null : u8(newRec.data),
+        ord,
+      );
+    }
+    // Resolved after the note's terms are interned: a folder token the
+    // note introduces must already be excluded from this delta's cand rows.
+    const tokenIds = [...store.idsForTerms(tokens).values()];
+    syncStats.orphanScans += store.applyNoteDelta(
+      fid,
+      folder,
+      ord,
+      oldRec,
+      newRec,
+      tokenIds,
+      true,
+    );
+  }
+  const rows = store
+    .folderNoteSummaries(folder)
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const tags = new Set<string>();
+  const warn: string[] = [];
+  for (const r of rows) {
+    if (r.skip === 1) {
+      warn.push(`Skipping ${r.path} (malformed YAML frontmatter)`);
+    } else {
+      for (const tag of JSON.parse(r.tags) as string[]) tags.add(tag);
+    }
+  }
+  store.upsertFolder(
+    folder,
+    list.length,
+    JSON.stringify([...tags]),
+    JSON.stringify(warn),
+  );
 }
 
 /** The whole-miss pipeline over the per-note SQLite store. */
@@ -1363,10 +1549,7 @@ function overviewFromStore(
 
   // ── Sync phase: re-tokenize changed notes, re-aggregate touched ─────
   const storedNotes = wipe
-    ? new Map<
-        string,
-        { path: string; folder: string; mtime: number; size: number }
-      >()
+    ? new Map<string, StoredNoteMeta>()
     : new Map(store.noteMeta().map((m) => [m.path, m]));
   const storedByFolder = new Map<string, string[]>();
   for (const m of storedNotes.values()) {
@@ -1381,31 +1564,45 @@ function overviewFromStore(
     ? new Set<string>()
     : new Set(store.storedFolderPaths());
 
-  const toAggregate: string[] = [];
+  // A stored folder applies per-note deltas to its rows (#126): each added,
+  // edited or deleted note touches only its own terms' rows. A folder with
+  // no stored rows (new, or a wipe) is aggregated whole by streaming every
+  // note — the same rows "every note added" produces. A note whose stored
+  // folder attribution differs (or that has no order key) sends both of its
+  // folders down the whole-folder path.
+  const whole = new Set<string>();
+  const deltas = new Map<string, Map<string, NoteOp>>();
   for (const [folder, list] of folderFiles) {
-    let dirty = !storedFolders.has(folder);
-    if (!dirty) {
-      for (const f of list) {
-        const s = storedNotes.get(f);
-        const g = sigs.get(f);
-        if (!s || s.mtime !== g?.mtime || s.size !== g?.size) {
-          dirty = true;
-          break;
-        }
+    if (!storedFolders.has(folder)) {
+      whole.add(folder);
+      continue;
+    }
+    const ops = new Map<string, NoteOp>();
+    for (const f of list) {
+      const s = storedNotes.get(f);
+      const g = sigs.get(f);
+      if (!s) {
+        ops.set(f, "add");
+      } else if (s.folder !== folder) {
+        whole.add(folder);
+        whole.add(s.folder);
+      } else if (s.mtime !== g?.mtime || s.size !== g?.size) {
+        ops.set(f, "edit");
       }
     }
-    if (!dirty) {
-      for (const p of storedByFolder.get(folder) ?? []) {
-        if (!sigs.has(p)) {
-          dirty = true;
-          break;
-        }
-      }
+    const listSet = new Set(list);
+    for (const p of storedByFolder.get(folder) ?? []) {
+      if (storedNotes.get(p)?.ord == null) whole.add(folder);
+      if (!listSet.has(p)) ops.set(p, "del");
     }
-    // dirty: a note was added/edited/removed — re-aggregate (re-reading
-    // note blobs, re-tokenizing only what changed).
-    if (dirty) toAggregate.push(folder);
+    if (ops.size > 0) deltas.set(folder, ops);
   }
+  for (const folder of whole) deltas.delete(folder);
+  const toAggregate = [...folderFiles.keys()].filter((f) => whole.has(f));
+  syncStats.whole = toAggregate;
+  syncStats.delta = [...deltas.keys()];
+  syncStats.orphanScans = 0;
+  syncStats.renumbers = 0;
   const foldersToDelete: string[] = [];
   for (const folder of storedFolders.keys()) {
     // Beyond-depth rows are carried over: the bounded walk cannot verify
@@ -1422,6 +1619,7 @@ function overviewFromStore(
   if (
     wipe ||
     toAggregate.length > 0 ||
+    deltas.size > 0 ||
     foldersToDelete.length > 0 ||
     dfDepthMismatch
   ) {
@@ -1515,6 +1713,18 @@ function overviewFromStore(
           JSON.stringify(warn),
         );
       }
+      for (const [folder, ops] of deltas) {
+        applyFolderDeltas(
+          store,
+          vaultPath,
+          folder,
+          ops,
+          folderFiles.get(folder) ?? [],
+          storedByFolder.get(folder) ?? [],
+          storedNotes,
+          sigs,
+        );
+      }
       for (const folder of foldersToDelete) store.deleteFolder(folder);
       store.flushColdTerms();
       store.endWrite(true);
@@ -1543,9 +1753,13 @@ function overviewFromStore(
 
     // Document frequency over the run's folders — exact by construction:
     // dft counts every stored folder at depth ≤ df_depth, which is exactly
-    // the live set after the sync phase.
-    const df = new Int32Array(store.maxTermId() + 1);
-    store.fillDf(df);
+    // the live set after the sync phase. It is read per scored folder (cand
+    // joined with dft), never materialised as a dictionary-sized array;
+    // dfDelta holds the collapse correction on top of it.
+    const dfDelta = new Map<number, number>();
+    const bump = (id: number, by: number): void => {
+      dfDelta.set(id, (dfDelta.get(id) ?? 0) + by);
+    };
 
     // ── Collapse decision (mirror of collapseHomogeneousSiblings) ──
     const removed = new Set<string>();
@@ -1639,10 +1853,10 @@ function overviewFromStore(
       const row = rowByPath.get(folder);
       if (!row) continue;
       const ids = store.folderTfIds(row.fid);
-      for (let i = 0; i < ids.length; i++) df[ids[i]]--;
+      for (let i = 0; i < ids.length; i++) bump(ids[i], -1);
     }
     for (const data of mergedData.values()) {
-      for (let i = 0; i < data.tf.length; i += 2) df[data.tf[i]]++;
+      for (let i = 0; i < data.tf.length; i += 2) bump(data.tf[i], 1);
     }
 
     // ── Final row list (same ordering rules as buildOverviewRows) ──
@@ -1676,6 +1890,9 @@ function overviewFromStore(
       return a.path.localeCompare(b.path);
     });
     const totalFolders = entries.length;
+    // The SQL top-k inputs: idf per df value (computed here, in V8) and
+    // the collapse correction on top of dft.
+    store.prepareScoring(totalFolders, mergedData.size, dfDelta);
 
     // Warnings replay in cold order: folder listing order, then file order —
     // exactly what each folder stored when it was (re)aggregated.
@@ -1711,23 +1928,19 @@ function overviewFromStore(
             }
             return !headOnly.has(id) || (head.get(id) || 0) >= 2;
           };
+          const ids: number[] = [];
+          for (let k = 0; k < e.data.tf.length; k += 2) ids.push(e.data.tf[k]);
+          const base = store.dfOfIds(ids);
           keywords = selectKeywordsById(
             store,
             e.data.tf,
-            df,
+            (id) => (base.get(id) ?? 0) + (dfDelta.get(id) ?? 0),
             totalFolders,
             maxKeywords,
             filter,
           );
         } else if (e.row) {
-          keywords = selectKeywordsById(
-            store,
-            store.folderCandPairs(e.row.fid),
-            df,
-            totalFolders,
-            maxKeywords,
-            null,
-          );
+          keywords = selectStoredKeywords(store, e.row.fid, maxKeywords);
         }
       }
       const tags = e.data
