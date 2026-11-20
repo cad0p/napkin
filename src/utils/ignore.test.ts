@@ -228,6 +228,53 @@ describe("ignoreFingerprint", () => {
   });
 });
 
+describe("ignoreFingerprint — content, not location or mtime (#128)", () => {
+  test("equal for a copy of the vault in another directory", () => {
+    fs.writeFileSync(path.join(vault.vaultPath, ".napkinignore"), "a.md\n");
+    fs.writeFileSync(path.join(vault.vaultPath, ".gitignore"), "b.md\n");
+    const before = ignoreFingerprint(vault.vaultPath, vault.vaultPath);
+    const copy = createTempVault({});
+    try {
+      fs.rmSync(copy.vaultPath, { recursive: true, force: true });
+      // No preserveTimestamps: a clone or a plain copy gets fresh mtimes.
+      fs.cpSync(vault.vaultPath, copy.vaultPath, { recursive: true });
+      expect(ignoreFingerprint(copy.vaultPath, copy.vaultPath)).toBe(before);
+    } finally {
+      copy.cleanup();
+    }
+  });
+
+  test("unchanged when an ignore file is rewritten with the same rules", () => {
+    const file = path.join(vault.vaultPath, ".gitignore");
+    fs.writeFileSync(file, "b.md\n");
+    const before = ignoreFingerprint(vault.vaultPath, vault.vaultPath);
+    fs.writeFileSync(file, "b.md\n");
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(file, later, later);
+    expect(ignoreFingerprint(vault.vaultPath, vault.vaultPath)).toBe(before);
+  });
+
+  test("changes on a same-length edit with the mtime put back", () => {
+    const file = path.join(vault.vaultPath, ".napkinignore");
+    fs.writeFileSync(file, "a.md\n");
+    const before = ignoreFingerprint(vault.vaultPath, vault.vaultPath);
+    const stat = fs.statSync(file);
+    fs.writeFileSync(file, "b.md\n");
+    fs.utimesSync(file, stat.atime, stat.mtime);
+    expect(ignoreFingerprint(vault.vaultPath, vault.vaultPath)).not.toBe(
+      before,
+    );
+  });
+
+  test("an empty file differs from an absent one", () => {
+    const before = ignoreFingerprint(vault.vaultPath, vault.vaultPath);
+    fs.writeFileSync(path.join(vault.vaultPath, ".napkinignore"), "");
+    expect(ignoreFingerprint(vault.vaultPath, vault.vaultPath)).not.toBe(
+      before,
+    );
+  });
+});
+
 describe("loadIgnorer memoization", () => {
   test("returns the same instance while the fingerprint is unchanged", () => {
     fs.writeFileSync(path.join(vault.vaultPath, ".napkinignore"), "a.md\n");
