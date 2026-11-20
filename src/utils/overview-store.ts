@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { loadSqlite } from "./sqlite-store.js";
+import { loadSqlite, type SqliteModule } from "./sqlite-loader.js";
 
 /**
  * The SQLite per-note overview store (#118).
@@ -78,7 +78,6 @@ import { loadSqlite } from "./sqlite-store.js";
  * folder cache.
  */
 
-type SqliteModule = typeof import("node:sqlite");
 type DatabaseSync = import("node:sqlite").DatabaseSync;
 type StatementSync = import("node:sqlite").StatementSync;
 

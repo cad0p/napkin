@@ -70,7 +70,7 @@ import {
   getUnresolvedLinks,
 } from "./core/links.js";
 import { getOutline } from "./core/outline.js";
-import { getOverview, type VaultOverview } from "./core/overview.js";
+import type { VaultOverview } from "./core/overview.js";
 import {
   collectProperties,
   readProperty,
@@ -100,6 +100,7 @@ import {
 } from "./core/templates.js";
 import { getVaultMetadata, type VaultMetadata } from "./core/vault.js";
 import { getWordCount, type WordCount } from "./core/wordcount.js";
+import { type OverviewOptions, overviewForVault } from "./overview-entry.js";
 import { registerTemplate } from "./templates/index.js";
 import type { VaultTemplate } from "./templates/types.js";
 import { type Ignorer, loadIgnorer } from "./utils/ignore.js";
@@ -154,20 +155,10 @@ export class Napkin {
     return getVaultMetadata(this.vault);
   }
 
-  overview(opts?: {
-    depth?: number;
-    keywords?: number;
-    collapse?: boolean;
-    collapseDepth?: number;
-    maxRows?: number;
-  }): VaultOverview & { root: string } {
-    // Root is attached fresh at the SDK layer, after the (possibly cached)
-    // core result — it must never be persisted into the overview cache, or a
-    // moved vault would serve a stale root.
-    return {
-      ...getOverview(this.vault.contentPath, this.vault.configPath, opts),
-      root: this.vault.contentPath,
-    };
+  overview(opts?: OverviewOptions): VaultOverview & { root: string } {
+    // Shared with the @cad0p/napkin/overview entry (#123): one helper so the
+    // two can never diverge.
+    return overviewForVault(this.vault, opts);
   }
 
   // ── Search ──────────────────────────────────────────────────────

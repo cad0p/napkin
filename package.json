@@ -21,6 +21,11 @@
       "types": "./dist/utils/vault.d.ts",
       "import": "./dist/utils/vault.js",
       "default": "./dist/utils/vault.js"
+    },
+    "./overview": {
+      "types": "./dist/overview-entry.d.ts",
+      "import": "./dist/overview-entry.js",
+      "default": "./dist/overview-entry.js"
     }
   },
   "bin": {

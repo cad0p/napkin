@@ -1,7 +1,25 @@
-import matter from "gray-matter";
+import { createRequire } from "node:module";
+import type matter from "gray-matter";
 
-// Runtime-only API not present in gray-matter's type declarations.
-const matterCache = matter as unknown as { clearCache: () => void };
+/**
+ * gray-matter (with js-yaml and esprima) is loaded lazily on the first
+ * parse, not at module load: the slim `@cad0p/napkin/overview` entry
+ * (#123) reaches this module through core/overview.ts, but an all-hit
+ * overview run never parses frontmatter — deferring the require keeps that
+ * dependency out of processes that only read the overview caches.
+ * `createRequire` is used because gray-matter is CJS.
+ */
+type Matter = typeof matter;
+type GrayMatterFile = matter.GrayMatterFile<string>;
+
+let matterModule: Matter | undefined;
+
+function loadMatter(): Matter {
+  if (matterModule === undefined) {
+    matterModule = createRequire(import.meta.url)("gray-matter") as Matter;
+  }
+  return matterModule;
+}
 
 /**
  * gray-matter caches the file object keyed by content BEFORE parsing it, so
@@ -10,11 +28,13 @@ const matterCache = matter as unknown as { clearCache: () => void };
  * Evict the cache when parsing throws so every parse of malformed content
  * fails deterministically.
  */
-function safeMatter(content: string): matter.GrayMatterFile<string> {
+function safeMatter(content: string): GrayMatterFile {
+  const matter = loadMatter();
   try {
     return matter(content);
   } catch (err) {
-    matterCache.clearCache();
+    // Runtime-only API not present in gray-matter's type declarations.
+    (matter as unknown as { clearCache: () => void }).clearCache();
     throw err;
   }
 }
@@ -45,6 +65,7 @@ export function setProperty(
   name: string,
   value: unknown,
 ): string {
+  const matter = loadMatter();
   const result = safeMatter(content);
   const data = { ...result.data, [name]: value };
   return matter.stringify(result.content, data);
@@ -54,6 +75,7 @@ export function setProperty(
  * Remove a property from frontmatter.
  */
 export function removeProperty(content: string, name: string): string {
+  const matter = loadMatter();
   const result = safeMatter(content);
   const data = { ...result.data };
   delete data[name];
